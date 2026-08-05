@@ -1,0 +1,53 @@
+# nodejax and the other JAX frameworks
+
+Contrasted: equinox, flax.linen, flax.nnx, haiku. The axes, in order of how much they matter: what a model is, how state is handled, whether composition is reusable, where training lives, how sharing works, and last the ergonomics, randomness included. Claims about nodejax refer to the package as it stands; claims about the others refer to their documented idioms. The goal is a fair account in both directions.
+
+## What a model is
+
+Equinox: a module is a pytree containing its parameters, with static fields filtered out at transform boundaries. The pytree-is-the-object insight is brilliant, and nodejax inherits it deliberately. Flax linen: a module is a stateless description; parameters live in a separate variable dict returned by `init` and threaded by the caller. Flax nnx: a module is a mutable Python object holding params and state together, split back apart by `nnx.split` at JAX boundaries. Haiku: a module is code inside an implicit traced context; `hk.transform` turns it into (init, apply) functions over a params dict.
+
+nodejax: a node is a definition (three pure functions plus metadata) bound to a parameter pytree. The bound node flattens to exactly its params, so `jax.grad` of a loss with respect to a model is simply `jax.grad`, with no filtering step and no static-field machinery: behavior rides outside the tree by construction. Where the others subclass, nodejax has `derive`, which replaces one function of an existing definition and keeps the rest.
+
+## State
+
+This is the axis nodejax exists for. The low level JAX API is state-shaped (`lax.scan` carries, key threading) and applications are state-shaped (optimizer moments, running statistics, simulator state), so middleware that hides state pays at both boundaries.
+
+Equinox declines to make state a library concept; its own docs handle stateful layers with a per-case `eqx.nn.State` idiom. For linear ML architectures that is a defensible simplification. Compose a system with a hundred small pieces of state (a motor controller simulation, a deep recurrent committee) and the glue code for threading member state becomes most of the codebase. Flax linen makes state a framework concept but a flag-gated, mutable one: variable collections, `mutable=` at call sites, train/eval switches. nnx goes further and merges params and state into one mutable substance, then provides transformations to split them apart again, which inverts the actual situation: params and state are different things to JAX below and to the user above. Haiku composes state well through `hk.get_state`, at the price of an implicit context.
+
+This claim has a runnable receipt: the compositional IMU sensor (two primed derivatives, a noise stream, a wandering bias, a quantizer) exists twice in the repository, as five defs and one `>>` line in `nodejax/tests/test_imu.py`, and as idiomatic equinox in `nodejax/examples/comparisons/imu_equinox.py`, where the hand-written state container, the hand-composed init with its key-split bookkeeping, and the name-by-name threading step are visibly glue rather than physics. The sharper measure is the cost of change: inserting one stateful member mid-pipe is one term in the `>>` line on one side, and on the other touches the container, the init, the split count, the step, and every caller holding the container's shape. That cost is per iteration, which is why a full actuator stack (battery, estimator, FOC, motor: a hundred small pieces of state) came out an order of magnitude smaller on this side of the comparison.
+
+nodejax gives state a reserved slot in the one contract, `apply(params, state, input) -> (state, output)`. Every component fills it with whatever it carries: an RNN its hidden state, batchnorm its running statistics (so "eval mode" is reusing a frozen state and the flag disappears), a plant its physical state, a trainer the model it is training. Composition composes the slot: a pipe's state is the named tree of member states, with no threading code anywhere in user land. The state slot is also where nodejax's characteristic moves live: `train_step` moves params INTO state, `ttt` does it per step, and a target network is an EMA filter applied to a state subtree.
+
+## Composition and transforms
+
+Flax linen lifts JAX transforms per use: `nn.scan`, `nn.vmap`, each call site specifying how every variable collection and rng maps over the axis. Equinox uses filtered transforms (`filter_vmap`, `filter_grad`) with the filtering spec at each site. Haiku's lifting story is its weakest corner by its own admission.
+
+nodejax reads the mapping rules off the contract instead of asking per call site: a node declares which tree is params and which is state, so `batch` knows params are shared and state is per-element, `ensemble` knows both map, `scan` knows what to carry, with no `in_axes` bookkeeping anywhere. Transforms consume nodes and produce nodes, so they nest: `train_step(batch(finetune(model, loss, sgd)))` is MAML. Each transform is a few dozen lines of user-level code against the public contract, which is also the escape hatch: a training scheme the library never anticipated (a GAN's cross-feeding trainers, BYOL's weight-smoothed target) is written against the same surface and composes with everything else.
+
+A litmus test for reusable composition: write `ttt` once, a wrapper that demotes ANY component's weights to per-step state and makes the state transition one gradient step, then apply it to a recurrent component so adapted weights carry alongside a live hidden state, and scan, batch, and outer-train the result. In nodejax this is one transform of about forty lines, because every component declares which tree is params and which is state, and the wrapper just moves data between two declared slots. A one-off TTT model is writable in any of the four comparators. The GENERIC wrapper is a different matter: haiku buries params and state in its context, so intercepting an arbitrary inner module means fighting `hk.lift`; linen requires per-collection lifting rules at every boundary the wrapper crosses; equinox works generic for stateless inners, since modules are pytrees, but has no declared state slot, so the recurrent case can not be written generically. The same asymmetry applies to other node transforms like `train_step` and `finetune`: the contract is what turns these from per-model idioms into library one-liners.
+
+## Where training lives
+
+In all four other frameworks, training is above the library: you write the (model, opt_state) loop, or use a separate trainer package. nodejax puts it inside: `train_step(node, loss, opt)` is a node whose state holds the model, so a training run is a scan, trainers nest inside models and models inside trainers, and things like learned learning rates or replay-and-score meta-objectives are ordinary composition. Nothing in equinox, flax, or haiku plays this role, and it is the single largest practical difference: the examples that fall out (population training as one line, meta-learned GAN rates, test-time training with a recurrent inner model) are research codebases elsewhere.
+
+## Parameter sharing
+
+nnx's documentation argues modules must not be pytrees because pytree boundaries silently lose shared references. nodejax's answer is to make sharing structural rather than referential: `tie` stores one copy in the param tree and inserts it at every consumer's slot at apply time. There is no second reference to lose; jit and tree_map cannot desynchronize it, gradients from all uses accumulate by the chain rule, and the property is a test, not a convention. The archetypes are the classics: an autoencoder's encoder and decoder sharing weights, an LM's embed and unembed sharing one table. Sharing is reserved for what is one object by definition; two components that merely happen to agree today (a controller's plant model and the plant itself) stay separate objects, free to disagree.
+
+## Randomness
+
+Randomness handling is ergonomics rather than architecture: every framework's answer is sugar over explicit keys, differing in taste. nodejax's flavor is a declared dependency: a function that draws names `rng` in its signature, calls `rng.next()` per draw, and the caller owes one key at the outermost boundary, split correctly toward every component that declared the need. Never optional, never conjured, and components that initialize from explicit values (PID gains, plant constants) simply do not declare it. The one variant with a real cost is haiku's implicit context, where distant code changes shift your streams. Equinox's fully manual keys and flax's rngs dicts are fine; they are just more typing at composition boundaries.
+
+## What the others do better
+
+Shape inference: flax's lazy init is smoother. nodejax resolves shapes from an example input (`with_input(x)`), and when nothing determines a shape you are asked for one; the machinery is younger than the rest of the library and allowed to fail toward explicitness.
+
+Maturity and ecosystem: all four comparators are released, documented, battle-tested, and surrounded by model zoos, checkpoints, and integrations. nodejax is a working prototype whose 227 tests are its documentation; its vocabulary is still settling and it has no released package.
+
+Ergonomic mutation: for quick single-model experimentation, nnx's mutable objects and linen's compact module bodies are less ceremony than writing three functions. nodejax's explicitness pays off in composition and in systems work; for a lone MLP it is simply more typing.
+
+Interop: equinox composes with arbitrary pytree-based code particularly well, precisely because it adds so little structure. On this axis nodejax is closer to equinox than the contract-heavy framing suggests: `apply_fn` is an ordinary function over ordinary pytrees, so any piece of a node can be handed to raw JAX or another library, and any pure function wraps into a node in a few lines. The real cost is the convention itself: three functions in a fixed shape is more ceremony than equinox asks for a stateless layer.
+
+## Summary judgments, one line each
+
+Haiku: right instincts about state, wrapped in an implicit context nodejax exists to avoid. Equinox: the pytree-is-the-object idea done beautifully, stopping one concept short of what stateful systems need. Flax linen: state acknowledged but gated behind collections, flags, and per-site lifting rules. Flax nnx: ergonomic mutability bought by merging what JAX and users both keep separate. nodejax: one contract with a reserved seat for state, transforms that read it, and training inside the algebra; younger, smaller, and more explicit than all of them.

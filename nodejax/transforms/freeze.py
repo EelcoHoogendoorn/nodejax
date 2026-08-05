@@ -1,0 +1,121 @@
+"""Hold things fixed: freeze/tree_freeze pin STATE, detach pins WEIGHTS.
+
+freeze pins a whole node's state and drops its cyclic slot. tree_freeze
+does it selectively from a SPARSE spec — a Struct with a field only for
+each member to freeze: a field holding that node's state freezes it
+whole, a field holding a sub-spec Struct descends, an absent field stays
+threaded. So freezing one node by hand is `tree_freeze(model,
+Struct(norm=state.norm))`, a full state freezes everything, and
+tree_filter builds a partial spec by name. Composites are rebuilt from
+their members, so cyclicity propagates (a composite whose stateful
+members all froze recomputes to non-cyclic).
+
+detach is the param-side twin: it stops gradient through a node's
+weights, so training leaves them fixed. Selective weight-freezing is
+detach composed with the map_members walk.
+"""
+
+from __future__ import annotations
+
+from typing import Callable
+
+import jax
+
+from nodejax.struct import Struct
+from nodejax.core import Node, NodeDef, Composite, _trivial_init_fn
+from nodejax.transforms.common import _split, _rewrap
+
+
+def _freeze_def(nd: NodeDef, state) -> NodeDef:
+    def apply(p, _, input):
+        _, out = nd.apply_fn(p, state, input)
+        return (), out
+
+    return NodeDef(f'freeze({nd.name})', nd._param_impl, _trivial_init_fn, apply,
+                   nd.parametric, cyclic=False,
+                   param_input_spec=nd.param_input_spec if nd.parametric else None)
+
+
+def freeze(node: NodeDef | Node, state) -> NodeDef | Node:
+    """Hold a node's whole state fixed: the result applies with `state`,
+    discards the returned update, and is non-cyclic. Params unchanged."""
+    nd, param = _split(node)
+    return _rewrap(_freeze_def(nd, state), param)
+
+
+def detach(node: NodeDef | Node) -> NodeDef | Node:
+    """Stop gradient through a node's params: training leaves its weights
+    fixed (they receive zero gradient), state and behaviour otherwise
+    unchanged."""
+    nd, param = _split(node)
+
+    def apply(p, s, i):
+        return nd.apply_fn(jax.lax.stop_gradient(p), s, i)
+
+    detached = NodeDef(f'detach({nd.name})', nd._param_impl, nd._init_impl, apply,
+                       nd.parametric, nd.cyclic,
+                       init_requires_input=nd.init_requires_input,
+                  init_reads_shape=nd.init_reads_shape,
+                       param_input_spec=nd.param_input_spec if nd.parametric else None,
+                       state_input_spec=nd.state_input_spec if nd.cyclic else None)
+    return _rewrap(detached, param)
+
+
+def tree_detach(node: NodeDef | Node, name: str | Callable[[str], bool]) -> NodeDef | Node:
+    """Detach the weights of the members `name` matches (by key),
+    descending into the rest. The param-side twin of tree_freeze — but
+    it selects by name directly rather than by a spec, because detaching
+    needs no state values, only which nodes. `name`: substring or a
+    predicate on a member key. Matching nothing is an error: a selective
+    walk that selects nothing was aimed at the wrong tree."""
+    match = (lambda n: name in n) if isinstance(name, str) else name
+    nd, param = _split(node)
+    if not isinstance(nd, Composite):
+        raise TypeError(f"tree_detach selects members and '{nd.name}' has none; "
+                        'detach(node) stops gradient through a leaf whole')
+    rebuilt, hits = _detach_walk(nd, match)
+    if hits == 0:
+        raise ValueError(f"tree_detach: {name!r} matched no member of '{nd.name}'")
+    return _rewrap(rebuilt, param)
+
+
+def _detach_walk(nd: Composite, match: Callable[[str], bool]) -> tuple[NodeDef, int]:
+    new, hits = {}, 0
+    for k, m in nd.members.items():
+        if match(k):
+            new[k] = detach(m)                      # detach the matching subtree
+            hits += 1
+        elif isinstance(m, Composite):
+            new[k], sub = _detach_walk(m, match)    # descend
+            hits += sub
+        else:
+            new[k] = m
+    return nd.rebuild(new), hits
+
+
+def tree_freeze(node: NodeDef | Node, frozen: Struct) -> NodeDef | Node:
+    """Freeze the members present in `frozen` (a sparse Struct spec): a
+    composite member descends, a leaf member is frozen with its state, an
+    absent member stays threaded. Composites rebuild, so cyclicity
+    propagates. Every spec field must land on a member — a field naming
+    nothing is an error, so a spec aimed at structure a def does not
+    expose fails at the call, never later inside an apply."""
+    nd, param = _split(node)
+    if not isinstance(nd, Composite):
+        raise TypeError(f"tree_freeze selects members and '{nd.name}' has none; "
+                        'freeze(node, state) pins a leaf whole')
+    present = {k for k, _ in frozen.__items__}
+    unknown = present - set(nd.members)
+    if unknown:
+        raise TypeError(f"tree_freeze: {sorted(unknown)} name no member of '{nd.name}'")
+    new = {}
+    for k, m in nd.members.items():
+        if k not in present:
+            new[k] = m                              # absent -> keep threaded
+        elif isinstance(m, Composite):
+            new[k] = tree_freeze(m, frozen[k])            # composite -> descend
+        elif m.cyclic:
+            new[k] = freeze(m, frozen[k])                 # leaf -> freeze whole
+        else:
+            new[k] = m
+    return _rewrap(nd.rebuild(new), param)

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nodejax"
+version = "0.1.0"
+description = "Stateful computation composed the way JAX composes functions: models, simulators, and trainers as one kind of object."
+readme = "README.md"
+authors = [{name = "Eelco Hoogendoorn"}]
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["jax", "optax"]
+
+[project.optional-dependencies]
+test = ["pytest", "scikit-learn"]
+comparisons = ["equinox", "flax", "torch"]
+
+[tool.setuptools.packages.find]
+include = ["nodejax*"]
+
+[project.urls]
+Homepage = "https://github.com/EelcoHoogendoorn/nodejax"

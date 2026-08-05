@@ -1,0 +1,551 @@
+"""Composition: serial pipes and hand-wired composites over named members.
+
+Param and state compose as Structs keyed by member name — including trivial
+()s, so no member kind is special. A pipe of generics is itself generic,
+its statics the nested tree of member statics. `>>` flattens across
+nesting and dispatches to the right stage.
+"""
+
+from __future__ import annotations
+
+import inspect
+import re
+from functools import partial
+from typing import Any, Callable
+
+import jax
+import jax.numpy as jnp
+
+from nodejax.struct import Struct
+from nodejax.core import (Node, NodeDef, Composite, split_aux, _input_or_none,
+                                _resolve, _bundle_spec_from_sig, REQUIRED,
+                                _hoist_apply_rng, hoist_rng, _has_rng)
+from nodejax.authoring import (KeyStream, _lift_param, _lift_init,
+                                     _state_spec_from_sig, _init_requires_input)
+from nodejax.generic import GenericDef
+from nodejax.wiring import (_wrap_apply, _Wired, _InitWired, _BuildingWired,
+                                  _Solo, _NO_INPUT)
+from nodejax.spec import materialize
+
+
+def serial(**named: NodeDef | Node) -> NodeDef | Node:
+    """Compose named nodes into a serial pipe.
+
+    All members Node -> bound Node; otherwise a NodeDef. Param and
+    state compose as Structs keyed by member name — including trivial
+    ()s, so no member kind is special. Bound parametric members are
+    transport containers: the def joins the pipe, the params become
+    stored construction values that parameterize uses wherever kwargs
+    leave the slot open — a >> b()(gain=2.0) spells the member tree
+    once, at the composition site."""
+    if not named:
+        raise TypeError('serial() needs at least one member')
+    if all(v.bound for v in named.values()):
+        defs = {nm: v.ndef for nm, v in named.items()}
+        return _pipe_def(defs).bind(Struct(**{nm: v.param for nm, v in named.items()}))
+    defs, given = _promote_members(named)
+    return _pipe_def(defs, given)
+
+
+def serial_generic(**named: GenericDef) -> GenericDef:
+    """Compose named generics into a serial pipe that is itself generic:
+    specialize takes nested statics keyed by member name (members needing
+    no statics may be omitted), and returns the specialized serial pipe."""
+    names = list(named)
+
+    def specialize_fn(**statics: Any) -> NodeDef | Node:
+        unknown = set(statics) - set(names)
+        if unknown:
+            raise TypeError(f'unknown generic pipe members: {sorted(unknown)}')
+        return serial(**{nm: named[nm].specialize(**statics.get(nm, {})) for nm in names})
+
+    return GenericDef('(' + ' >> '.join(names) + ')', specialize_fn, members=dict(named))
+
+
+def _as_generic(x: GenericDef | NodeDef | Node) -> GenericDef:
+    """Promote a pipe member to the generic stage: already-specialized
+    members become constant generics taking no statics."""
+    if isinstance(x, GenericDef):
+        return x
+    nd = x.ndef
+    if x.bound and x.param != ():
+        raise TypeError(f"cannot lift bound parametric node '{nd.name}' into a generic pipe")
+
+    def constant(**statics: Any) -> NodeDef:
+        # broadcasts ('*.name') are to-whom-it-may-concern; constants are
+        # not concerned — explicit statics remain an error
+        statics = {k: v for k, v in statics.items() if not k.startswith('*.')}
+        if statics:
+            raise TypeError(f"pipe member '{nd.name}' takes no static arguments")
+        return nd
+
+    return GenericDef(nd.name, constant)
+
+
+def _given_defaults(spec: Struct, given: dict[str, Any]) -> Struct:
+    """Overlay stored constructions onto a composite's bundle spec: each
+    pre-bound member's slot carries its finished param as the slot DEFAULT
+    (whole-slot replacement — a finished param is not a field spec to merge
+    into). The spec thereby states what binding made optional."""
+    merged = dict(spec.__items__)
+    merged.update(given)
+    return Struct(**merged)
+
+
+def _probe_seed(d: NodeDef) -> Struct:
+    """The seed for a state built only to walk PAST a member: a throwaway
+    key where its bundle wants one, nothing else. The probe state is
+    discarded (the param walk keeps only the carry it advances)."""
+    return (Struct(rng=jax.random.PRNGKey(0))
+            if 'rng' in d.state_input_spec else Struct())
+
+
+def _step_carry(d: NodeDef, param: Any, state: Any, carry: Any, nm: str) -> Any:
+    """Advance the walk's carry through one member: run its apply on the
+    carry and pass the clean output on (aux diverted off). A member that
+    consumes apply-rng gets a probe key (the walk derives shapes; the draw
+    is discarded). Failures name the member — a shape mismatch surfaces at
+    the member that broke, not downstream."""
+    if d.apply_takes_rng and not _has_rng(carry):
+        carry = carry.replace(rng=jax.random.PRNGKey(0))   # probe key; discarded
+    try:
+        _, out = d.apply_fn(param, state, carry)
+    except Exception as e:
+        raise TypeError(f"walk failed at member '{nm}': {e}") from e
+    return split_aux(out)[0]
+
+
+def _member_param(nm: str, d: NodeDef, recipe: Any, key: Any, input: Any = None):
+    """Construct one member's params through the entry: the recipe
+    sub-bundle (a Struct, or None for a slot the bundle leaves open) becomes
+    the member's bundle, extended with a split of the composite key when the
+    member's bundle spec wants rng. A call-site carry resolves the member's
+    def, and a shape-reading ctor reads it there — nothing reserved rides
+    the bundle. Returns (param, key), the key advanced iff a split was
+    routed."""
+    if not d.parametric:
+        return (), key
+    bundle = recipe if recipe is not None else Struct()
+    if key is not None and 'rng' in d.param_input_spec and 'rng' not in bundle:
+        key, sub_ = jax.random.split(key)
+        bundle = bundle.replace(rng=sub_)
+    if input is not None:
+        d = _resolve(d, input)              # the member reads its call-site shape via its def
+    try:
+        return d.build_param(bundle), key
+    except TypeError as e:
+        raise TypeError(f"member '{nm}': {e}") from e
+
+
+def _pipe_def(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> NodeDef:
+    """Build the def of a serial pipe over named member defs;
+    `given` carries stored construction values per member."""
+    names = list(defs)
+    given = given or {}
+
+    def param_fn(ndef, param_input=Struct()):
+        """The pipe's param constructor: member slots of the bundle
+        are recipes, a boundary rng field splits toward members whose bundles
+        want one, and — when the pipe's def carries an input spec — the carry
+        is threaded member by member (each member's def resolved to its own
+        upstream shape, each probed init+apply deriving the next member's).
+        Stored constructions (bound members at composition) fill slots the
+        bundle leaves open."""
+        key = param_input.rng if 'rng' in param_input else None
+        carry = _input_or_none(ndef)
+        parts = {}
+        for nm in names:
+            d = defs[nm]
+            recipe = param_input[nm] if nm in param_input else None
+            if recipe is None and nm in given:
+                parts[nm] = given[nm]         # stored construction values
+            else:
+                parts[nm], key = _member_param(nm, d, recipe, key, input=carry)
+            if carry is not None:             # the shape walk: derive the next shape
+                s = _resolve(d, carry).build_state(parts[nm], _probe_seed(d), input=carry)
+                carry = _step_carry(d, parts[nm], s, carry, nm)
+        return Struct(**parts)
+
+    def init_fn(ndef, param, state_input=Struct(), input=None):
+        """The pipe's init: member slots of the seed bundle are the
+        members' seeds, a boundary rng field splits toward members whose
+        bundles want one, and the input value (or the def's bound spec)
+        threads member by member — each member's def resolved to its own
+        upstream shape, each apply deriving the next member's carry."""
+        carry = input if input is not None else _input_or_none(ndef)
+        key = state_input.rng if 'rng' in state_input else None
+        states = {}
+        for nm in names:
+            d = defs[nm]
+            seed = state_input[nm] if nm in state_input else Struct()
+            if key is not None and 'rng' in d.state_input_spec and 'rng' not in seed:
+                key, sub_ = jax.random.split(key)
+                seed = seed.replace(rng=sub_)
+            d2 = d if carry is None else _resolve(d, carry)
+            try:
+                states[nm] = d2.build_state(param[nm], seed, input=carry)
+            except TypeError as e:
+                raise TypeError(f"pipe member '{nm}': {e}") from e
+            if carry is not None:
+                carry = _step_carry(d, param[nm], states[nm], carry, nm)
+        return Struct(**states)
+
+    # apply-side rng requirement bubbles: the pipe consumes rng iff a member's
+    # apply does. The caller passes ONE key in its input bundle; the pipe
+    # splits it toward each consuming member, injected as that member's rng
+    # input field (entropy never rides the wire — an upstream member does not
+    # emit keys).
+    rng_members = {nm: defs[nm].apply_takes_rng for nm in names}
+    boundary_rng = any(rng_members.values())
+
+    def apply_fn(param, state, input):
+        """Members chain on the carry; a member returning (output, aux)
+        has the aux diverted into the pipe's own collection, keyed by
+        member name, while the clean signal flows on. If any aux was
+        collected the pipe re-emits (carry, collection) — the same pair
+        shape, so the channel nests through enclosing composites
+        (see core.split_aux for the output doctrine)."""
+        key = None
+        carry = input
+        if boundary_rng:
+            key = input.rng                  # missing key fails here, loudly
+            carry = input.without('rng')
+        new_states, aux = {}, {}
+        for nm in names:
+            member_in = carry
+            if rng_members[nm]:
+                key, sub = jax.random.split(key)
+                if not isinstance(member_in, Struct):
+                    raise TypeError(f"pipe member '{nm}' consumes rng from its input; "
+                                    'the signal into it must be a named Struct to '
+                                    'carry the key alongside the data')
+                member_in = Struct(**dict(member_in.__items__), rng=sub)
+            new_states[nm], out = defs[nm].apply_fn(param[nm], state[nm], member_in)
+            carry, member_aux = split_aux(out)
+            if member_aux is not None:
+                aux[nm] = member_aux
+        if aux:
+            return Struct(**new_states), (carry, Struct(**aux))
+        return Struct(**new_states), carry
+
+    head = defs[names[0]]
+    return Composite(
+        name='(' + ' >> '.join(names) + ')',
+        param_fn=param_fn,
+        init_fn=init_fn,
+        apply_fn=apply_fn,
+        parametric=any(d.parametric for d in defs.values()),
+        cyclic=any(d.cyclic for d in defs.values()),
+        members=dict(defs),
+        rebuild=lambda new: _pipe_def(dict(new), given),
+        # a pre-bound member's slot carries its stored param as the slot
+        # DEFAULT: the spec states the optionality that binding created
+        param_input_spec=_given_defaults(
+            hoist_rng({nm: defs[nm].param_input_spec for nm in names}), given)
+        if given else None,
+        apply_input_spec=(_hoist_apply_rng(head.apply_input_spec)
+                          if boundary_rng else head.apply_input_spec),
+        serial=True,
+    )
+
+
+def _member_init(defs, apply, param, input, rng, seeds):
+    """Generated composite init: member states composed by name, one
+    rng split toward consumers. When apply is the self-form wiring and
+    an input value is given, each member's state is built from the
+    input it receives at its own call site — apply threads the carry
+    through the wiring in its own call order, so a member whose init
+    REQUIRES an input, anywhere in the topology, is served (the
+    state-side twin of param discovery). Otherwise members init from
+    seeds and rng alone, in declaration order. rng arrives as a raw
+    key or a stream (a custom init's declared rng is a KeyStream);
+    splitting wants a key, drawn once."""
+    if isinstance(rng, KeyStream):
+        rng = rng.next()
+    if rng is not None and not any('rng' in d.state_input_spec for d in defs.values()):
+        raise TypeError('no member init consumes entropy; passing a key is '
+                        'presumed an error')
+    unknown = set(seeds) - set(defs)
+    if unknown:
+        raise TypeError(f'unknown composite init members: {sorted(unknown)}')
+
+    self_form = tuple(inspect.signature(apply).parameters) == ('self', 'input')
+    if input is not None and self_form:
+        w = _InitWired(defs, param, rng, seeds)
+        apply(w, materialize(input))
+        states = w.collect()
+        _check_state_stable(states, _wrap_apply(apply, defs), param, input)
+        return states
+
+    key = rng
+    states = {}
+    for nm, d in defs.items():
+        seed = seeds.get(nm) or Struct()
+        if key is not None and 'rng' in d.state_input_spec and 'rng' not in seed:
+            key, sub_ = jax.random.split(key)
+            seed = seed.replace(rng=sub_)
+        try:
+            states[nm] = d.build_state(param[nm], seed)
+        except TypeError as e:
+            raise TypeError(f"member '{nm}': {e}") from e
+    return Struct(**states)
+
+
+def _check_state_stable(states, apply_fn, param, input):
+    """A cyclic composite's init state must be shape-stable across one
+    step — scan carries it, so a slot that changes shape after a step is
+    a latent error (a read-before-fed member that leaked a provisional
+    shape into its init, say). Run one step abstractly and compare;
+    raise here, named, rather than let it surface as an obscure scan
+    carry mismatch downstream."""
+    if not jax.tree.leaves(states):
+        return
+    stepped, _ = jax.eval_shape(lambda s, i: apply_fn(param, s, i), states, materialize(input))
+    if _shape_sig(stepped) != _shape_sig(states):
+        raise TypeError(
+            'composite init state is not shape-stable across a step: a state slot '
+            'changes shape after one apply. A member read before it was fed likely '
+            'took its shape from its default rather than the wiring — declare that '
+            "member's initial shape, or feed it before reading it.")
+
+
+def composite_init(members: dict[str, NodeDef | Node], apply: Callable, param: Any,
+                   *, input: Any = None, rng: Any = None, **seeds: Any) -> Struct:
+    """The generated member-state walk as a callable — for a full-custom
+    init= that runs the standard walk, then patches (a bus estimator booting
+    from the battery's sag curve at charge). members and apply are the
+    composite's own; param its constructed params; `seeds` are per-member
+    seed bundles (dicts pack into Structs at this boundary)."""
+    from nodejax.core import _as_bundle
+    defs, _ = _promote_members(members)
+    packed = dict(_as_bundle(seeds).__items__)
+    return _member_init(defs, apply, param, input, rng, packed)
+
+
+def _promote_members(members: dict[str, NodeDef | Node]
+                     ) -> tuple[dict[str, NodeDef], dict[str, Any]]:
+    """Member defs and their stored constructions. A bound Node
+    crossing the factory boundary is a transport container: the def
+    joins members, its params become the member's construction values
+    — used by parameterize wherever kwargs leave the slot open, so
+    the member tree is spelled ONCE, at the composition site."""
+    defs, given = {}, {}
+    for nm, v in members.items():
+        if v.bound:
+            if jax.tree.leaves(v.param):
+                given[nm] = v.param
+            v = v.ndef
+        defs[nm] = v
+    return defs, given
+
+
+def _shape_sig(x):
+    """A pytree's structural shape signature: treedef plus per-leaf shape
+    and dtype — for comparing a read's provisional state against the shape
+    a later feed defines."""
+    leaves, tree = jax.tree.flatten(x)
+    return (tree, tuple((jnp.shape(l), jnp.result_type(l)) for l in leaves))
+
+
+def composite(apply: Callable, *, members: dict[str, NodeDef | Node],
+              param: Callable[..., Any] | None = None,
+              init: Callable[..., Any] | None = None,
+              apply_input_spec: Any = None, name: str | None = None) -> NodeDef:
+    """A hand-wired composite over DEF-level members: the member plumbing
+    of a serial pipe — param and state unioned as Structs by member name,
+    one rng routed toward consumers, per-member input derivation — with
+    the wiring supplied by `apply` in place of the serial fold. Program
+    containment lives on the def (members ride NodeDef.members, so
+    def-level services read structure from structure); the param tree is
+    plain data.
+
+    apply is written against self — apply(self, input) -> output —
+    where self is the composite's one transient object, built per step
+    and closed at return: self.member(x) advances a member (repeated
+    calls chain), self.param and self.state read the union Structs
+    (data fields, a delay member's stored value), and the outgoing
+    state is collected automatically when apply returns. Defs and
+    params stay separate at rest; self is where they meet, for the
+    duration of one step. The raw signature
+    (param, state, input) -> (state, output) is accepted alongside:
+    the helper stands down and the author threads member states by
+    hand. A member handle carries the def's METHODS, bound to the live
+    slices: the param always (methods are param-first by contract),
+    and the member's state where the method's second parameter is
+    NAMED state — self.battery.voltage() reads the sag curve at the
+    live charge. The unbound def call, slices explicit —
+    battery.ndef.voltage(param.battery, states.battery) — is the raw
+    spelling, for init and other scopes with no self. Data the composite reads directly is
+    itself a member — a param-only block, its constants entering the
+    member channel like every other block's. The param bundle is
+    member-keyed (each slot that member's input arguments; a boundary
+    rng splits toward members whose bundles want one; unknown names
+    loud). init threads each member ITS OWN input, discovered by one
+    shape-level run of apply — the wiring is the source of truth for
+    who receives what.
+
+    `param` and `init` REPLACE the generated constructors wholesale —
+    full custom, authored through the same sugar channels — for
+    layouts the member union cannot
+    spell (tied fields, cross-member validation). The author then owns
+    the whole tree, member slots included; the generated routing and
+    discovery stand down.
+
+    Members may arrive as bound Nodes — transport containers: the def
+    joins members, the params become that member's stored construction
+    values, used wherever parameterize kwargs leave the slot open
+    (kwargs override). The member tree is thereby spelled once, at the
+    composition site, and parameterize() can be bare.
+
+    Returns a NodeDef when parametric — any member parametric, or
+    param= given — and an already-bound Node otherwise (node_def's
+    convention): a composite of pure state members is usable as
+    built."""
+    defs, given = _promote_members(members)
+    reserved = {'param', 'state', 'collect'} & set(defs)
+    if reserved:
+        raise TypeError(f'member names shadow self attributes: {sorted(reserved)}')
+
+    declared = apply_input_spec   # apply_input_spec= declares the spec, and
+    apply_fn = _wrap_apply(apply, defs)   # doubles as init's default input offer
+    self_form = tuple(inspect.signature(apply).parameters) == ('self', 'input')
+
+    def param_fn(ndef, param_input=Struct()):
+        """The composite's param constructor: member slots are
+        recipes, a boundary rng splits toward members whose bundles want one.
+        When the def carries an input spec and the wiring is self-form, the
+        carry threads through apply itself — each member's param built from
+        the shape it receives at its own call site (the param-side twin of
+        init discovery)."""
+        key = param_input.rng if 'rng' in param_input else None
+        carry = _input_or_none(ndef)
+        slots = {nm: param_input[nm] for nm in defs if nm in param_input}
+        if carry is not None and self_form and any(d.param_reads_shape
+                                                   for d in defs.values()):
+            w = _BuildingWired(defs, given, key, slots)
+            apply(w, carry)
+            for nm, d in defs.items():
+                if nm not in w._built:            # members the wiring never called
+                    g = slots.get(nm)
+                    if g is None and nm in given:
+                        w._built[nm] = given[nm]
+                    else:
+                        w._built[nm], w._key = _member_param(nm, d, g, w._key)
+            return Struct(**w._built)
+        parts = {}
+        for nm, d in defs.items():
+            g = slots.get(nm)
+            if g is None and nm in given:
+                parts[nm] = given[nm]         # stored construction values
+            else:
+                parts[nm], key = _member_param(nm, d, g, key)
+        return Struct(**parts)
+
+    def init_fn(ndef, param, state_input=Struct(), input=None):
+        walk = any(d.init_reads_shape or d.init_requires_input for d in defs.values())
+        carry = input if input is not None else (_input_or_none(ndef) if walk else None)
+        seeds = {nm: state_input[nm] for nm in defs if nm in state_input}
+        rng = state_input.rng if 'rng' in state_input else None
+        return _member_init(defs, apply, param, carry, rng, seeds)
+
+    parametric = any(d.parametric for d in defs.values()) or param is not None
+
+    def _rebuild(new_members):
+        # reconstruct from (possibly rewritten) members: apply refers to
+        # members through self, so swapping them swaps what self sees; flags
+        # recompute from the new members. Stored constructions survive by
+        # re-binding their slots (rewriters preserve param meaning)
+        members2 = {nm: (Node(d.ndef, given[nm]) if nm in given else d)
+                    for nm, d in new_members.items()}
+        r = composite(apply, members=members2, param=param, init=init,
+                      apply_input_spec=declared, name=name)
+        return r.ndef
+
+    ndef = Composite(
+        name=name or 'composite(' + ', '.join(defs) + ')',
+        param_fn=_lift_param(param) if param is not None else param_fn,
+        init_fn=_lift_init(init) if init is not None else init_fn,
+        apply_fn=apply_fn,
+        parametric=parametric,
+        cyclic=any(d.cyclic for d in defs.values()) or init is not None,
+        members=dict(defs),
+        rebuild=_rebuild,
+        apply_input_spec=(_hoist_apply_rng(declared)
+                          if any(d.apply_takes_rng for d in defs.values())
+                          else declared),
+        # an OWN ctor/init defines this composite's bundles; else the
+        # member-keyed derivation applies, with stored constructions as slot
+        # defaults (None = derivation, nothing stored)
+        param_input_spec=_bundle_spec_from_sig(param, drop=('ndef', 'param'))
+        if param is not None else (_given_defaults(
+            hoist_rng({nm: d.param_input_spec for nm, d in defs.items()}), given)
+            if given else None),
+        state_input_spec=_state_spec_from_sig(init) if init is not None else None,
+    )
+    # node_def's convention: non-parametric defs come back bound. The
+    # param is the leafless Struct of member slots — the param-side twin
+    # of the pipe's leafless state Struct.
+    return ndef if parametric else ndef.bind(param_fn(ndef))
+
+
+def wrapper(apply: Callable, inner: NodeDef | Node, *, name: str | None = None
+            ) -> NodeDef | Node:
+    """IS-A adaptation of exactly one node: the wrapper's param, init,
+    state layout, paths and methods ARE the inner's — flat, a nesting
+    level nowhere — and apply wraps the step. The signature names the
+    member: apply(<inner>, input) -> output, the first parameter your
+    name for the transient step object (call it to step, repeated
+    calls chain; .param and .state read the slices).
+
+    The neighboring spellings: derive() is the same flat inheritance
+    with a raw apply override (and the place for param-extending
+    is-a, like fets adding r_dson); a singleton composite() is HAS-A —
+    the member named, one nesting level deeper, own identity."""
+    nd = inner.ndef
+    sig = tuple(inspect.signature(apply).parameters)
+    if len(sig) != 2 or sig[1] != 'input' or sig[0] in ('param', 'state', 'input'):
+        raise TypeError(f'wrapper apply is (<inner>, input) -> output; got {sig}')
+
+    def apply_fn(param, state, input):
+        solo = _Solo(nd, param, state)
+        out = apply(solo, input)
+        return solo._current, out
+
+    out = nd._replace(name=name or f'wrapper({nd.name})', apply_fn=apply_fn)
+    return Node(out, inner.param) if inner.bound else out
+
+
+def _ident(name: str) -> str:
+    """Sanitize a def name into a pipe member identifier."""
+    return re.sub(r'\W+', '_', name).strip('_') or 'node'
+
+
+def _components(x: GenericDef | NodeDef | Node) -> dict[str, GenericDef | NodeDef | Node]:
+    """Flatten SERIAL pipes into their named members so (a >> b) >> c
+    stays flat; hand-wired composites have members but their wiring is
+    free-form, so they enter a pipe atomically."""
+    if x.bound:
+        if isinstance(x.ndef, Composite) and x.ndef.serial:
+            return {nm: Node(d, x.param[nm]) for nm, d in x.ndef.members.items()}
+        return {_ident(x.ndef.name): x}
+    if isinstance(x, Composite) and x.serial:
+        return dict(x.members)
+    if isinstance(x, GenericDef) and x.members:
+        return dict(x.members)
+    return {_ident(x.name): x}
+
+
+def _compose(left: GenericDef | NodeDef | Node,
+             right: GenericDef | NodeDef | Node) -> GenericDef | NodeDef | Node:
+    """Merge components of both sides (disambiguating duplicate names) into
+    one flat serial pipe. Any generic member makes the pipe generic."""
+    merged = dict(_components(left))
+    for nm, v in _components(right).items():
+        final, suffix = nm, 2
+        while final in merged:
+            final = f'{nm}_{suffix}'
+            suffix += 1
+        merged[final] = v
+    if any(isinstance(v, GenericDef) for v in merged.values()):
+        return serial_generic(**{nm: _as_generic(v) for nm, v in merged.items()})
+    return serial(**merged)
