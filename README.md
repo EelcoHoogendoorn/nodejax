@@ -116,4 +116,4 @@ Each is a test; each runs.
 
 ## Status
 
-Working prototype: the tests double as documentation. [`docs/cookbook.md`](docs/cookbook.md) builds up from a minimal node, explaining as it goes; [`docs/handbook.md`](docs/handbook.md) is the reference; [`docs/comparison.md`](docs/comparison.md) compares with equinox, flax, and haiku, with runnable counterparts in [`nodejax/examples/comparisons/`](nodejax/examples/comparisons/).
+Working prototype: the tests double as documentation. [`docs/cookbook.md`](docs/cookbook.md) builds up from a minimal node, explaining as it goes (runnable in Colab: [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/EelcoHoogendoorn/nodejax/blob/main/docs/cookbook.ipynb)); [`docs/handbook.md`](docs/handbook.md) is the reference; [`docs/comparison.md`](docs/comparison.md) compares with equinox, flax, and haiku, with runnable counterparts in [`nodejax/examples/comparisons/`](nodejax/examples/comparisons/).

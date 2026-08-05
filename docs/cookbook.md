@@ -1,5 +1,7 @@
 # The nodejax cookbook
 
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/EelcoHoogendoorn/nodejax/blob/main/docs/cookbook.ipynb)
+
 This cookbook starts from a minimal node and builds it out, explaining as it goes. Every snippet runs as written, and each section uses what the previous one defined.
 
 ## 1. A first node
