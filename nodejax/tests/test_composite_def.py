@@ -25,6 +25,7 @@ import optax
 import pytest
 
 from nodejax import node_def, derive, scan, train_step, composite, composite_init, wrapper, serial
+from nodejax import REQUIRED
 from nodejax.struct import Struct
 
 DT = 0.02
@@ -682,3 +683,55 @@ def test_apply_unpacks_input_fields():
     assert out == s1                                 # cyclic (state, output)
     assert not jnp.allclose(out, 2.0)                # noise from the input rng added
 
+
+
+def test_wired_composite_field_signature():
+    """A wired apply shares the leaf sugar: trailing field names unpack
+    the input bundle, the signature declares the spec (REQUIRED or
+    carrying defaults), and validation is the ordinary loud kind."""
+    def double():
+        return node_def(lambda input: 2.0 * input, name='double')
+
+    def block():
+        def apply(self, x, offset=0.0):
+            return self.double(x) + offset
+        return composite(apply, members=dict(double=double()), name='block')
+
+    b = block()
+    spec = b.ndef.apply_input_spec
+    assert spec.x is REQUIRED and spec.offset == 0.0
+
+    node = b if b.bound else b.parameterize()
+    assert node.apply(x=3.0) == 6.0
+    assert node.apply(x=3.0, offset=1.0) == 7.0
+    # apply is the unvalidated fast path (specs are consulted at the
+    # build entries): an extra field is ignored, exactly as at a leaf
+    assert node.apply(x=3.0, y=1.0) == 6.0
+
+
+def test_wired_composite_field_signature_rng():
+    """A declared rng field arrives as the boundary key stream; author
+    draws and member injections share one stream, never one key."""
+    import jax
+
+    def jitter():
+        def param(sigma):
+            return Struct(sigma=jnp.asarray(sigma))
+        def apply(param, x, rng):
+            return x + param.sigma * jax.random.normal(rng.next())
+        return node_def(apply, param=param, name='jitter')
+
+    def block():
+        def apply(self, x, rng):
+            own = jax.random.normal(rng.next())          # the author's draw
+            return self.jitter(x=x) + 0.001 * own        # the member's draw, injected
+        return composite(apply, members=dict(jitter=jitter()), name='noisy_block')
+
+    node = block().parameterize(jitter=Struct(sigma=1.0))
+    key = jax.random.PRNGKey(0)
+    a = node.apply(x=1.0, rng=key)
+    b = node.apply(x=1.0, rng=key)
+    c = node.apply(x=1.0, rng=jax.random.PRNGKey(1))
+    assert jnp.allclose(a, b)                    # same key, same draws
+    assert not jnp.allclose(a, c)
+    assert 'rng' in block().apply_input_spec     # sig-declared, spec-visible

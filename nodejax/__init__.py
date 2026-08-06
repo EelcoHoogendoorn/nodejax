@@ -58,7 +58,7 @@ Package layout (one file per concern):
 from nodejax.struct import Struct
 from nodejax.types import (PyTree, Param, State, Input, Output,
                                  ParamFn, InitFn, ApplyFn, LossFn, StaticTree)
-from nodejax.core import Node, NodeDef, split_aux, hoist_rng
+from nodejax.core import Node, NodeDef, split_aux, hoist_rng, REQUIRED
 from nodejax.authoring import node_def, derive, KeyStream
 from nodejax.generic import GenericDef, generic
 from nodejax.ambient import ambient
@@ -70,6 +70,7 @@ from nodejax.spec import spec, spec_of, materialize, initialize, meta
 
 __all__ = [
     'Struct',
+    'REQUIRED',
     # types
     'PyTree', 'Param', 'State', 'Input', 'Output',
     'ParamFn', 'InitFn', 'ApplyFn', 'LossFn', 'StaticTree',

@@ -53,9 +53,9 @@ def ff_def():
 def current_controller_def(dt, motor, estimator, controller, fets):
     """Target current + measurements in, PWM out.
 
-    input: Struct(current=<true DQ current>, velocity=<estimated mech
-    velocity>, bus=<estimated bus voltage>, target=<DQ current target>).
-    The target arrives PRE-DERATED for anything this controller does
+    input fields, declared by the apply signature: current (true DQ
+    current), velocity (estimated mechanical velocity), bus (estimated
+    bus voltage), target (DQ current target). The target arrives PRE-DERATED for anything this controller does
     not own (the motor's thermal rollback happens where the motor
     thermal lives — at the stack). The factory argument list is the
     member list; ff (per-term feedforward weighting) and limit (a
@@ -66,18 +66,18 @@ def current_controller_def(dt, motor, estimator, controller, fets):
                    limit=clamp_norm_def()(limit=100.0),
                    pwm_prev=delay_def(DQ()), tgt_prev=delay_def(DQ()))
 
-    def apply(self, input):
-        target = self.limit(input.target)
+    def apply(self, current, velocity, bus, target):
+        target = self.limit(target)
         # the power stage derates by its own temperature (read-then-step)
         target = self.fets.derate(target)
 
         # model-based estimation: the model sees the voltage we actually
         # commanded last step (previous pwm x estimated bus)
         i_est = self.estimator(Struct(
-            value=input.current,
+            value=current,
             model=Struct(motor=self.param.motor,
-                         v_mod=self.state.pwm_prev * input.bus,
-                         velocity=input.velocity)))
+                         v_mod=self.state.pwm_prev * bus,
+                         velocity=velocity)))
 
         v_fb = self.controller(target - i_est)
         # feedforward with PER-TERM trust weights: resistive and
@@ -86,21 +86,20 @@ def current_controller_def(dt, motor, estimator, controller, fets):
         # error-driven di/dt is a hidden P-gain of L/dt on measurement
         # noise (measured: tracking flat, jitter x4)
         di_ref = (target - self.state.tgt_prev) / dt
-        terms = self.motor.voltage_terms(target, di_ref, input.velocity)
+        terms = self.motor.voltage_terms(target, di_ref, velocity)
         v = v_fb + self.ff(terms)
 
         # guard: an estimator still converging from zero must not produce
         # NaN pwm; the norm clamp bounds the result either way
-        bus = jnp.maximum(input.bus, 1e-3)
-        pwm = (v / bus).clamp_norm(1.0)
+        pwm = (v / jnp.maximum(bus, 1e-3)).clamp_norm(1.0)
 
         self.fets(i_est.norm2())                  # fets own r_dson: amps^2 in
         self.pwm_prev(pwm)
         self.tgt_prev(target)
         return pwm
 
-    return composite(apply, members=members, name='current_controller',
-                     apply_input_spec=Struct(current=DQ(), velocity=0.0, bus=0.0, target=DQ()))
+    # the signature declares the spec, exactly as at a leaf
+    return composite(apply, members=members, name='current_controller')
 
 
 # --- command controllers: command -> current target ---

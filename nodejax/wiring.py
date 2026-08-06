@@ -200,6 +200,7 @@ class _InitWired:
         self._init = {}       # recorded initial states
         self._work = {}       # advancing states, for wiring propagation
         self._called = set()  # members whose init came from a feed (authoritative)
+        self._boundary = KeyStream(jax.random.PRNGKey(0))   # probe stream; discarded
 
     @property
     def param(self):
@@ -279,6 +280,7 @@ class _BuildingWired:
         self._defs = defs
         self._given = given
         self._key = key
+        self._boundary = KeyStream(jax.random.PRNGKey(0))   # probe stream; discarded
         self._kwargs = kwargs
         self._built = {}
 
@@ -335,29 +337,60 @@ class _Solo:
         raise AttributeError(f"def {self._nd.name!r} has no method {name!r}")
 
 
+def _author_call(apply: Callable):
+    """Canonicalize an authored composite apply to call(self, input).
+    Two authored forms exist, mirroring the leaf sugar: (self, input)
+    receives the whole input channel, and (self, field, ...) receives
+    the input bundle unpacked by name, with a declared rng field
+    delivered as the boundary key stream (the SAME stream member
+    injection draws from, so author draws and injections never share a
+    key). Returns (call, field names or None), or None when the apply
+    is the raw contract triple."""
+    sig = tuple(inspect.signature(apply).parameters)
+    if sig == ('param', 'state', 'input'):
+        return None
+    if sig == ('self', 'input'):
+        return (lambda self, input: apply(self, input)), None
+    if sig[:1] == ('self',) and len(sig) > 1 and 'input' not in sig:
+        fields = sig[1:]
+
+        def call(self, input):
+            kw = {}
+            for f in fields:
+                if f == 'rng':
+                    kw[f] = self._boundary
+                elif f in input:
+                    kw[f] = input[f]        # absent optional: the sig default fills
+            return apply(self, **kw)
+
+        return call, fields
+    raise TypeError('composite apply is (self, input), (self, <fields...>), or '
+                    f'the raw (param, state, input) -> (state, output); got {sig}')
+
+
 def _wrap_apply(apply: Callable, defs: dict[str, NodeDef]) -> Callable:
     """Transform a composite apply into contract shape, by signature:
-    (self, input) builds the transient step object and auto-collects;
+    authored forms build the transient step object and auto-collect;
     the raw (param, state, input) passes through."""
-    sig = tuple(inspect.signature(apply).parameters)
-    boundary = any(d.ndef.apply_takes_rng for d in defs.values())
-    if sig == ('self', 'input'):
-        def apply_fn(p, s, input):
-            key = None
-            if boundary:
-                key = input.rng                  # missing key fails here, loudly
-                input = input.without('rng')
-            self = _Wired(p, s, defs, boundary_key=key)
-            out = apply(self, input)
-            new_state = self.collect()
-            if self._aux:
-                # member aux, diverted under member names, re-emitted as
-                # the (output, collection) pair — the channel nests
-                return new_state, (out, Struct(**self._aux))
-            return new_state, out
-        return apply_fn
-    if sig == ('param', 'state', 'input'):
+    authored = _author_call(apply)
+    if authored is None:
         return apply              # the raw triple, author-threaded
-    raise TypeError('composite apply is (self, input) -> output, or the raw '
-                    f'(param, state, input) -> (state, output); got {sig}')
+    call, fields = authored
+    author_rng = fields is not None and 'rng' in fields
+    boundary = author_rng or any(d.ndef.apply_takes_rng for d in defs.values())
+
+    def apply_fn(p, s, input):
+        key = None
+        if boundary:
+            key = input.rng                  # missing key fails here, loudly
+            input = input.without('rng')
+        self = _Wired(p, s, defs, boundary_key=key)
+        out = call(self, input)
+        new_state = self.collect()
+        if self._aux:
+            # member aux, diverted under member names, re-emitted as
+            # the (output, collection) pair — the channel nests
+            return new_state, (out, Struct(**self._aux))
+        return new_state, out
+    return apply_fn
 

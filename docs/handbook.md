@@ -141,23 +141,28 @@ def smoothed_raw(gain, ema):
 
 Reading them together locates the sugar exactly: `self.gain(input)` is the member's contract apply plus the bookkeeping of slicing its param and state in and writing the new state back, and nothing else.
 
-At two members the raw form is tolerable. The scale where it stops being tolerable is the real argument, so here is the shape of a real one: the FOC current controller from [`nodejax/examples/actuator/current_controller.py`](../nodejax/examples/actuator/current_controller.py), eight members including a stochastic estimator and two one-tick memories, whose sugared apply reads as fifteen lines of imperative wiring. Desugared, abridged to its pattern:
+At two members the raw form is tolerable. The scale where it stops being tolerable is the real argument, so here is the shape of a real one: the FOC current controller from [`nodejax/examples/actuator/current_controller.py`](../nodejax/examples/actuator/current_controller.py), nine members including a stochastic current estimator, a noisy bus voltage sensor, and two one-tick memories, whose sugared apply reads as fifteen lines of imperative wiring. Desugared, abridged to its pattern:
 
 ```python
-def current_controller_raw(dt, motor, estimator, controller, fets, ff, limit):
+def current_controller_raw(dt, motor, bus_sensor, estimator, controller, fets, ff, limit):
     def init_fn(ndef, param, state_input, input=None):
-        # one boundary key, split BY HAND toward the stochastic members;
-        # the split count is bookkeeping that must track the census of
+        # one boundary key, split BY HAND toward the stochastic members
+        # (the current estimator's sensor, the bus voltage sensor); the
+        # split count is bookkeeping that must track the census of
         # stochastic members, and silently misroutes when it drifts
-        (k_est,) = jax.random.split(state_input.rng, 1)
+        k_est, k_bus = jax.random.split(state_input.rng, 2)
         return Struct(
             estimator=estimator.init_fn(param.estimator, Struct(rng=k_est)),
+            bus_sensor=bus_sensor.init_fn((), Struct(rng=k_bus)),
             controller=controller.init_fn(param.controller, Struct()),
             fets=fets.init_fn(param.fets, Struct()),
             pwm_prev=DQ(), tgt_prev=DQ(),
             motor=(), ff=(), limit=())
 
     def apply_fn(param, state, input):
+        # the bus arrives TRUE and is sensed here: noisy measurement,
+        # its stream threaded like any other member state
+        bus_state, bus = bus_sensor.apply_fn((), state.bus_sensor, input.bus)
         _, target = limit.apply_fn(param.limit, (), input.target)
         # methods (derate, voltage_terms) return values; contract applies
         # return (state, output) tuples
@@ -165,16 +170,17 @@ def current_controller_raw(dt, motor, estimator, controller, fets, ff, limit):
         est_state, i_est = estimator.apply_fn(param.estimator, state.estimator,
             Struct(value=input.current,
                    model=Struct(motor=param.motor,
-                                v_mod=state.pwm_prev * input.bus,
+                                v_mod=state.pwm_prev * bus,
                                 velocity=input.velocity)))
         ctrl_state, v_fb = controller.apply_fn(param.controller, state.controller,
                                                target - i_est)
         di_ref = (target - state.tgt_prev) / dt
         terms = motor.voltage_terms(param.motor, target, di_ref, input.velocity)
         _, v_ff = ff.apply_fn(param.ff, (), terms)
-        pwm = ((v_fb + v_ff) / jnp.maximum(input.bus, 1e-3)).clamp_norm(1.0)
+        pwm = ((v_fb + v_ff) / jnp.maximum(bus, 1e-3)).clamp_norm(1.0)
         fets_state, _ = fets.apply_fn(param.fets, state.fets, i_est.norm2())
-        return Struct(estimator=est_state, controller=ctrl_state,
+        return Struct(estimator=est_state, bus_sensor=bus_state,
+                      controller=ctrl_state,
                       fets=fets_state, pwm_prev=pwm, tgt_prev=target,
                       motor=(), ff=(), limit=()), pwm
 ```

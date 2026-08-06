@@ -23,7 +23,7 @@ from nodejax.core import (Node, NodeDef, Composite, split_aux, _input_or_none,
 from nodejax.authoring import (KeyStream, _lift_param, _lift_init,
                                      _state_spec_from_sig, _init_requires_input)
 from nodejax.generic import GenericDef
-from nodejax.wiring import (_wrap_apply, _Wired, _InitWired, _BuildingWired,
+from nodejax.wiring import (_author_call, _wrap_apply, _Wired, _InitWired, _BuildingWired,
                                   _Solo, _NO_INPUT)
 from nodejax.spec import materialize
 
@@ -269,10 +269,11 @@ def _member_init(defs, apply, param, input, rng, seeds):
     if unknown:
         raise TypeError(f'unknown composite init members: {sorted(unknown)}')
 
-    self_form = tuple(inspect.signature(apply).parameters) == ('self', 'input')
-    if input is not None and self_form:
+    authored = _author_call(apply)
+    if input is not None and authored is not None:
+        call, _ = authored
         w = _InitWired(defs, param, rng, seeds)
-        apply(w, materialize(input))
+        call(w, materialize(input))
         states = w.collect()
         _check_state_stable(states, _wrap_apply(apply, defs), param, input)
         return states
@@ -359,7 +360,12 @@ def composite(apply: Callable, *, members: dict[str, NodeDef | Node],
     def-level services read structure from structure); the param tree is
     plain data.
 
-    apply is written against self — apply(self, input) -> output —
+    apply is written against self, in either authored form the leaf
+    sugar accepts: apply(self, input) receives the whole input channel,
+    and apply(self, field, ...) receives the input bundle unpacked by
+    name, the signature declaring the spec (REQUIRED or carrying
+    defaults; a declared rng field arrives as the boundary key stream).
+    In the whole-input form — apply(self, input) -> output —
     where self is the composite's one transient object, built per step
     and closed at return: self.member(x) advances a member (repeated
     calls chain), self.param and self.state read the union Structs
@@ -406,9 +412,15 @@ def composite(apply: Callable, *, members: dict[str, NodeDef | Node],
     if reserved:
         raise TypeError(f'member names shadow self attributes: {sorted(reserved)}')
 
+    authored = _author_call(apply)
+    author_fields = authored[1] if authored is not None else None
     declared = apply_input_spec   # apply_input_spec= declares the spec, and
+    if declared is None and author_fields is not None:
+        # the leaf sugar's rule, shared: a field-style signature IS the
+        # spec declaration — fields REQUIRED or carrying their defaults
+        declared = _bundle_spec_from_sig(apply, drop=('self',))
     apply_fn = _wrap_apply(apply, defs)   # doubles as init's default input offer
-    self_form = tuple(inspect.signature(apply).parameters) == ('self', 'input')
+    self_form = authored is not None
 
     def param_fn(ndef, param_input=Struct()):
         """The composite's param constructor: member slots are
@@ -423,7 +435,7 @@ def composite(apply: Callable, *, members: dict[str, NodeDef | Node],
         if carry is not None and self_form and any(d.param_reads_shape
                                                    for d in defs.values()):
             w = _BuildingWired(defs, given, key, slots)
-            apply(w, carry)
+            _author_call(apply)[0](w, carry)
             for nm, d in defs.items():
                 if nm not in w._built:            # members the wiring never called
                     g = slots.get(nm)
