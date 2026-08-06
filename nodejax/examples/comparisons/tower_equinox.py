@@ -1,4 +1,6 @@
-"""The nested tower, in equinox: every axis threaded by hand.
+"""Deeply nested composition, in equinox: a stacked RNN, scanned over
+time, batched, trained, and meta-adapted, with every axis's state
+threaded by hand.
 
 Same model, task, and budget as `tower_nodejax.py`. Equinox's modules
 handle the parameter half well; with no state contract, each of the

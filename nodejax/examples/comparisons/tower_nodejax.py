@@ -1,5 +1,9 @@
-"""The nested tower, in nodejax: stack, time-scan, batch, training
-scan, and a meta variant one transform deeper.
+"""Deeply nested composition, in nodejax: a stacked RNN, scanned over
+time, batched over sequences, trained over a stream, and, in a meta
+variant, adapted per task inside the training loop. Each of those is
+an axis whose state some transform must route, and this file exists to
+show, beside `tower_flax.py` and `tower_equinox.py`, where each
+framework makes you write that routing.
 
 The task: predict an exponential moving average of a noisy scalar
 sequence, chosen because the target is recurrent by construction. The

@@ -1,4 +1,6 @@
-"""The nested tower, in flax nnx: the routing stated at every lifted site.
+"""Deeply nested composition, in flax nnx: a stacked RNN, scanned over
+time, batched, trained, and meta-adapted, with the state routing
+stated at every lifted-transform site.
 
 Same model, task, and budget as `tower_nodejax.py`. nnx modules are
 mutable objects, and crossing each jax boundary means telling the
