@@ -12,6 +12,10 @@ final, losses = jax.jit(trainer.scan)(trainer.init(model=params), reference_batc
 ```
 Code: [`nodejax/tests/test_motor_control.py`](nodejax/tests/test_motor_control.py).
 
+```
+pip install git+https://github.com/EelcoHoogendoorn/nodejax.git
+```
+
 Nodejax is purely functional middleware for JAX. The core object is a Node in the compute graph, and every capability above (`ttt`, `ensemble`, `scan`, `closed_loop`, `batch`, `train_step`) is a function from Node to Node, a Node transform. It serves neural network use cases ergonomically, and is designed to generalize to classical control, physical simulation and beyond; [`nodejax/examples/actuator/`](nodejax/examples/actuator/) is a nontrivial example.
 
 Unpacking the above: A committee of recurrent controllers drives a simulated motor in closed loop. Each member carries a test-time-training core: at every control step it adapts its own weights by one reconstruction gradient step at the same time as evolving its recurrent hidden state, while the outer trainer backpropagates through the unrolled physics to learn every member's initial weights and per-weight adaptation rates, as one compiled scan.
