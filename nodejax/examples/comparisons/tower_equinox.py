@@ -27,9 +27,8 @@ import jax
 import jax.numpy as jnp
 import optax
 
-HIDDEN, LAYERS = 8, 2
-B, T, STEPS = 16, 40, 800
-
+from nodejax.examples.comparisons.tower_common import (
+    HIDDEN, LAYERS, STEPS, META_STEPS, INNER_LR, make_data, make_tasks)
 
 class Net(eqx.Module):
     up_w: jax.Array
@@ -78,15 +77,6 @@ def mse_loss(net, xs, ys):
     return jnp.mean((pred - ys) ** 2)
 
 
-def make_data(key):
-    xs = jax.random.normal(key, (B, T))
-    def ema(carry, x):
-        y = 0.9 * carry + 0.1 * x
-        return y, y
-    _, ys = jax.lax.scan(ema, jnp.zeros(B), xs.T)
-    return xs, ys.T
-
-
 def main():
     xs, ys = make_data(jax.random.PRNGKey(0))
     net = make_net(jax.random.PRNGKey(1))
@@ -111,28 +101,6 @@ def main():
 
 
 # --- one level deeper: meta-learning across a task family ---
-
-TASKS, K, META_STEPS, INNER_LR = 8, 4, 400, 0.05
-
-
-def make_tasks(key):
-    """Each task is an EMA with its own decay; adapt on K support
-    sequences, score on a query sequence."""
-    k1, k2, k3 = jax.random.split(key, 3)
-    alphas = jax.random.uniform(k1, (TASKS,), minval=0.6, maxval=0.95)
-    sup_x = jax.random.normal(k2, (TASKS, K, T))
-    qry_x = jax.random.normal(k3, (TASKS, T))
-
-    def ema(alpha, xs):
-        def cell(carry, x):
-            y = alpha * carry + (1 - alpha) * x
-            return y, y
-        return jax.lax.scan(cell, 0.0, xs)[1]
-
-    sup_y = jax.vmap(lambda a, xs: jax.vmap(lambda s: ema(a, s))(xs))(alphas, sup_x)
-    qry_y = jax.vmap(ema)(alphas, qry_x)
-    return sup_x, sup_y, qry_x, qry_y
-
 
 def adapt(net, sup_x, sup_y):
     """The inner scan: one sgd step per support sequence, the net itself

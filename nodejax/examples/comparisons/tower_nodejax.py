@@ -30,10 +30,8 @@ import optax
 
 from nodejax import node_def, stack, scan, batch, train_step, finetune
 from nodejax.struct import Struct
-
-HIDDEN, LAYERS = 8, 2
-B, T, STEPS = 16, 40, 800
-
+from nodejax.examples.comparisons.tower_common import (
+    HIDDEN, LAYERS, STEPS, INNER_LR, META_STEPS, mse, make_data, make_tasks)
 
 def up(hidden):
     def param(rng):
@@ -64,19 +62,6 @@ def readout(hidden):
     return node_def(apply, param=param, name='readout')
 
 
-def mse(pred, target):
-    return jnp.mean((pred - target) ** 2)
-
-
-def make_data(key):
-    xs = jax.random.normal(key, (B, T))
-    def ema(carry, x):
-        y = 0.9 * carry + 0.1 * x
-        return y, y
-    _, ys = jax.lax.scan(ema, jnp.zeros(B), xs.T)
-    return xs, ys.T
-
-
 def main():
     net = up(HIDDEN) >> stack(rnn(HIDDEN), n=LAYERS) >> readout(HIDDEN)
     rollout = scan(net)                       # time internalized
@@ -95,35 +80,14 @@ def main():
 
 # --- one level deeper: meta-learning across a task family ---
 
-TASKS, K, META_STEPS = 8, 4, 400
-
-
-def make_tasks(key):
-    """Each task is an EMA with its own decay; adapt on K support
-    sequences, score on a query sequence."""
-    k1, k2, k3 = jax.random.split(key, 3)
-    alphas = jax.random.uniform(k1, (TASKS,), minval=0.6, maxval=0.95)
-    sup_x = jax.random.normal(k2, (TASKS, K, T))
-    qry_x = jax.random.normal(k3, (TASKS, T))
-
-    def ema(alpha, xs):
-        def cell(carry, x):
-            y = alpha * carry + (1 - alpha) * x
-            return y, y
-        return jax.lax.scan(cell, 0.0, xs)[1]
-
-    sup_y = jax.vmap(lambda a, xs: jax.vmap(lambda s: ema(a, s))(xs))(alphas, sup_x)
-    qry_y = jax.vmap(ema)(alphas, qry_x)
-    return Struct(support=Struct(input=sup_x, target=sup_y), query=qry_x), qry_y
-
-
 def main_meta():
     net = up(HIDDEN) >> stack(rnn(HIDDEN), n=LAYERS) >> readout(HIDDEN)
     rollout = scan(net)
-    adapt = finetune(rollout, mse, optax.sgd(0.05))     # the inner adaptation scan
+    adapt = finetune(rollout, mse, optax.sgd(INNER_LR))     # the inner adaptation scan
     maml = train_step(batch(adapt), mse, optax.adam(3e-3))
 
-    tasks, qry_y = make_tasks(jax.random.PRNGKey(2))
+    sup_x, sup_y, qry_x, qry_y = make_tasks(jax.random.PRNGKey(2))
+    tasks = Struct(support=Struct(input=sup_x, target=sup_y), query=qry_x)
     model = batch(adapt).parameterize(rng=jax.random.PRNGKey(1))
     tile = lambda a: jnp.broadcast_to(a, (META_STEPS, *a.shape))
     stream = Struct(input=jax.tree.map(tile, tasks), target=tile(qry_y))
