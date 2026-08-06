@@ -159,6 +159,8 @@ def current_controller_raw(dt, motor, estimator, controller, fets, ff, limit):
 
     def apply_fn(param, state, input):
         _, target = limit.apply_fn(param.limit, (), input.target)
+        # methods (derate, voltage_terms) return values; contract applies
+        # return (state, output) tuples
         target = fets.derate(param.fets, state.fets, target)
         est_state, i_est = estimator.apply_fn(param.estimator, state.estimator,
             Struct(value=input.current,
@@ -168,7 +170,7 @@ def current_controller_raw(dt, motor, estimator, controller, fets, ff, limit):
         ctrl_state, v_fb = controller.apply_fn(param.controller, state.controller,
                                                target - i_est)
         di_ref = (target - state.tgt_prev) / dt
-        _, terms = motor.voltage_terms(param.motor, target, di_ref, input.velocity)
+        terms = motor.voltage_terms(param.motor, target, di_ref, input.velocity)
         _, v_ff = ff.apply_fn(param.ff, (), terms)
         pwm = ((v_fb + v_ff) / jnp.maximum(input.bus, 1e-3)).clamp_norm(1.0)
         fets_state, _ = fets.apply_fn(param.fets, state.fets, i_est.norm2())
