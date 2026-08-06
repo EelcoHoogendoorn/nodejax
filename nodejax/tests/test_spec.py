@@ -165,3 +165,41 @@ def test_declared_input_seeds_init():
     node = node_def(apply, init=init, name='seeded', apply_input_spec=jnp.zeros(3))
     assert node.init().shape == (3,)                          # seeded by declaration
     assert node.with_input(jnp.zeros((2, 3))).init().shape == (2, 3)  # with_input wins
+
+
+def test_resolved_bundle_spec_defaulted_fields_are_optional():
+    """A RESOLVED bundle spec validates by the bundle rule: a stream may
+    omit a defaulted field (the apply unpack fills its default), while
+    unknown fields and shape conflicts stay loud and named."""
+    from nodejax import composite, scan
+
+    def acc():
+        def param(gain=1.0):
+            return Struct(gain=gain)
+
+        def init():
+            return jnp.asarray(0.0)
+
+        def apply(param, state, input):
+            s = state + input * param.gain
+            return s, s
+
+        return node_def(apply, param=param, init=init, name='acc')
+
+    def rig():
+        members = dict(acc=acc())
+
+        def apply(self, x=0.0, bias=0.0):
+            return self.acc(x + bias)
+
+        return composite(apply, members=members, name='rig')
+
+    sc = scan(rig()).parameterize()
+    ys = sc.apply(Struct(x=jnp.ones(3)))
+    assert jnp.allclose(ys, jnp.array([1.0, 2.0, 3.0]))     # bias defaulted
+
+    with pytest.raises(TypeError, match='unknown input fields'):
+        sc.apply(Struct(x=jnp.ones(3), extra=jnp.ones(3)))
+
+    with pytest.raises(TypeError, match='rig.x'):
+        sc.apply(Struct(x=jnp.ones((3, 2))))

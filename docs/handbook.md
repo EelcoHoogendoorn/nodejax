@@ -119,6 +119,75 @@ The section covers: what resolution means here, the error you get when you read 
 
 When `>>` is not the shape of your dataflow, `composite(apply, members=...)` lets you write the step against `self`: a scope-local, mutable, object-like view of the node, bound to the live params and state. Calling a member advances its state slice in place, reads see current values, and you write ordinary imperative wiring. Like the key stream, it is purely a scope-local abstraction: the sugar transforms your function into an ordinary pure apply, and to anything outside, only the node contract is visible.
 
+The two spellings of the same def, side by side. The sugared form:
+
+```python
+def smoothed(gain, ema):
+    def apply(self, input):
+        return self.ema(self.gain(input))
+    return composite(apply, members=dict(gain=gain, ema=ema), name='smoothed')
+```
+
+And the raw contract form the sugar produces, with the member threading explicit:
+
+```python
+def smoothed_raw(gain, ema):
+    def apply_fn(param, state, input):
+        _, u = gain.apply_fn(param.gain, (), input)          # non-cyclic member
+        ema_state, y = ema.apply_fn(param.ema, state.ema, u)  # cyclic member
+        return Struct(gain=(), ema=ema_state), y
+    ...
+```
+
+Reading them together locates the sugar exactly: `self.gain(input)` is the member's contract apply plus the bookkeeping of slicing its param and state in and writing the new state back, and nothing else.
+
+At two members the raw form is tolerable. The scale where it stops being tolerable is the real argument, so here is the shape of a real one: the FOC current controller from [`nodejax/examples/actuator/current_controller.py`](../nodejax/examples/actuator/current_controller.py), nine members including a stochastic current estimator, a noisy bus voltage sensor, a one-tick memory and a difference node, whose sugared apply reads as fifteen lines of imperative wiring. Desugared, abridged to its pattern:
+
+```python
+def current_controller_raw(dt, motor, bus_est, estimator, controller, fets, ff, limit, d_dt):
+    def init_fn(ndef, param, state_input, input=None):
+        # one boundary key, split BY HAND toward the stochastic members
+        # (the current estimator's sensor, the bus voltage sensor); the
+        # split count is bookkeeping that must track the census of
+        # stochastic members, and silently misroutes when it drifts
+        k_est, k_bus = jax.random.split(state_input.rng, 2)
+        return Struct(
+            estimator=estimator.init_fn(param.estimator, Struct(rng=k_est)),
+            bus_est=bus_est.init_fn((), Struct(rng=k_bus)),
+            controller=controller.init_fn(param.controller, Struct()),
+            fets=fets.init_fn(param.fets, Struct()),
+            pwm_prev=DQ(), d_dt=DQ(),
+            motor=(), ff=(), limit=())
+
+    def apply_fn(param, state, input):
+        # the bus voltage arrives TRUE and is sensed here: noisy
+        # measurement, its stream threaded like any other member state;
+        # everything downstream runs on the estimate
+        bus_state, est_v = bus_est.apply_fn((), state.bus_est, input.true_v)
+        _, target_i = limit.apply_fn(param.limit, (), input.target_i)
+        # methods (derate, voltage_terms) return values; contract applies
+        # return (state, output) tuples
+        target_i = fets.derate(param.fets, state.fets, target_i)
+        est_state, est_i = estimator.apply_fn(param.estimator, state.estimator,
+            Struct(value=input.true_i,
+                   model=Struct(motor=param.motor,
+                                mod_v=state.pwm_prev * est_v,
+                                est_velocity=input.est_velocity)))
+        ctrl_state, fb_v = controller.apply_fn(param.controller, state.controller,
+                                               target_i - est_i)
+        ddt_state, target_di = d_dt.apply_fn((), state.d_dt, target_i)
+        terms = motor.voltage_terms(param.motor, target_i, target_di, input.est_velocity)
+        _, ff_v = ff.apply_fn(param.ff, (), terms)
+        pwm = ((fb_v + ff_v) / jnp.maximum(est_v, 1e-3)).clamp_norm(1.0)
+        fets_state, _ = fets.apply_fn(param.fets, state.fets, est_i.norm2())
+        return Struct(estimator=est_state, bus_est=bus_state,
+                      controller=ctrl_state,
+                      fets=fets_state, pwm_prev=pwm, d_dt=ddt_state,
+                      motor=(), ff=(), limit=()), pwm
+```
+
+Every line that mentions `param.X` or `state.X` twice is threading, the collect Struct at the return must name every member every time, and the key split in init is a census that nothing checks. The sugared form contains none of it, and the rng census the raw init maintains by hand is derived there from which members declare rng, which is why adding a stochastic member to the sugared controller is one line and to the raw one is four edits.
+
 The section covers: what self is not (it does not survive the call), when to wire by hand versus reaching for serial and parallel, and what a wired composite still owes the contract (specs, member exposure).
 
 ## 15. Shape inference: input versus with_input

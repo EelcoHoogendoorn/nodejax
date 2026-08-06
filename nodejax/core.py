@@ -158,15 +158,32 @@ def _spec_sig(tree: Any) -> tuple:
 def _resolve(nd: 'NodeDef', value: Any) -> 'NodeDef':
     """Resolve a def's input spec against a value by the uniform rule:
     fill the spec from `spec_of(value)` when the def has no RESOLVED spec
-    (none declared, or only a signature-derived marker bundle), or validate
-    the value against a resolved spec and raise a NAMED conflict on
-    mismatch. Returns the def with a resolved spec."""
-    if not _spec_resolved(nd.apply_input_spec):
+    (none declared, or only a signature-derived marker bundle), or
+    validate the value against a resolved spec. Bundles validate by the
+    bundle rule, the same one every other bundle boundary applies:
+    unknown fields are a NAMED conflict, a present field must match the
+    spec's shape, and a spec field absent from the value is OPTIONAL —
+    its concrete spec value is the default the apply unpack fills.
+    Non-bundle trees compare whole. Returns the def with a resolved
+    spec."""
+    spec = nd.apply_input_spec
+    if not _spec_resolved(spec):
         return nd.with_input(value)
-    if _spec_sig(nd.apply_input_spec) != _spec_sig(value):
+    if isinstance(spec, Struct) and isinstance(value, Struct):
+        unknown = set(value.__keys__) - set(spec.__keys__)
+        if unknown:
+            raise TypeError(f"{nd.name}: unknown input fields {sorted(unknown)}; "
+                            f"the spec fields are {sorted(spec.__keys__)}")
+        for k in value.__keys__:
+            if _spec_sig(spec[k]) != _spec_sig(value[k]):
+                raise TypeError(
+                    f"{nd.name}.{k}: input shape {_spec_sig(value[k])[1]} conflicts "
+                    f"with its declared spec {_spec_sig(spec[k])[1]}")
+        return nd
+    if _spec_sig(spec) != _spec_sig(value):
         raise TypeError(
             f"{nd.name}: input shape {_spec_sig(value)[1]} conflicts with its "
-            f"declared spec {_spec_sig(nd.apply_input_spec)[1]}")
+            f"declared spec {_spec_sig(spec)[1]}")
     return nd
 
 
@@ -226,6 +243,52 @@ def _as_bundle(fields: dict) -> 'Struct':
     return Struct(**fields)
 
 
+# names that are CHANNELS in a method signature, injected by the view
+# that binds the method
+_METHOD_CHANNELS = frozenset({'param', 'state', 'ndef', 'rng'})
+
+
+def _bind_method(fn: Callable, offers: dict[str, Callable]) -> Callable:
+    """Bind a def method to a view. Reserved parameter names are CHANNELS
+    — ndef (the def), param (the object), state (the live state), rng
+    (the boundary key stream) — the same names with the same meaning as
+    in every authored signature, declared as a leading prefix in that
+    order (validated at authoring, _check_method_signature); every other
+    parameter is a call argument, filled positionally or by keyword. offers maps channel
+    name to a zero-arg supplier, read at CALL time, so a state read
+    after a member step sees the advance. A channel the view does not
+    offer is the caller's to pass by keyword, and an explicit keyword
+    always beats injection. rng arrives in the method as a KeyStream
+    either way: a view offers the boundary stream itself, an explicit
+    keyword passes a key that is wrapped at this seam — one drawing
+    idiom (rng.next()) in every context."""
+    names = list(inspect.signature(fn).parameters)
+    fields = [n for n in names if n not in _METHOD_CHANNELS]
+    channels = [n for n in names if n in _METHOD_CHANNELS]
+
+    def bound(*args: Any, **kwargs: Any) -> Any:
+        if len(args) > len(fields):
+            raise TypeError(f'{fn.__name__}() takes {len(fields)} call argument(s) '
+                            f'{fields}; the reserved names {channels} are injected')
+        kw = dict(zip(fields, args))
+        doubled = kw.keys() & kwargs.keys()
+        if doubled:
+            raise TypeError(f'{fn.__name__}() got multiple values for {sorted(doubled)}')
+        kw.update(kwargs)
+        for nm in channels:
+            if nm in kw:
+                if nm == 'rng':
+                    from nodejax.authoring import KeyStream
+                    kw[nm] = KeyStream(kw[nm])   # an explicit key, wrapped at the seam
+                continue
+            supplier = offers.get(nm)
+            if supplier is not None:
+                kw[nm] = supplier()
+        return fn(**kw)
+
+    return bound
+
+
 # === the form ===
 
 class NodeDef:
@@ -261,7 +324,7 @@ class NodeDef:
         self.parametric = parametric
         self.cyclic = cyclic
         self.apply_input_spec = apply_input_spec  # declared input (pytree of ShapeDtypeStruct); None = shape-generic
-        self.methods = methods  # non-reserved callables, param-first ('param plays self')
+        self.methods = methods  # callables whose reserved parameter names are CHANNELS (_bind_method)
         # init PRIMES from a real input value (a value of apply_input_spec —
         # its own channel, never a state_input field). Recorded at authoring
         # from the init signature; composite factories bubble it from members.
@@ -281,7 +344,7 @@ class NodeDef:
         self._state_input_spec = state_input_spec
 
     def __getattr__(self, name: str) -> Callable:
-        """Unbound method access: the raw param-first function."""
+        """Unbound method access: the raw function, channels explicit."""
         methods = object.__getattribute__(self, 'methods')
         if methods and name in methods:
             return methods[name]
@@ -664,15 +727,18 @@ class Node:
 
     def __getattr__(self, name: str) -> Any:
         """'Param plays self', readable from outside too: def methods
-        first (bound with this node's param as the first argument), then
-        param-field forwarding — a bound node reads like the object its
-        param tree describes, and the forwarding chains through nested
-        nodes (stack.current_ctrl.motor.resistance). Real Node attributes
+        first (channel-bound: param and ndef injected; a state or rng
+        channel is the caller's to pass by keyword, since a bare node
+        holds no live state and no stream), then param-field forwarding
+        — a bound node reads like the object its param tree describes,
+        and the forwarding chains through nested nodes
+        (stack.current_ctrl.motor.resistance). Real Node attributes
         (apply, init, param, name, ...) win over fields, and methods win
         over fields; node.param is always the unambiguous spelling."""
         methods = self.ndef.methods
         if methods and name in methods:
-            return partial(methods[name], self.param)
+            return _bind_method(methods[name],
+                                dict(param=lambda: self.param, ndef=lambda: self.ndef))
         param = object.__getattribute__(self, 'param')
         if isinstance(param, Struct) and name in param:
             return param[name]

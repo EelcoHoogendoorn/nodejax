@@ -16,11 +16,13 @@ from functools import partial, wraps
 from typing import Any, Callable, overload
 
 import jax
+import jax.numpy as jnp
 
 from nodejax.struct import Struct
 from nodejax.types import Param, State, ParamFn, ApplyFn
 from nodejax.core import (Node, NodeDef, _trivial_init_fn, _trivial_param_fn,
-                                REQUIRED, _bundle_spec_from_sig, _has_rng)
+                                REQUIRED, _bundle_spec_from_sig, _has_rng,
+                                _METHOD_CHANNELS)
 
 
 class KeyStream:
@@ -47,6 +49,15 @@ def _keys_only(tree: Any) -> Any:
     a key, not a stream)."""
     return jax.tree.map(lambda leaf: leaf.next() if isinstance(leaf, KeyStream) else leaf,
                         tree, is_leaf=lambda x: isinstance(x, KeyStream))
+
+
+def _as_arrays(tree: Any) -> Any:
+    """Cast every leaf of a constructed tree to a jax array. Applied at the
+    param and init lift exits, so authored constructors write plain python
+    numbers and the stored trees still carry uniform array leaves — the
+    per-field jnp.asarray in a constructor is the framework's job, not the
+    author's."""
+    return jax.tree.map(jnp.asarray, tree)
 
 
 def _no_var_params(fn: Callable, role: str) -> dict:
@@ -92,7 +103,7 @@ def _lift_param(ctor: Callable) -> Callable:
                 kw[nm] = param_input
             elif nm in param_input:
                 kw[nm] = param_input[nm]
-        return _keys_only(ctor(**kw))
+        return _as_arrays(_keys_only(ctor(**kw)))
 
     return param_fn
 
@@ -214,7 +225,7 @@ def _lift_init(init: Callable[..., State]) -> Callable[..., State]:
                 kw[nm] = state_input
             elif nm in state_input:
                 kw[nm] = state_input[nm]
-        return _keys_only(init(**kw))
+        return _as_arrays(_keys_only(init(**kw)))
 
     return init_fn
 
@@ -259,7 +270,33 @@ def _check_methods(methods: dict[str, Callable] | None) -> dict[str, Callable] |
         collisions = set(methods) & _RESERVED_NAMES
         if collisions:
             raise TypeError(f'method names shadow reserved node attributes: {sorted(collisions)}')
+        for nm, fn in methods.items():
+            _check_method_signature(nm, fn)
     return methods or None
+
+
+# channel rank in the contract order: binding times — structure, then
+# params, then state, then entropy
+_CHANNEL_RANK = {'ndef': 0, 'param': 1, 'state': 2, 'rng': 3}
+
+
+def _check_method_signature(nm: str, fn: Callable) -> None:
+    """A method signature reads like every authored signature: the
+    channels it declares form a LEADING prefix in the contract order —
+    ndef, param, state, rng — followed by the call arguments. self has
+    no meaning here: the object channel of a method is param."""
+    names = list(_no_var_params(fn, f'method {nm!r}'))
+    if 'self' in names:
+        raise TypeError(f"method {nm!r}: self has no meaning in a method "
+                        "signature; the object channel is param")
+    chans = [n for n in names if n in _METHOD_CHANNELS]
+    if names[:len(chans)] != chans:
+        raise TypeError(f"method {nm!r}: channels {chans} lead the signature; "
+                        f"call arguments follow them")
+    ranks = [_CHANNEL_RANK[c] for c in chans]
+    if ranks != sorted(ranks):
+        raise TypeError(f"method {nm!r}: channels follow the contract order "
+                        f"(ndef, param, state, rng); got {chans}")
 
 
 @overload
@@ -309,8 +346,14 @@ def node_def(apply: Callable | None = None, *, param: ParamFn | None = None,
     apply_input_spec optionally declares the input spec (a pytree of
     ShapeDtypeStruct and/or concrete values, see spec.py); shape-generic
     nodes leave it None and bind one later (with_input, or a wiring that
-    resolves it). methods attaches non-reserved callables, param-first
-    ('param plays self'); the Node view binds param on attribute access.
+    resolves it). methods attaches non-reserved callables whose reserved
+    parameter names are CHANNELS, injected by the view that binds the
+    method, a leading prefix in the contract order: ndef (the def),
+    param (the object; self has no meaning in a method), state (the
+    live state), rng (the boundary key stream) — the same names, the
+    same meaning as in every authored signature. Every other parameter
+    follows as a call argument; a channel a view cannot offer (state on
+    a bare Node) is the caller's to pass by keyword.
 
     Returns a NodeDef when parametric (bind via parameterize), and an
     already-bound Node otherwise. Usable as a decorator for apply-only nodes.

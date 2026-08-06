@@ -36,8 +36,8 @@ def pid_def(dt, dwrap=None):
     error difference (dwrap) for rotary signals. Signal-polymorphic:
     state shapes derive from the init input value (scalar or DQ)."""
     def param(kp, ki, kd=0.0, decay=0.0, integral_limit=1e9):
-        return Struct(kp=jnp.asarray(kp), ki=jnp.asarray(ki), kd=jnp.asarray(kd),
-                      decay=jnp.asarray(decay), integral_limit=jnp.asarray(integral_limit))
+        return Struct(kp=kp, ki=ki, kd=kd,
+                      decay=decay, integral_limit=integral_limit)
 
     def init(ndef, param):
         zeros = jax.tree.map(jnp.zeros_like, ndef.input)
@@ -72,7 +72,7 @@ def rate_limit_def(dt):
     """Optional pipeline stage: limit the output slew rate, in units
     per SECOND."""
     def param(max_rate):
-        return Struct(max_rate=jnp.asarray(max_rate))
+        return Struct(max_rate=max_rate)
 
     def init(ndef, param):
         return jax.tree.map(jnp.zeros_like, ndef.input)     # delayed signal; previous output
@@ -89,7 +89,7 @@ def rate_limit_def(dt):
 def clamp_def():
     """Optional pipeline stage: symmetric elementwise output limit."""
     def param(limit):
-        return Struct(limit=jnp.asarray(limit))
+        return Struct(limit=limit)
 
     def apply(self, input):
         return jax.tree.map(lambda x: jnp.clip(x, -self.limit, self.limit), input)
@@ -102,7 +102,7 @@ def clamp_norm_def():
     preserving direction — the current/voltage limiter, versus
     clamp_def's per-component box. Wraps the input's clamp_norm."""
     def param(limit):
-        return Struct(limit=jnp.asarray(limit))
+        return Struct(limit=limit)
 
     def apply(self, input):
         return input.clamp_norm(self.limit)
@@ -121,10 +121,10 @@ def observer_def(dt):
     angle wrapping; time constants are params (per-step alpha =
     1/(1+tau))."""
     def param(tau_pos=0.1, tau_vel=0.1):
-        return Struct(tau_pos=jnp.asarray(tau_pos), tau_vel=jnp.asarray(tau_vel))
+        return Struct(tau_pos=tau_pos, tau_vel=tau_vel)
 
     def init(param, position=0.0):
-        return Struct(position=jnp.asarray(position), velocity=jnp.asarray(0.0))
+        return Struct(position=position, velocity=0.0)
 
     def apply(self, state, input):
         measured = input
@@ -175,7 +175,7 @@ def ema_def(dt):
     """First-order low-pass, tau in seconds; signal-polymorphic (state
     from the init input value)."""
     def param(tau):
-        return Struct(tau=jnp.asarray(tau))
+        return Struct(tau=tau)
 
     def init(ndef, param):
         return jax.tree.map(jnp.zeros_like, ndef.input)
@@ -193,11 +193,11 @@ def blend_def(dt):
     (1 - alpha), alpha = 1/(tau/dt + 1); tau=0 is pure fast. A leaf
     node — the two signals its input, the weight (tau) its param."""
     def param(tau):
-        return Struct(tau=jnp.asarray(tau))
+        return Struct(tau=tau)
 
-    def apply(self, input):
+    def apply(self, fast, slow):
         alpha = 1.0 / (self.tau / dt + 1.0)
-        return input.fast * alpha + input.slow * (1.0 - alpha)
+        return fast * alpha + slow * (1.0 - alpha)
 
     return node_def(apply, param=param, name='blend')
 
@@ -231,8 +231,7 @@ def bag_def(**fields):
         unknown = set(given) - set(fields)
         if unknown:
             raise TypeError(f'bag has no field(s) {sorted(unknown)}; declared: {sorted(fields)}')
-        merged = {**fields, **given}
-        return Struct(**{k: jnp.asarray(v) for k, v in merged.items()})
+        return Struct(**{**fields, **given})
 
     def apply(param, input):
         return param
@@ -251,3 +250,18 @@ def delay_def(value):
         return input, state
 
     return node_def(apply, init=init, apply_input_spec=value, name='delay')
+
+
+@ambient
+def diff_def(dt):
+    """Discrete time derivative: (input - previous) / dt, the previous
+    value the node's state. Shape-generic: the node is always fed, so
+    the wiring resolves its spec from the call site (a delay declares a
+    default value instead because it is read before it is fed)."""
+    def init(ndef):
+        return jax.tree.map(jnp.zeros_like, ndef.input)
+
+    def apply(state, input):
+        return input, (input - state) / dt
+
+    return node_def(apply, init=init, name='diff')

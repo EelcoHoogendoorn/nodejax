@@ -17,8 +17,7 @@ from nodejax.examples.actuator import (actuator_stack_def, battery_def, noisy_de
                                     torque_command_def, current_controller_def,
                                     model_estimator_def, foc_current_model,
                                     current_sensor_def, pid_def, fet_def,
-                                    emotor_def, derating_thermal_def,
-                                    motor_model_def)
+                                    electrical_def, derating_thermal_def)
 
 DT = 1e-3
 
@@ -28,26 +27,26 @@ def stock_stack():
     return actuator_stack_def(
         DT,
         battery=battery_def(DT)(capacity=100.0),
-        voltage_est=noisy_def(0.2) >> ema_def(DT)(tau=0.01),
         mechanical_est=encoder_def() >> observer_def(DT),
         command_ctrl=torque_command_def(),
         current_ctrl=current_controller_def(
             DT,
-            motor=motor_model_def()(),
+            motor=electrical_def(DT)(),
             estimator=model_estimator_def(
                 DT,
                 filter=current_sensor_def() >> ema_def(DT)(tau=2e-3),
                 model_fn=foc_current_model(DT)),
             controller=pid_def(DT)(kp=0.5, ki=500.0),
-            fets=fet_def(DT)(r_th=2.0, c_th=5.0)),
-        motor=emotor_def(DT)(),
+            fets=fet_def(DT)(r_th=2.0, c_th=5.0),
+            bus_est=noisy_def(0.2) >> ema_def(DT)(tau=0.01)),
+        motor=electrical_def(DT)(),
         motor_thermal=derating_thermal_def(DT)(r_th=1.5, c_th=40.0, limit=100.0))
 
 
 def test_stack_runs_and_tracks():
     stack = stock_stack().parameterize()
     state = stack.init(rng=jax.random.PRNGKey(0))
-    assert state.voltage_est.ema == 48.0              # booted reading the bus
+    assert state.current_ctrl.bus_est.ema == 48.0  # booted reading the bus
 
     n = 500
     t = jnp.arange(n) * DT

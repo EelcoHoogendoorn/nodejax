@@ -14,13 +14,13 @@ build_state / apply_fn, with_input resolution).
 from __future__ import annotations
 
 import inspect
-from functools import partial
 
 import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax.core import NodeDef, split_aux, _as_bundle, _input_or_none, _resolve, _has_rng
+from nodejax.core import (NodeDef, split_aux, _as_bundle, _bind_method,
+                          _input_or_none, _resolve, _has_rng)
 from nodejax.authoring import KeyStream
 
 _NO_INPUT = object()   # a read, distinct from a feed of any value (None included)
@@ -28,19 +28,20 @@ _NO_INPUT = object()   # a read, distinct from a feed of any value (None include
 class _Member:
     """A live member handle on the transient self: calling it steps the
     member (repeated calls chain); attribute access reaches the def's
-    methods, bound to the LIVE slices — never a stored construction.
-    The param binds always (methods are param-first by contract); a
-    second parameter NAMED `state` declares the role and receives the
-    member's live state slice — chained, so a read after a step sees
-    the advance. Unbound calls through the def pass both explicitly,
-    in the same order."""
-    __slots__ = ('_call', '_ndef', '_param', '_state_fn')
+    methods, channel-bound to the LIVE slices — never a stored
+    construction. The reserved parameter names are the channels
+    (core._bind_method): ndef is the member's def, param its param,
+    state its chained state slice (a read after a step sees the
+    advance), rng the wiring's boundary stream. Unbound calls through the def
+    pass the channels explicitly."""
+    __slots__ = ('_call', '_ndef', '_param', '_state_fn', '_rng_fn')
 
-    def __init__(self, call, ndef, param, state_fn):
+    def __init__(self, call, ndef, param, state_fn, rng_fn=None):
         self._call = call
         self._ndef = ndef
         self._param = param
         self._state_fn = state_fn
+        self._rng_fn = rng_fn
 
     def __call__(self, *args, **fields):
         if fields:
@@ -53,11 +54,11 @@ class _Member:
     def __getattr__(self, name):
         methods = self._ndef.methods
         if methods and name in methods:
-            fn = methods[name]
-            sig = tuple(inspect.signature(fn).parameters)
-            if sig[1:2] == ('state',):
-                return partial(fn, self._param, self._state_fn())
-            return partial(fn, self._param)
+            offers = dict(param=lambda: self._param, state=self._state_fn,
+                          ndef=lambda: self._ndef)
+            if self._rng_fn is not None:
+                offers['rng'] = self._rng_fn
+            return _bind_method(methods[name], offers)
         raise AttributeError(f"member def {self._ndef.name!r} has no method {name!r}")
 
 
@@ -140,7 +141,8 @@ class _Wired:
             return out
 
         return _Member(call, block_def, block_param,
-                       lambda: self._new.get(name, self._state[name]))
+                       lambda: self._new.get(name, self._state[name]),
+                       (lambda: self._boundary) if self._boundary is not None else None)
 
     def collect(self, **extra: Any) -> Struct:
         """The composite's new state: original slots, called members at
@@ -200,6 +202,7 @@ class _InitWired:
         self._init = {}       # recorded initial states
         self._work = {}       # advancing states, for wiring propagation
         self._called = set()  # members whose init came from a feed (authoritative)
+        self._boundary = KeyStream(jax.random.PRNGKey(0))   # probe stream; discarded
 
     @property
     def param(self):
@@ -257,7 +260,8 @@ class _InitWired:
             return split_aux(out)[0]
 
         return _Member(call, d, self._param[name],
-                       lambda: self._work[name] if name in self._work else self._ensure(name))
+                       lambda: self._work[name] if name in self._work else self._ensure(name),
+                       lambda: self._boundary)
 
     def collect(self) -> Struct:
         for nm in self._defs:
@@ -279,6 +283,7 @@ class _BuildingWired:
         self._defs = defs
         self._given = given
         self._key = key
+        self._boundary = KeyStream(jax.random.PRNGKey(0))   # probe stream; discarded
         self._kwargs = kwargs
         self._built = {}
 
@@ -310,8 +315,9 @@ class _BuildingWired:
 class _Solo:
     """wrapper's transient step object: the inner node at (param,
     state) — callable to step it, repeated calls chaining; param and
-    state readable; the def's methods bound to the live param; the
-    advanced state is collected at return."""
+    state readable; the def's methods channel-bound to the live slices
+    (core._bind_method), the state channel chained so a read after a
+    step sees the advance; the advanced state is collected at return."""
     __slots__ = ('_nd', 'param', 'state', '_current')
 
     def __init__(self, nd, param, state):
@@ -327,37 +333,67 @@ class _Solo:
     def __getattr__(self, name):
         methods = self._nd.methods
         if methods and name in methods:
-            fn = methods[name]
-            sig = tuple(inspect.signature(fn).parameters)
-            if sig[1:2] == ('state',):
-                return partial(fn, self.param, self._current)
-            return partial(fn, self.param)
+            return _bind_method(methods[name],
+                                dict(param=lambda: self.param,
+                                     state=lambda: self._current,
+                                     ndef=lambda: self._nd))
         raise AttributeError(f"def {self._nd.name!r} has no method {name!r}")
+
+
+def _author_call(apply: Callable):
+    """Canonicalize an authored composite apply to call(self, input).
+    Two authored forms exist, mirroring the leaf sugar: (self, input)
+    receives the whole input channel, and (self, field, ...) receives
+    the input bundle unpacked by name, with a declared rng field
+    delivered as the boundary key stream (the SAME stream member
+    injection draws from, so author draws and injections never share a
+    key). Returns (call, field names or None), or None when the apply
+    is the raw contract triple."""
+    sig = tuple(inspect.signature(apply).parameters)
+    if sig == ('param', 'state', 'input'):
+        return None
+    if sig == ('self', 'input'):
+        return (lambda self, input: apply(self, input)), None
+    if sig[:1] == ('self',) and len(sig) > 1 and 'input' not in sig:
+        fields = sig[1:]
+
+        def call(self, input):
+            kw = {}
+            for f in fields:
+                if f == 'rng':
+                    kw[f] = self._boundary
+                elif f in input:
+                    kw[f] = input[f]        # absent optional: the sig default fills
+            return apply(self, **kw)
+
+        return call, fields
+    raise TypeError('composite apply is (self, input), (self, <fields...>), or '
+                    f'the raw (param, state, input) -> (state, output); got {sig}')
 
 
 def _wrap_apply(apply: Callable, defs: dict[str, NodeDef]) -> Callable:
     """Transform a composite apply into contract shape, by signature:
-    (self, input) builds the transient step object and auto-collects;
+    authored forms build the transient step object and auto-collect;
     the raw (param, state, input) passes through."""
-    sig = tuple(inspect.signature(apply).parameters)
-    boundary = any(d.ndef.apply_takes_rng for d in defs.values())
-    if sig == ('self', 'input'):
-        def apply_fn(p, s, input):
-            key = None
-            if boundary:
-                key = input.rng                  # missing key fails here, loudly
-                input = input.without('rng')
-            self = _Wired(p, s, defs, boundary_key=key)
-            out = apply(self, input)
-            new_state = self.collect()
-            if self._aux:
-                # member aux, diverted under member names, re-emitted as
-                # the (output, collection) pair — the channel nests
-                return new_state, (out, Struct(**self._aux))
-            return new_state, out
-        return apply_fn
-    if sig == ('param', 'state', 'input'):
+    authored = _author_call(apply)
+    if authored is None:
         return apply              # the raw triple, author-threaded
-    raise TypeError('composite apply is (self, input) -> output, or the raw '
-                    f'(param, state, input) -> (state, output); got {sig}')
+    call, fields = authored
+    author_rng = fields is not None and 'rng' in fields
+    boundary = author_rng or any(d.ndef.apply_takes_rng for d in defs.values())
+
+    def apply_fn(p, s, input):
+        key = None
+        if boundary:
+            key = input.rng                  # missing key fails here, loudly
+            input = input.without('rng')
+        self = _Wired(p, s, defs, boundary_key=key)
+        out = call(self, input)
+        new_state = self.collect()
+        if self._aux:
+            # member aux, diverted under member names, re-emitted as
+            # the (output, collection) pair — the channel nests
+            return new_state, (out, Struct(**self._aux))
+        return new_state, out
+    return apply_fn
 
