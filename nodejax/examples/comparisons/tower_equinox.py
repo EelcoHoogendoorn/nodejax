@@ -30,26 +30,39 @@ import optax
 from nodejax.examples.comparisons.tower_common import (
     HIDDEN, LAYERS, STEPS, META_STEPS, INNER_LR, make_data, make_tasks)
 
+class Cell(eqx.Module):
+    wx: jax.Array
+    wh: jax.Array
+    b: jax.Array
+
+    def __call__(self, h, x):
+        h_new = jnp.tanh(self.wx * x + self.wh @ h + self.b)
+        return h_new, h_new
+
+
+def make_cell(key):
+    k1, k2 = jax.random.split(key)
+    return Cell(wx=0.5 * jax.random.normal(k1, (HIDDEN,)),
+                wh=0.3 * jax.random.normal(k2, (HIDDEN, HIDDEN)) / jnp.sqrt(HIDDEN),
+                b=jnp.zeros(HIDDEN))
+
+
 class Net(eqx.Module):
     up_w: jax.Array
-    wx: jax.Array        # (LAYERS, HIDDEN): per-layer, stacked by hand
-    wh: jax.Array        # (LAYERS, HIDDEN, HIDDEN)
-    b: jax.Array         # (LAYERS, HIDDEN)
+    cells: Cell          # one Cell whose arrays carry a leading layer axis
     ro_w: jax.Array
     ro_b: jax.Array
 
     def step(self, h_layers, x):
-        """One timestep: scan over depth, threading each layer's hidden."""
-        signal = self.up_w * x
+        """One timestep: scan over depth; lax.scan slices the stacked
+        cell per layer, the layer's hidden rides alongside as xs."""
+        def depth(signal, xs):
+            cell, h = xs
+            h_new, y = cell(h, signal)
+            return y, h_new
 
-        def depth(carry, xs):
-            wx, wh, b, h = xs
-            h_new = jnp.tanh(wx * carry + wh @ h + b)
-            return h_new, h_new
-
-        signal, h_new = jax.lax.scan(depth, signal, (self.wx, self.wh, self.b, h_layers))
-        y = self.ro_w @ signal + self.ro_b
-        return h_new, y
+        signal, h_new = jax.lax.scan(depth, self.up_w * x, (self.cells, h_layers))
+        return h_new, self.ro_w @ signal + self.ro_b
 
     def rollout(self, xs):
         """Scan over time, carrying the (LAYERS, HIDDEN) state block."""
@@ -61,13 +74,11 @@ class Net(eqx.Module):
 
 
 def make_net(key):
-    k1, k2, k3, k4 = jax.random.split(key, 4)
+    k1, k2, k3 = jax.random.split(key, 3)
     return Net(
         up_w=0.5 * jax.random.normal(k1, (HIDDEN,)),
-        wx=0.5 * jax.random.normal(k2, (LAYERS, HIDDEN)),
-        wh=0.3 * jax.random.normal(k3, (LAYERS, HIDDEN, HIDDEN)) / jnp.sqrt(HIDDEN),
-        b=jnp.zeros((LAYERS, HIDDEN)),
-        ro_w=0.1 * jax.random.normal(k4, (HIDDEN,)),
+        cells=jax.vmap(make_cell)(jax.random.split(k2, LAYERS)),   # ctor lifted over layers
+        ro_w=0.1 * jax.random.normal(k3, (HIDDEN,)),
         ro_b=jnp.zeros(()),
     )
 
