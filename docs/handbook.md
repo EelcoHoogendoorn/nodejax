@@ -119,6 +119,28 @@ The section covers: what resolution means here, the error you get when you read 
 
 When `>>` is not the shape of your dataflow, `composite(apply, members=...)` lets you write the step against `self`: a scope-local, mutable, object-like view of the node, bound to the live params and state. Calling a member advances its state slice in place, reads see current values, and you write ordinary imperative wiring. Like the key stream, it is purely a scope-local abstraction: the sugar transforms your function into an ordinary pure apply, and to anything outside, only the node contract is visible.
 
+The two spellings of the same def, side by side. The sugared form:
+
+```python
+def smoothed(gain, ema):
+    def apply(self, input):
+        return self.ema(self.gain(input))
+    return composite(apply, members=dict(gain=gain, ema=ema), name='smoothed')
+```
+
+And the raw contract form the sugar produces, with the member threading explicit:
+
+```python
+def smoothed_raw(gain, ema):
+    def apply_fn(param, state, input):
+        _, u = gain.apply_fn(param.gain, (), input)          # non-cyclic member
+        ema_state, y = ema.apply_fn(param.ema, state.ema, u)  # cyclic member
+        return Struct(gain=(), ema=ema_state), y
+    ...
+```
+
+Reading them together locates the sugar exactly: `self.gain(input)` is the member's contract apply plus the bookkeeping of slicing its param and state in and writing the new state back, and nothing else. A controller with eight members and two one-tick memories reads as imperative wiring in the sugared form; its raw form is the same program with eight slices and eight write-backs spelled out.
+
 The section covers: what self is not (it does not survive the call), when to wire by hand versus reaching for serial and parallel, and what a wired composite still owes the contract (specs, member exposure).
 
 ## 15. Shape inference: input versus with_input
