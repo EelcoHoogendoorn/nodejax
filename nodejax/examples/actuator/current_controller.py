@@ -42,42 +42,50 @@ def ff_def():
     def param(r, bemf, l):
         return Struct(r=jnp.asarray(r), bemf=jnp.asarray(bemf), l=jnp.asarray(l))
 
-    def apply(self, input):
-        return (input.resistive * self.r + input.bemf * self.bemf
-                + input.inductive * self.l)
+    def apply(self, resistive, bemf, inductive):
+        return (resistive * self.r + bemf * self.bemf
+                + inductive * self.l)
 
     return node_def(apply, param=param, name='ff')
 
 
 @ambient
-def current_controller_def(dt, motor, estimator, controller, fets):
+def current_controller_def(dt, motor, estimator, controller, fets, bus_sensor):
     """Target current + measurements in, PWM out.
 
     input fields, declared by the apply signature: current (true DQ
-    current), velocity (estimated mechanical velocity), bus (estimated
-    bus voltage), target (DQ current target). The target arrives PRE-DERATED for anything this controller does
+    current), velocity (estimated mechanical velocity), bus (TRUE bus
+    voltage; the controller senses it through its own bus_sensor
+    member, as it senses current through the estimator's), target (DQ
+    current target). The target arrives PRE-DERATED for anything this controller does
     not own (the motor's thermal rollback happens where the motor
     thermal lives — at the stack). The factory argument list is the
     member list; ff (per-term feedforward weighting) and limit (a
     norm-clamp on the target current) are leaf-node members like the
     rest."""
     members = dict(motor=motor, estimator=estimator, controller=controller,
-                   fets=fets, ff=ff_def()(r=1.0, bemf=1.0, l=0.0),
+                   fets=fets, bus_sensor=bus_sensor,
+                   ff=ff_def()(r=1.0, bemf=1.0, l=0.0),
                    limit=clamp_norm_def()(limit=100.0),
                    pwm_prev=delay_def(DQ()), tgt_prev=delay_def(DQ()))
 
     def apply(self, current, velocity, bus, target):
+        # the controller owns its ADCs: the TRUE bus arrives and is
+        # sensed here, exactly as the current is sensed inside the
+        # estimator member; the estimate normalizes the pwm, while the
+        # model reads the voltage REALLY applied
+        est_v = self.bus_sensor(bus)
         target = self.limit(target)
         # the power stage derates by its own temperature (read-then-step)
         target = self.fets.derate(target)
 
-        # model-based estimation: the model sees the voltage we actually
-        # commanded last step (previous pwm x estimated bus)
-        i_est = self.estimator(Struct(
+        # model-based estimation: the model sees the voltage actually
+        # applied last step (previous pwm x TRUE bus)
+        i_est = self.estimator(
             value=current,
             model=Struct(motor=self.param.motor,
                          v_mod=self.state.pwm_prev * bus,
-                         velocity=velocity)))
+                         velocity=velocity))
 
         v_fb = self.controller(target - i_est)
         # feedforward with PER-TERM trust weights: resistive and
@@ -91,7 +99,7 @@ def current_controller_def(dt, motor, estimator, controller, fets):
 
         # guard: an estimator still converging from zero must not produce
         # NaN pwm; the norm clamp bounds the result either way
-        pwm = (v / jnp.maximum(bus, 1e-3)).clamp_norm(1.0)
+        pwm = (v / jnp.maximum(est_v, 1e-3)).clamp_norm(1.0)
 
         self.fets(i_est.norm2())                  # fets own r_dson: amps^2 in
         self.pwm_prev(pwm)
@@ -106,8 +114,8 @@ def current_controller_def(dt, motor, estimator, controller, fets):
 
 def torque_command_def():
     """Torque command -> DQ current target (id = 0)."""
-    def apply(input):
-        iq = input.command / input.motor.kt
+    def apply(command, motor):
+        iq = command / motor.kt
         return DQ(d=jnp.zeros_like(iq), q=iq)
     return node_def(apply, name='torque_command')
 
@@ -117,9 +125,9 @@ def velocity_command_def(velocity_ctrl):
     DQ current target."""
     members = dict(velocity_ctrl=velocity_ctrl)
 
-    def apply(self, input):
-        torque = self.velocity_ctrl(input.command - input.mechanical.velocity)
-        iq = torque / input.motor.kt
+    def apply(self, command, mechanical, motor):
+        torque = self.velocity_ctrl(command - mechanical.velocity)
+        iq = torque / motor.kt
         return DQ(d=jnp.zeros_like(iq), q=iq)
 
     return composite(apply, members=members, name='velocity_command')

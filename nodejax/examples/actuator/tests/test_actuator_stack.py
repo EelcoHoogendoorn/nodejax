@@ -30,10 +30,9 @@ def env_def(actuator, mechanical):
     -> torque; the environment integrates mechanics."""
     members = dict(actuator=actuator, mechanical=mechanical)
 
-    def apply(self, input):
-        torque = self.actuator(Struct(mechanical=self.state.mechanical,
-                                      command=input.command))
-        self.mechanical(Struct(torque=torque, load=0.0))
+    def apply(self, command):
+        torque = self.actuator(mechanical=self.state.mechanical, command=command)
+        self.mechanical(torque=torque, load=0.0)
         return torque
 
     return composite(apply, members=members, name='env', apply_input_spec=Struct(command=0.0))
@@ -47,7 +46,7 @@ def build_env(command_ctrl=None, capacity=jnp.inf, model_tau=0.0,
     eligible at each factory's definition site (@ambient), supplied
     once here, filled only where a call leaves it unbound — no
     threading, no registries, explicit always wins."""
-    m = motor_params()
+    m = motor_params(cogging=0.0)   # clean tracking; the bench tests own cogging fidelity
     with ambient(dt=dt):
         cc = current_controller_def(
             motor=motor_model_def().bind(m),   # internal model: params, no state
@@ -56,13 +55,13 @@ def build_env(command_ctrl=None, capacity=jnp.inf, model_tau=0.0,
                 model_fn=foc_current_model()).parameterize(mix=Struct(tau=model_tau)),
             controller=pid_def().parameterize(kp=0.5, ki=200.0, integral_limit=48.0),
             fets=fet_def().parameterize(r_th=2.0, c_th=0.5, limit=fet_limit),
+            bus_sensor=noisy_def(0.2) >> ema_def()(tau=1e-3),
         ).parameterize(ff=Struct(r=0.5, bemf=0.5, l=0.0), limit=Struct(limit=50.0))
         command = command_ctrl if command_ctrl is not None else \
             velocity_command_def(pid_def().parameterize(kp=1.0, ki=10.0,
                                                         integral_limit=40.0))
         actuator = actuator_stack_def(
             battery=battery_def().parameterize(voltage_max=48.0, capacity=capacity),
-            voltage_est=noisy_def(0.2) >> ema_def()(tau=1e-3),
             mechanical_est=encoder_def() >> observer_def()(tau_pos=1.0, tau_vel=100.0),
             command_ctrl=command, current_ctrl=cc,
             motor=emotor_def().bind(m),
@@ -92,7 +91,7 @@ def test_stack_assembly():
     assert act.motor_thermal == 25.0
     assert act.mechanical_est.observer.velocity == 0.0
     # one sensor stream per stochastic member, all split from one key
-    keys = [act.voltage_est.noisy.rng, act.mechanical_est.encoder.rng,
+    keys = [act.current_ctrl.bus_sensor.noisy.rng, act.mechanical_est.encoder.rng,
             act.current_ctrl.estimator.filter.rng]
     assert jnp.any(keys[0] != keys[1]) and jnp.any(keys[1] != keys[2])
 
@@ -143,7 +142,7 @@ def test_battery_sags_and_the_stack_feels_it():
     charge = traj.state.actuator.battery
     assert charge[-1] < 0.95                                  # visibly drained
     # (not asserted monotone: momentary negative power is regeneration)
-    est_v = traj.state.actuator.voltage_est.ema
+    est_v = traj.state.actuator.current_ctrl.bus_sensor.ema
     assert est_v[-1] < 47.0                                   # estimator follows the sag
     assert jnp.abs(traj.state.mechanical.velocity[-1] - 3.0) < 0.5  # still tracks
 

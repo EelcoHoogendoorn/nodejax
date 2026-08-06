@@ -1,12 +1,12 @@
 """PMSM motor model.
 
-One param constructor (motor_params), one shared METHODS dict
-(MOTOR_METHODS: the PMSM model equations, DQ arithmetic), three carriers:
-plant_def (full dynamics), emotor_def (electrical only), and
-motor_model_def — a STATELESS node that exists to be the internal-model
-FIELD of a controller: params + methods as a bound Node, state held
-elsewhere. Being non-cyclic its state slot is (), so composites can hold
-it without acquiring state.
+motor_model_def is the base object: the motor's params and its model
+equations as methods, stateless, existing to be the internal-model
+FIELD of a controller (being non-cyclic its state slot is (), so
+composites hold it without acquiring state). emotor_def derives from
+it, growing the electrical dynamics; the motor on a bench is
+bench_motor_def, a COMPOSITION of that same electrical motor with the
+mechanism, so the bench and the assembled system run identical parts.
 
 The cogging harmonic amplitude is the motor param `cogging`, so
 clean-plant tests can zero it.
@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax import ambient, node_def
+from nodejax import ambient, node_def, derive
 
 from nodejax.examples.actuator.dq import DQ
 
@@ -128,79 +128,73 @@ def motor_model_def():
                     methods=MOTOR_METHODS)
 
 
-# --- the physical plant as a cyclic node ---
+# --- the motor on a bench: composition, the same parts the system uses ---
 
 @ambient
-def plant_def(dt, substeps=4):
-    """Voltage command (DQ) + load torque -> motor state; `self` is the
-    motor. Electrical + mechanical Euler substeps, stiction, cogging,
-    hysteresis. State carries the current as a DQ."""
-    def init(position=0.0):
-        return Struct(current=DQ(jnp.asarray(0.0), jnp.asarray(0.0)),
-                      position=jnp.asarray(position), velocity=jnp.asarray(0.0))
+def bench_motor_def(dt):
+    """The whole motor on a bench, composed from the SAME parts the
+    assembled system uses: the electrical motor plus the mechanism,
+    in a feedback loop (previous mechanical state feeds the motor,
+    the motor's torque steps the mechanism). Voltage + load in,
+    mechanical state out."""
+    from nodejax import composite
+    members = dict(motor=emotor_def(dt), mechanical=mechanical_def(dt))
 
-    def _mechanical(m, s, load, h):
-        tau = torque(m, s.current)
-        friction = m.friction * s.velocity + m.hysteresis * jnp.sign(s.velocity)
-        total = tau - friction - load + _dedent(m, s.position)
-        velocity = s.velocity + (total / m.inertia) * h
-        # stiction: stick to zero when below the static torque threshold
-        is_dynamic = jnp.abs(velocity) * m.inertia > m.torque_static * h
-        velocity = velocity * is_dynamic
-        position = jnp.mod(s.position + velocity * h, 2.0 * jnp.pi)
-        return s.replace(position=position, velocity=velocity)
+    def apply(self, v, load=0.0):
+        out = self.motor(mechanical=self.state.mechanical, v=v)
+        return self.mechanical(torque=out.torque, load=load)
 
-    def apply(self, state, input):
-        h = dt / substeps
-
-        def substep(_, s):
-            di_dt = current_feedforward(self, input.v, s.current, s.velocity)
-            s = s.replace(current=s.current + di_dt * h)
-            return _mechanical(self, s, input.load, h)
-
-        new = jax.lax.fori_loop(0, substeps, substep, state)
-        return new, new
-
-    return node_def(apply, init=init, param=motor_params, name='plant',
-                    methods=MOTOR_METHODS)
+    return composite(apply, members=members, name='bench_motor')
 
 
 # --- split plant: electrical motor + external mechanics ---
 
 @ambient
 def emotor_def(dt, substeps=4):
-    """Electrical-only motor: mechanics live outside the actuator,
-    integrated at the environment level. Voltage in, torque and current
-    out; `self` is the motor."""
+    """The electrical motor: mechanics live outside (the mechanism's
+    inertia and loads are integrated by mechanical_def, at the bench or
+    the environment), so position and velocity arrive as INPUT and
+    torque goes out. The torque is everything the MOTOR produces:
+    electromagnetic, cogging (position harmonics), and iron hysteresis
+    drag; what the mechanism does with it (inertia, bearing friction,
+    stiction) is the mechanism's. Voltage in, torque and current out;
+    `self` is the motor."""
     def init():
         return DQ(jnp.asarray(0.0), jnp.asarray(0.0))
 
-    def apply(self, state, input):
+    def apply(self, state, mechanical, v):
         h = dt / substeps
 
         def substep(_, i):
-            di_dt = current_feedforward(self, input.v, i, input.mechanical.velocity)
+            di_dt = current_feedforward(self, v, i, mechanical.velocity)
             return i + di_dt * h
 
         current = jax.lax.fori_loop(0, substeps, substep, state)
-        return current, Struct(torque=torque(self, current), current=current)
+        tq = (torque(self, current) + _dedent(self, mechanical.position)
+              - self.hysteresis * jnp.sign(mechanical.velocity))
+        return current, Struct(torque=tq, current=current)
 
-    return node_def(apply, init=init, param=motor_params, name='emotor',
-                    methods=MOTOR_METHODS)
+    # the model object grows electrical dynamics only
+    return derive(motor_model_def(), apply=apply, init=init, name='emotor')
 
 
 @ambient
 def mechanical_def(dt):
-    """External mechanics: torque + load -> position/velocity."""
-    def param(inertia, friction=0.0):
-        return Struct(inertia=jnp.asarray(inertia), friction=jnp.asarray(friction))
+    """The mechanism: torque + load -> position/velocity. Owns what a
+    mechanism owns: inertia, bearing friction, and stiction (stick to
+    zero below the static torque threshold)."""
+    def param(inertia, friction=0.0, torque_static=0.0):
+        return Struct(inertia=jnp.asarray(inertia), friction=jnp.asarray(friction),
+                      torque_static=jnp.asarray(torque_static))
 
     def init(param, position=0.0):
         return Struct(position=jnp.asarray(position), velocity=jnp.asarray(0.0))
 
-    def apply(self, state, input):
-        total = input.torque - self.friction * state.velocity - input.load
+    def apply(self, state, torque, load=0.0):
+        total = torque - self.friction * state.velocity - load
         velocity = state.velocity + (total / self.inertia) * dt
+        is_dynamic = jnp.abs(velocity) * self.inertia > self.torque_static * dt
+        velocity = velocity * is_dynamic
         position = jnp.mod(state.position + velocity * dt, 2.0 * jnp.pi)
         new = Struct(position=position, velocity=velocity)
         return new, new

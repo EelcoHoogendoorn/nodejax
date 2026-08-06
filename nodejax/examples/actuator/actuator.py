@@ -7,16 +7,16 @@ from nodejax import ambient, composite, composite_init
 
 
 @ambient
-def actuator_stack_def(dt, battery, voltage_est, mechanical_est, command_ctrl,
+def actuator_stack_def(dt, battery, mechanical_est, command_ctrl,
                        current_ctrl, motor, motor_thermal):
     """One control tick: battery -> voltage estimation -> command
     controller -> current controller -> electrical motor. Mechanical
     state is an INPUT (integrated at the environment level), torque is
     the output. The factory argument list is the member list; blocks
     arrive as defs or constructed (bound nodes: their params become
-    the stored construction values). voltage_est is a sensor pipeline
-    ending in an ema member — its boot value is patched to the sampled
-    bus.
+    the stored construction values). The current controller senses the
+    bus through its own sensor pipeline ending in an ema member — its
+    boot value is patched to the sampled bus.
 
     Every estimate the controller consumes is estimated: bus voltage via
     a sensor pipeline, mechanicals via encoder >> observer (quantized,
@@ -27,7 +27,7 @@ def actuator_stack_def(dt, battery, voltage_est, mechanical_est, command_ctrl,
     temperature derates the current target (the fets' own thermal lives
     inside the current controller). The battery is read via its voltage
     METHOD before the step and stepped with the drawn power after."""
-    members = dict(battery=battery, voltage_est=voltage_est,
+    members = dict(battery=battery,
                    mechanical_est=mechanical_est, command_ctrl=command_ctrl,
                    current_ctrl=current_ctrl, motor=motor,
                    motor_thermal=motor_thermal)
@@ -42,27 +42,27 @@ def actuator_stack_def(dt, battery, voltage_est, mechanical_est, command_ctrl,
         states = composite_init(members, apply, param, input=ndef.input, rng=rng)
         # the raw unbound method spelling: init has no self in scope
         bus0 = battery.ndef.voltage(param.battery, states.battery)
-        return states.replace(voltage_est=states.voltage_est.replace(ema=bus0))
+        cc = states.current_ctrl
+        return states.replace(current_ctrl=cc.replace(
+            bus_sensor=cc.bus_sensor.replace(ema=bus0)))
 
-    def apply(self, input):
+    def apply(self, mechanical, command):
         true_v = self.battery.voltage()                             # method: pure read
-        est_v = self.voltage_est(true_v)
-        est_mech = self.mechanical_est(input.mechanical.position)   # encoder >> observer
+        est_mech = self.mechanical_est(mechanical.position)         # encoder >> observer
 
-        target = self.command_ctrl(Struct(motor=self.param.current_ctrl.motor,
-                                          mechanical=est_mech,
-                                          command=input.command))
+        target = self.command_ctrl(motor=self.param.current_ctrl.motor,
+                                   mechanical=est_mech, command=command)
         # the motor's thermal rollback happens HERE, where its thermal
         # lives — the current controller only derates for what it owns
         target = self.motor_thermal.derate(target)
-        pwm = self.current_ctrl(Struct(current=self.state.motor,   # true electrical state
-                                       velocity=est_mech.velocity,
-                                       bus=est_v, target=target))
-        out = self.motor(Struct(mechanical=input.mechanical, v=pwm * true_v))
+        pwm = self.current_ctrl(current=self.state.motor,          # true electrical state
+                                velocity=est_mech.velocity,
+                                bus=true_v, target=target)
+        out = self.motor(mechanical=mechanical, v=pwm * true_v)
 
         p_diss = out.current.norm2() * self.param.motor.resistance
         self.motor_thermal(p_diss)                                 # heat the windings
-        self.battery(input.mechanical.velocity * out.torque + p_diss)
+        self.battery(mechanical.velocity * out.torque + p_diss)
         return out.torque
 
     return composite(apply, members=members, init=init, name='actuator_stack',

@@ -195,9 +195,9 @@ def blend_def(dt):
     def param(tau):
         return Struct(tau=jnp.asarray(tau))
 
-    def apply(self, input):
+    def apply(self, fast, slow):
         alpha = 1.0 / (self.tau / dt + 1.0)
-        return input.fast * alpha + input.slow * (1.0 - alpha)
+        return fast * alpha + slow * (1.0 - alpha)
 
     return node_def(apply, param=param, name='blend')
 

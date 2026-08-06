@@ -8,7 +8,7 @@ import jax.numpy as jnp
 
 from nodejax import scan
 from nodejax.struct import Struct
-from nodejax.examples.actuator import (DQ, motor_params, plant_def,
+from nodejax.examples.actuator import (DQ, motor_params, bench_motor_def,
                                     pid_def, rate_limit_def, clamp_def, wrap_def)
 
 DT = 1e-4
@@ -50,24 +50,28 @@ def test_pid_core_is_signal_polymorphic():
 
 
 def test_stiction_holds_the_rotor():
-    """Plant fidelity: below the static-torque threshold the rotor sticks;
-    zero the threshold and the same drive spins it."""
+    """Bench fidelity: below the mechanism's static-torque threshold the
+    rotor sticks; zero the threshold and the same drive spins it."""
     drive = Struct(v=DQ(jnp.zeros(400), jnp.full(400, 0.1)), load=jnp.zeros(400))
 
-    sticky = scan(plant_def(DT)).bind(motor_params(torque_static=2.0))
-    assert jnp.all(sticky.apply(drive).velocity == 0.0)
+    def bench(torque_static):
+        return scan(bench_motor_def(DT)).parameterize(
+            motor=motor_params(),
+            mechanical=Struct(inertia=0.1, friction=1e-3,
+                              torque_static=torque_static))
 
-    free = scan(plant_def(DT)).bind(motor_params(torque_static=0.0))
-    assert free.apply(drive).velocity[-1] > 0.0
+    assert jnp.all(bench(2.0).apply(drive).velocity == 0.0)
+    assert bench(0.0).apply(drive).velocity[-1] > 0.0
 
 
 def test_recorded_rollout():
     """scan(record=True): the full state trajectory rides along — the
     Simulation.run convention as a stock transform (keyless plants)."""
-    seq = scan(plant_def(DT), record=True).bind(motor_params())
+    seq = scan(bench_motor_def(DT), record=True).parameterize(
+        motor=motor_params(), mechanical=Struct(inertia=0.1, friction=1e-3))
     drive = Struct(v=DQ(jnp.zeros(300), jnp.full(300, 1.0)), load=jnp.zeros(300))
     ys = seq.apply(drive)
 
-    assert ys.state.velocity.shape == (300,)
+    assert ys.state.mechanical.velocity.shape == (300,)
     assert ys.output.position.shape == (300,)
-    assert ys.state.velocity[-1] > 0.0
+    assert ys.state.mechanical.velocity[-1] > 0.0

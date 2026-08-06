@@ -17,21 +17,20 @@ from nodejax.examples.actuator.dq import DQ
 
 
 @ambient
-def model_estimator_def(dt, filter, model_fn=None):
+def model_estimator_def(dt, filter, model_fn=lambda filtered, previous, model: filtered):
     """Blend a filtered measurement with a model prediction.
 
-    input: Struct(value=<measured value>, model=<whatever model_fn
-    needs>). model_fn(filtered, previous_blend, input.model) ->
-    prediction; None means identity (pure measurement path). mix.tau
+    input fields: value (the measured value), model (whatever model_fn
+    needs). model_fn(filtered, previous_blend, model) -> prediction;
+    the default is the identity model, a pure measurement path. mix.tau
     is the model-influence time constant (0 = pure measurement); prev
     carries the previous blend (a DQ) for the model's prediction."""
     members = dict(filter=filter, mix=blend_def(dt)(tau=0.0), prev=delay_def(DQ()))
 
-    def apply(self, input):
-        filtered = self.filter(input.value)
-        predicted = filtered if model_fn is None else \
-            model_fn(filtered, self.state.prev, input.model)
-        blended = self.mix(Struct(fast=filtered, slow=predicted))
+    def apply(self, value, model=None):
+        filtered = self.filter(value)
+        predicted = model_fn(filtered, self.state.prev, model)
+        blended = self.mix(fast=filtered, slow=predicted)
         self.prev(blended)
         return blended
 
