@@ -139,7 +139,45 @@ def smoothed_raw(gain, ema):
     ...
 ```
 
-Reading them together locates the sugar exactly: `self.gain(input)` is the member's contract apply plus the bookkeeping of slicing its param and state in and writing the new state back, and nothing else. A controller with eight members and two one-tick memories reads as imperative wiring in the sugared form; its raw form is the same program with eight slices and eight write-backs spelled out.
+Reading them together locates the sugar exactly: `self.gain(input)` is the member's contract apply plus the bookkeeping of slicing its param and state in and writing the new state back, and nothing else.
+
+At two members the raw form is tolerable. The scale where it stops being tolerable is the real argument, so here is the shape of a real one: the FOC current controller from [`nodejax/examples/actuator/current_controller.py`](../nodejax/examples/actuator/current_controller.py), eight members including a stochastic estimator and two one-tick memories, whose sugared apply reads as fifteen lines of imperative wiring. Desugared, abridged to its pattern:
+
+```python
+def current_controller_raw(dt, motor, estimator, controller, fets, ff, limit):
+    def init_fn(ndef, param, state_input, input=None):
+        # one boundary key, split BY HAND toward the stochastic members;
+        # the split count is bookkeeping that must track the census of
+        # stochastic members, and silently misroutes when it drifts
+        (k_est,) = jax.random.split(state_input.rng, 1)
+        return Struct(
+            estimator=estimator.init_fn(param.estimator, Struct(rng=k_est)),
+            controller=controller.init_fn(param.controller, Struct()),
+            fets=fets.init_fn(param.fets, Struct()),
+            pwm_prev=DQ(), tgt_prev=DQ(),
+            motor=(), ff=(), limit=())
+
+    def apply_fn(param, state, input):
+        _, target = limit.apply_fn(param.limit, (), input.target)
+        target = fets.derate(param.fets, state.fets, target)
+        est_state, i_est = estimator.apply_fn(param.estimator, state.estimator,
+            Struct(value=input.current,
+                   model=Struct(motor=param.motor,
+                                v_mod=state.pwm_prev * input.bus,
+                                velocity=input.velocity)))
+        ctrl_state, v_fb = controller.apply_fn(param.controller, state.controller,
+                                               target - i_est)
+        di_ref = (target - state.tgt_prev) / dt
+        _, terms = motor.voltage_terms(param.motor, target, di_ref, input.velocity)
+        _, v_ff = ff.apply_fn(param.ff, (), terms)
+        pwm = ((v_fb + v_ff) / jnp.maximum(input.bus, 1e-3)).clamp_norm(1.0)
+        fets_state, _ = fets.apply_fn(param.fets, state.fets, i_est.norm2())
+        return Struct(estimator=est_state, controller=ctrl_state,
+                      fets=fets_state, pwm_prev=pwm, tgt_prev=target,
+                      motor=(), ff=(), limit=()), pwm
+```
+
+Every line that mentions `param.X` or `state.X` twice is threading, the collect Struct at the return must name every member every time, and the key split in init is a census that nothing checks. The sugared form contains none of it, and the rng census the raw init maintains by hand is derived there from which members declare rng, which is why adding a stochastic member to the sugared controller is one line and to the raw one is four edits.
 
 The section covers: what self is not (it does not survive the call), when to wire by hand versus reaching for serial and parallel, and what a wired composite still owes the contract (specs, member exposure).
 
