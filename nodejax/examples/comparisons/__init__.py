@@ -8,8 +8,10 @@ reading the four side by side and counting what each framework makes
 you say. The flax and torch versions import their frameworks; install
 those separately to run them.
 
-`imu_equinox.py` is a second comparison with a different moral: the
-compositional IMU from `nodejax/tests/test_imu.py`, rebuilt in
-idiomatic equinox, where the state container, its init composition,
-and the threading step are written by hand.
+`imu_equinox.py` and `imu_flax.py` are a second comparison with a
+different moral: the compositional IMU from `nodejax/tests/test_imu.py`
+rebuilt in idiomatic equinox and in flax nnx, showing where each
+framework puts the state work (a hand-written container and threading
+step there, per-boundary split/merge ceremony here) that nodejax
+derives from the contract.
 """

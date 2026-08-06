@@ -57,7 +57,7 @@ The contract and its container live in [`nodejax/core.py`](nodejax/core.py). Sta
 
 ## Composition
 
-Nodejax aims to make composition and transformations of nodes frictionless.
+Nodejax aims to make composition and transformations of nodes frictionless, with or without state.
 
 ```python
 net   = linear(64) >> gelu >> linear(10)
@@ -68,7 +68,7 @@ model.apply(images)                 # logits
 ```
 Code: [`nodejax/examples/test_digits_committee.py`](nodejax/examples/test_digits_committee.py)
 
-`>>` chains nodes into a node. The pipe's params and state are trees named by member, each member sized from what its own upstream produces. Both trees are ordinary JAX pytrees: `jax.grad` with respect to a model is simply `jax.grad`, and reading or editing weights is tree access, with no module object in the way.
+`>>` chains nodes into a node. The pipe's params and state are trees named by member, each member sized from what its own upstream produces.
 
 ## Example Transforms
 
@@ -82,7 +82,7 @@ finetune(node, loss, opt)     # adaptation as a differentiable function
 tie(pipe, src, *aliases)      # parameter sharing as reparameterization
 ```
 
-Each of these is a reusable standard library component, written in a few dozen lines, generic over any Node. Because a node separates statics, params, state and apply input, every transform knows which axes to act on without `in_axes` bookkeeping. Code: [`nodejax/transforms/`](nodejax/transforms/).
+Each of these is a reusable standard library component, written in a few dozen lines, generic over any Node. Because a node separates statics, params, state and apply input, every transform knows which axes to act on in a generic manner. Code: [`nodejax/transforms/`](nodejax/transforms/).
 
 ## The trainer is a composable node
 
@@ -92,14 +92,14 @@ maml = train_step(batch(finetune(model, loss, sgd(0.1))), loss, adam(1e-2))
 targets = enc.apply(state.ema, v2)  # BYOL: an EMA node smoothing a weight subtree
 ```
 
-`train_step` is itself a Node whose state holds the weights, the optimizer moments, and the model's own state. This makes it easy to implement concepts like meta-learning. Everything a framework would offer as a feature on its trainer object is, here, a transform applied to it or a tree operation on its state. Code: [`nodejax/examples/test_population.py`](nodejax/examples/test_population.py), [`nodejax/transforms/tests/test_finetune.py`](nodejax/transforms/tests/test_finetune.py), [`nodejax/examples/test_byol.py`](nodejax/examples/test_byol.py).
+`train_step` is itself a Node whose state holds the weights, the optimizer moments, and the model's own state. This makes it easy to implement concepts like meta-learning. Code: [`nodejax/examples/test_population.py`](nodejax/examples/test_population.py), [`nodejax/transforms/tests/test_finetune.py`](nodejax/transforms/tests/test_finetune.py), [`nodejax/examples/test_byol.py`](nodejax/examples/test_byol.py).
 
 ```python
 gan = gan_def(adam(d_lr), adam(g_lr))     # one adversarial round; two trainers inside
 meta = train_step(replay(gan, rounds=60), sample_quality, adam(0.2))
 ```
 
-And it nests without limit: the adversarial round holds two trainers, and an outer trainer learns their learning rates through the replayed game. Code: [`nodejax/examples/test_gan.py`](nodejax/examples/test_gan.py).
+And node transforms nest without limit: the adversarial round holds two trainers, and an outer trainer learns their learning rates through the replayed game. Code: [`nodejax/examples/test_gan.py`](nodejax/examples/test_gan.py).
 
 ## Examples
 
