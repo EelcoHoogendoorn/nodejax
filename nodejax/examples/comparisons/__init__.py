@@ -20,5 +20,8 @@ The tower files (`tower_nodejax.py`, `tower_flax.py`,
 time, batched, trained over a stream, and in a meta variant adapted
 per task inside the training scan. Same model, task, and budget in
 each; matched losses; the state routing written the way each
-framework wants it written.
+framework wants it written. `tower_flax_reusable.py` steelmans the
+nnx side: the routing extracted into generic combinators, which works
+exactly insofar as the file invents a cell protocol and treats
+Variable kinds as role declarations, a contract in embryo.
 """
