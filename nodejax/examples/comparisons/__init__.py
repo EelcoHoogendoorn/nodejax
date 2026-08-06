@@ -14,4 +14,11 @@ rebuilt in idiomatic equinox and in flax nnx, showing where each
 framework puts the state work (a hand-written container and threading
 step there, per-boundary split/merge ceremony here) that nodejax
 derives from the contract.
+
+The tower files (`tower_nodejax.py`, `tower_flax.py`,
+`tower_equinox.py`) nest the boundaries: a stacked RNN, scanned over
+time, batched, trained over a stream, and in a meta variant adapted
+per task inside the training scan. Same model, task, and budget in
+each; matched losses; the state routing written the way each
+framework wants it written.
 """

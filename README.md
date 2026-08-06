@@ -116,6 +116,7 @@ Each is a test; each runs.
 - [`nodejax/examples/test_population.py`](nodejax/examples/test_population.py): eight models trained as one program; the champion slices out as an ordinary model.
 - [`nodejax/examples/test_train_loop.py`](nodejax/examples/test_train_loop.py): the mundane loop done right: jitted chunks, host-side stats, early stopping, bit-exact reproducibility.
 - [`nodejax/examples/comparisons/imu_nodejax.py`](nodejax/examples/comparisons/imu_nodejax.py): a drifting, quantized accelerometer as a pipe of four physical components; equinox and flax versions sit beside it.
+- [`nodejax/examples/comparisons/tower_nodejax.py`](nodejax/examples/comparisons/tower_nodejax.py): a stacked RNN, scanned, batched, trained, and meta-adapted, four nested axes; the flax and equinox towers sit beside it.
 - [`nodejax/transforms/tests/test_tie.py`](nodejax/transforms/tests/test_tie.py): tied autoencoders and tied embeddings: one copy in the tree, so the two views cannot drift apart.
 
 ## Status
