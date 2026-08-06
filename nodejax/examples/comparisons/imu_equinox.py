@@ -1,7 +1,7 @@
 """The compositional IMU, in equinox: what state costs without a contract.
 
 The nodejax version is five defs and one line of composition
-(`nodejax/tests/test_imu.py`):
+(`imu_nodejax.py`):
 
     imu = derivative(DT) >> derivative(DT) >> noise() >> drift(DT) >> quantizer(RES)
 

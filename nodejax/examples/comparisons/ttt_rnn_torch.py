@@ -2,7 +2,7 @@
 
 The eager-object exhibit, sibling to ttt_rnn_by_hand.py and
 ttt_rnn_flax.py: the same task family, budget and scoring as
-meta_comparison's ttt rows, with the same question — can TTT be
+ttt_nodejax's ttt rows, with the same question — can TTT be
 written once, over arbitrary recurrent modules, as nodejax's ttt
 transform is?
 
@@ -77,7 +77,7 @@ def query_mse(pred, target):
 
 
 class TanhCell(nn.Module):
-    """meta_comparison's rnn predictor, torch-spelled: tanh recurrence
+    """ttt_nodejax's rnn predictor, torch-spelled: tanh recurrence
     over the lag vector, the hidden state doubling as output."""
 
     def __init__(self, lags: int, hidden: int):

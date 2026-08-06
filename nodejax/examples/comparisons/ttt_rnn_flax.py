@@ -1,7 +1,7 @@
 """A generic test-time-training wrapper in idiomatic Flax NNX.
 
 The incumbent-middleware exhibit, sibling to ttt_rnn_by_hand.py: the
-same task family, budget and scoring as meta_comparison's ttt rows,
+same task family, budget and scoring as ttt_nodejax's ttt rows,
 but the question here is REUSABILITY — can TTT be written once, over
 arbitrary recurrent modules, as nodejax's ttt transform is?
 
@@ -107,7 +107,7 @@ class Stateless(nnx.Module):
     stateless modules have a different call shape (no carry), so
     covering them takes this adapter — the trivial state slot the
     module taxonomy lacks, supplied by hand. In the node contract the
-    slot exists universally, which is why meta_comparison's
+    slot exists universally, which is why ttt_nodejax's
     ttt-linear and ttt-mlp rows use the same stock transform as
     ttt-rnn, unchanged."""
 
@@ -180,7 +180,7 @@ class Stacked(nnx.Module):
 
 class DeepForecast(nnx.Module):
     """proj >> Stacked >> head, still the protocol — the flax
-    spelling of ttt's stacked inner from meta_comparison."""
+    spelling of ttt's stacked inner from ttt_nodejax."""
 
     def __init__(self, make_cell, n: int, rngs: nnx.Rngs):
         self.proj = nnx.Linear(LAGS, HIDDEN, rngs=rngs)
@@ -382,7 +382,7 @@ def main():
     run('ttt(GRUCell)', TTT(Forecast(nnx.GRUCell(LAGS, HIDDEN, rngs=rngs),
                                      HIDDEN, rngs), mse, TTT_LR0))
     # gelu inner: nothing saturates, so the cooler seed rate (the
-    # meta_comparison ttt-mlp finding, reproduced here)
+    # ttt_nodejax ttt-mlp finding, reproduced here)
     run('ttt(MLP)', TTT(Stateless(MLP(rngs)), mse, 0.003))
     run('ttt(2xSimple)', TTT(DeepForecast(
         lambda r: nnx.SimpleCell(HIDDEN, HIDDEN, rngs=r), 2, rngs), mse, TTT_LR0))

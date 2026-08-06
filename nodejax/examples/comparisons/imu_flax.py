@@ -2,7 +2,7 @@
 the boundary hard.
 
 The nodejax version is five defs and one line of composition
-(`nodejax/tests/test_imu.py`); the equinox counterpart
+(`imu_nodejax.py`); the equinox counterpart
 (`imu_equinox.py`) pays for statelessness with a hand-written state
 container, init, and threading step. nnx sits at the other pole:
 modules are mutable Python objects, so the per-step wiring below is

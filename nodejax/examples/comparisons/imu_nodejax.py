@@ -1,4 +1,8 @@
-"""A compositional IMU sensor model.
+"""The compositional IMU, in nodejax: the version the other files chase.
+
+Side by side with `imu_equinox.py` and `imu_flax.py`: the same sensor,
+with the state container, init composition, threading and key routing
+derived from the component definitions.
 
 position -> derivative >> derivative >> noise >> drift >> quantizer -> accel
 
@@ -17,10 +21,57 @@ from nodejax.struct import Struct
 import numpy as np
 
 from nodejax import NodeDef
-from nodejax.examples import derivative_node, noise_def, drift_def, quantizer
+
+from nodejax import node_def
 
 DT = 0.01
 RES = 0.05
+
+
+def derivative_node(dt):
+    """Discrete derivative. Its state (the previous sample) PRIMES from the
+    init input value — zero is a poor default; the first real sample
+    is the right one. With priming, the
+    first output is 0 instead of a (x0 - 0)/dt spike."""
+    def init(input):
+        return jnp.asarray(input)          # DATA: primes from the real first sample
+    def apply(state, input):
+        return input, (input - state) / dt
+    return node_def(apply, init=init, name='derivative')
+
+
+def noise_def():
+    """Additive white noise; density is a param (trainable, e.g. for sensor
+    model fitting). Streaming randomness = rng-as-state: the reserved rng
+    field auto-advances, and composite init routes a key here mid-pipe."""
+    def param(density):
+        return Struct(density=jnp.asarray(density))
+    def init(param, rng):
+        return Struct(rng=rng)
+    def apply(param, state, input):
+        return state, input + param.density * jax.random.normal(state.rng)
+    return node_def(apply, param=param, init=init, name='noise')
+
+
+def drift_def(dt):
+    """Slowly wandering bias (Ornstein-Uhlenbeck-ish): cyclic state carries
+    both the bias and its noise stream."""
+    def param(density, tau):
+        return Struct(density=jnp.asarray(density), tau=jnp.asarray(tau))
+    def init(param, rng):
+        return Struct(bias=jnp.asarray(0.0), rng=rng)
+    def apply(param, state, input):
+        step = param.density * jnp.sqrt(dt) * jax.random.normal(state.rng)
+        bias = state.bias * (1.0 - dt / param.tau) + step
+        return state.replace(bias=bias), input + bias
+    return node_def(apply, param=param, init=init, name='drift')
+
+
+def quantizer(resolution):
+    """Round to the sensor's resolution grid; plain stateless node."""
+    return node_def(lambda input: jnp.round(input / resolution) * resolution,
+                    name='quantizer')
+
 
 
 def imu_pipe():

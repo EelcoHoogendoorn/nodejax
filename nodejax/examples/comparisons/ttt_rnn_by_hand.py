@@ -1,4 +1,4 @@
-"""meta_comparison's ttt-rnn row, hand-rolled in raw JAX.
+"""ttt_nodejax's ttt-rnn row, hand-rolled in raw JAX.
 
 Self-contained: no nodejax import. The same model — a tanh rnn whose
 weights are fast state, updated by one self-supervised gradient step
@@ -14,7 +14,7 @@ explicit below: the (weights, hidden) carry tuple, the rate tree
 threaded by closure, the per-task vmap, the meta-training scan, the
 init/apply split. It is worth noting what the raw form does NOT
 make hard: one fixed configuration, hand-rolled once, is manageable.
-The tax is structural: every row-swap of meta_comparison (linear,
+The tax is structural: every row-swap of ttt_nodejax (linear,
 mlp, ssm, a stacked pipe as the inner) is here a rewrite, and none of
 batch/ensemble/persist/stack exists to be composed.
 

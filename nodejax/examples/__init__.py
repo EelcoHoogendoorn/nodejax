@@ -190,51 +190,9 @@ def walker_def():
     return node_def(apply, param=param, init=init, name='walker')
 
 
-# --- sensor simulation: a compositional IMU ---
-
-def derivative_node(dt):
-    """Discrete derivative. Its state (the previous sample) PRIMES from the
-    init input value — zero is a poor default; the first real sample
-    is the right one. With priming, the
-    first output is 0 instead of a (x0 - 0)/dt spike."""
-    def init(input):
-        return jnp.asarray(input)          # DATA: primes from the real first sample
-    def apply(state, input):
-        return input, (input - state) / dt
-    return node_def(apply, init=init, name='derivative')
-
-
-def noise_def():
-    """Additive white noise; density is a param (trainable, e.g. for sensor
-    model fitting). Streaming randomness = rng-as-state: the reserved rng
-    field auto-advances, and composite init routes a key here mid-pipe."""
-    def param(density):
-        return Struct(density=jnp.asarray(density))
-    def init(param, rng):
-        return Struct(rng=rng)
-    def apply(param, state, input):
-        return state, input + param.density * jax.random.normal(state.rng)
-    return node_def(apply, param=param, init=init, name='noise')
-
-
-def drift_def(dt):
-    """Slowly wandering bias (Ornstein-Uhlenbeck-ish): cyclic state carries
-    both the bias and its noise stream."""
-    def param(density, tau):
-        return Struct(density=jnp.asarray(density), tau=jnp.asarray(tau))
-    def init(param, rng):
-        return Struct(bias=jnp.asarray(0.0), rng=rng)
-    def apply(param, state, input):
-        step = param.density * jnp.sqrt(dt) * jax.random.normal(state.rng)
-        bias = state.bias * (1.0 - dt / param.tau) + step
-        return state.replace(bias=bias), input + bias
-    return node_def(apply, param=param, init=init, name='drift')
-
-
-def quantizer(resolution):
-    """Round to the sensor's resolution grid; plain stateless node."""
-    return node_def(lambda input: jnp.round(input / resolution) * resolution,
-                    name='quantizer')
+# the IMU components live with their framework comparisons
+from nodejax.examples.comparisons.imu_nodejax import (derivative_node, noise_def,
+                                                     drift_def, quantizer)
 
 
 # --- meta-learning: promoting statics to params ---

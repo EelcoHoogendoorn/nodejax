@@ -60,7 +60,7 @@ labeled data.
 Writes one figure per row to plots/meta_<name>.png and a summary
 table to stdout.
 
-Run directly:  python -m nodejax.examples.meta_comparison
+Run directly:  python -m nodejax.examples.ttt_nodejax
 """
 
 import os

@@ -108,14 +108,14 @@ Each is a test; each runs.
 - [`nodejax/tests/test_motor_control.py`](nodejax/tests/test_motor_control.py): the opening block; a test-time-training committee drives a motor, trained through the physics.
 - [`nodejax/examples/test_gan.py`](nodejax/examples/test_gan.py): a GAN as one node; a population of games via `ensemble`; the learning rates meta-learned through the unrolled game.
 - [`nodejax/examples/test_byol.py`](nodejax/examples/test_byol.py): BYOL, where the target network is an EMA filter applied to the encoder's weight subtree.
-- [`nodejax/examples/meta_comparison.py`](nodejax/examples/meta_comparison.py): test-time training with a RECURRENT inner model, benchmarked against ttt variants and plain RNNs.
+- [`nodejax/examples/comparisons/ttt_nodejax.py`](nodejax/examples/comparisons/ttt_nodejax.py): test-time training with a RECURRENT inner model, benchmarked against ttt variants and plain RNNs; the same model in flax, torch, and raw JAX sits beside it.
 - [`nodejax/examples/test_meta_controller.py`](nodejax/examples/test_meta_controller.py): MAML over controllers: `train_step(batch(metasgd(task)))` adapts to plants unseen at training time.
 - [`nodejax/examples/test_char_lm.py`](nodejax/examples/test_char_lm.py): a character LM with mixture-of-experts aux losses, tied embeddings, and a sampling loop as a scanned node.
 - [`nodejax/examples/test_digits_committee.py`](nodejax/examples/test_digits_committee.py): deep residual recurrent committee over pixel rows; whitening stats live inside the stack, frozen-read at eval.
 - [`nodejax/examples/test_transfer.py`](nodejax/examples/test_transfer.py): pretrain, freeze the trunk, swap the head: the frozen trunk comes out bitwise identical.
 - [`nodejax/examples/test_population.py`](nodejax/examples/test_population.py): eight models trained as one program; the champion slices out as an ordinary model.
 - [`nodejax/examples/test_train_loop.py`](nodejax/examples/test_train_loop.py): the mundane loop done right: jitted chunks, host-side stats, early stopping, bit-exact reproducibility.
-- [`nodejax/tests/test_imu.py`](nodejax/tests/test_imu.py): a drifting, quantized accelerometer as a pipe of four physical components.
+- [`nodejax/examples/comparisons/imu_nodejax.py`](nodejax/examples/comparisons/imu_nodejax.py): a drifting, quantized accelerometer as a pipe of four physical components; equinox and flax versions sit beside it.
 - [`nodejax/transforms/tests/test_tie.py`](nodejax/transforms/tests/test_tie.py): tied autoencoders and tied embeddings: one copy in the tree, so the two views cannot drift apart.
 
 ## Status
