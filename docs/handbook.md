@@ -53,6 +53,8 @@ The section covers: what earns a place in state and what does not; seeds (`state
 
 The point of composition is closure: putting nodes together yields a node, with nothing left over. `a >> b` produces a pipe whose params and state are trees named by member, whose step feeds each member's output to the next and threads every member's state in and out, and which satisfies the same contract as its parts, so it can itself be piped, transformed, or trained. The glue that dominates hand-rolled stateful systems, threading each component's state through every step, is exactly the part that is derived here rather than written.
 
+**The HAS-A Rule**: Every sub-component relationship in NodeJax MUST be registered via `members=dict(...)` (in `composite`, `serial`, or `parallel`). Privately closing over sub-nodes in Python variables is an anti-pattern that bypasses NodeJax's core mechanisms—disabling static specialization (`GenericDef`), nested parameter/state `Struct` composition, RNG key splitting, shape inference, and structural reflection/surgery (`map_members`, `freeze_by_path`).
+
 The section covers: wires as bundles; member naming, automatic suffixes included; `parallel` for side-by-side strands; the aux channel, a second output riding alongside the wire for losses and diagnostics, with `split_aux` and `taps`; and what flattens across `>>` versus what stays atomic.
 
 ## 4. Node transforms
@@ -119,10 +121,12 @@ The section covers: what resolution means here, the error you get when you read 
 
 When `>>` is not the shape of your dataflow, `composite(apply, members=...)` lets you write the step against `self`: a scope-local, mutable, object-like view of the node, bound to the live params and state. Calling a member advances its state slice in place, reads see current values, and you write ordinary imperative wiring. Like the key stream, it is purely a scope-local abstraction: the sugar transforms your function into an ordinary pure apply, and to anything outside, only the node contract is visible.
 
+Every sub-component relationship (HAS-A) must be declared in `members=dict(...)`. Privately holding sub-nodes in closure variables hides parameters, state, static specialization, and RNG routing from NodeJax's tree mechanisms.
+
 The two spellings of the same def, side by side. The sugared form:
 
 ```python
-def smoothed(gain, ema):
+def Smoothed(gain, ema):
     def apply(self, input):
         return self.ema(self.gain(input))
     return composite(apply, members=dict(gain=gain, ema=ema), name='smoothed')
@@ -131,7 +135,7 @@ def smoothed(gain, ema):
 And the raw contract form the sugar produces, with the member threading explicit:
 
 ```python
-def smoothed_raw(gain, ema):
+def SmoothedRaw(gain, ema):
     def apply_fn(param, state, input):
         _, u = gain.apply_fn(param.gain, (), input)          # non-cyclic member
         ema_state, y = ema.apply_fn(param.ema, state.ema, u)  # cyclic member
@@ -141,10 +145,10 @@ def smoothed_raw(gain, ema):
 
 Reading them together locates the sugar exactly: `self.gain(input)` is the member's contract apply plus the bookkeeping of slicing its param and state in and writing the new state back, and nothing else.
 
-At two members the raw form is tolerable. The scale where it stops being tolerable is the real argument, so here is the shape of a real one: the FOC current controller from [`nodejax/examples/actuator/current_controller.py`](../nodejax/examples/actuator/current_controller.py), nine members including a stochastic current estimator, a noisy bus voltage sensor, and two one-tick memories, whose sugared apply reads as fifteen lines of imperative wiring. Desugared, abridged to its pattern:
+At two members the raw form is tolerable. The scale where it stops being tolerable is the real argument, so here is the shape of a real one: the FOC current controller from [`nodejax/examples/actuator/current_controller.py`](../nodejax/examples/actuator/current_controller.py), nine members including a stochastic current estimator, a noisy bus voltage sensor, a one-tick memory and a difference node, whose sugared apply reads as fifteen lines of imperative wiring. Desugared, abridged to its pattern:
 
 ```python
-def current_controller_raw(dt, motor, bus_sensor, estimator, controller, fets, ff, limit):
+def CurrentControllerRaw(dt, motor, bus_est, estimator, controller, fets, ff, limit, d_dt):
     def init_fn(ndef, param, state_input, input=None):
         # one boundary key, split BY HAND toward the stochastic members
         # (the current estimator's sensor, the bus voltage sensor); the
@@ -153,35 +157,36 @@ def current_controller_raw(dt, motor, bus_sensor, estimator, controller, fets, f
         k_est, k_bus = jax.random.split(state_input.rng, 2)
         return Struct(
             estimator=estimator.init_fn(param.estimator, Struct(rng=k_est)),
-            bus_sensor=bus_sensor.init_fn((), Struct(rng=k_bus)),
+            bus_est=bus_est.init_fn((), Struct(rng=k_bus)),
             controller=controller.init_fn(param.controller, Struct()),
             fets=fets.init_fn(param.fets, Struct()),
-            pwm_prev=DQ(), tgt_prev=DQ(),
+            pwm_prev=DQ(), d_dt=DQ(),
             motor=(), ff=(), limit=())
 
     def apply_fn(param, state, input):
-        # the bus arrives TRUE and is sensed here: noisy measurement,
-        # its stream threaded like any other member state
-        bus_state, bus = bus_sensor.apply_fn((), state.bus_sensor, input.bus)
-        _, target = limit.apply_fn(param.limit, (), input.target)
+        # the bus voltage arrives TRUE and is sensed here: noisy
+        # measurement, its stream threaded like any other member state;
+        # everything downstream runs on the estimate
+        bus_state, est_v = bus_est.apply_fn((), state.bus_est, input.true_v)
+        _, target_i = limit.apply_fn(param.limit, (), input.target_i)
         # methods (derate, voltage_terms) return values; contract applies
         # return (state, output) tuples
-        target = fets.derate(param.fets, state.fets, target)
-        est_state, i_est = estimator.apply_fn(param.estimator, state.estimator,
-            Struct(value=input.current,
+        target_i = fets.derate(param.fets, state.fets, target_i)
+        est_state, est_i = estimator.apply_fn(param.estimator, state.estimator,
+            Struct(value=input.true_i,
                    model=Struct(motor=param.motor,
-                                v_mod=state.pwm_prev * bus,
-                                velocity=input.velocity)))
-        ctrl_state, v_fb = controller.apply_fn(param.controller, state.controller,
-                                               target - i_est)
-        di_ref = (target - state.tgt_prev) / dt
-        terms = motor.voltage_terms(param.motor, target, di_ref, input.velocity)
-        _, v_ff = ff.apply_fn(param.ff, (), terms)
-        pwm = ((v_fb + v_ff) / jnp.maximum(bus, 1e-3)).clamp_norm(1.0)
-        fets_state, _ = fets.apply_fn(param.fets, state.fets, i_est.norm2())
-        return Struct(estimator=est_state, bus_sensor=bus_state,
+                                mod_v=state.pwm_prev * est_v,
+                                est_velocity=input.est_velocity)))
+        ctrl_state, fb_v = controller.apply_fn(param.controller, state.controller,
+                                               target_i - est_i)
+        ddt_state, target_di = d_dt.apply_fn((), state.d_dt, target_i)
+        terms = motor.voltage_terms(param.motor, target_i, target_di, input.est_velocity)
+        _, ff_v = ff.apply_fn(param.ff, (), terms)
+        pwm = ((fb_v + ff_v) / jnp.maximum(est_v, 1e-3)).clamp_norm(1.0)
+        fets_state, _ = fets.apply_fn(param.fets, state.fets, est_i.norm2())
+        return Struct(estimator=est_state, bus_est=bus_state,
                       controller=ctrl_state,
-                      fets=fets_state, pwm_prev=pwm, tgt_prev=target,
+                      fets=fets_state, pwm_prev=pwm, d_dt=ddt_state,
                       motor=(), ff=(), limit=()), pwm
 ```
 
@@ -201,9 +206,9 @@ Some construction values, dt above all, are needed by a dozen factories across a
 
 The section covers: when to reach for it (a value many factories need) and when not to (anything a single call site can pass).
 
-## 17. Generics (unsettled)
+## 17. Generics
 
-The deferred-construction stage: composing factories before their statics are known, then configuring the composed tree at one point (`mlp.specialize(linear={...})`), with `*.name` broadcasts and transform commutation over unspecialized families. Status: under design review; the guidance until it settles is closures first, ambient for scope, and this section documents what exists rather than what is promised.
+The deferred-construction stage: composing factories before their statics are known, then configuring the composed tree at one point (`mlp.specialize(linear={...})`), with `*.name` broadcasts, dot-notation paths (`"linear.in_features": 4`), and partial static binding (currying). `GenericDef` exposes `static_input_spec` mirroring parameter and state specs, and composes seamlessly across `serial`, `parallel`, `composite`, and structural transforms.
 
 # Part III: in practice
 

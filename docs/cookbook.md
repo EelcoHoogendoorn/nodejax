@@ -12,14 +12,14 @@ import jax.numpy as jnp
 import optax
 from nodejax import node_def, Struct, serial, train_step, ensemble, composite
 
-def gain_def():
+def Gain():
     def param(scale):
         return Struct(scale=jnp.asarray(scale))
     def apply(param, input):
         return param.scale * input
     return node_def(apply, param=param, name='gain')
 
-node = gain_def().parameterize(scale=2.0)
+node = Gain().parameterize(scale=2.0)
 assert node.apply(3.0) == 6.0
 ```
 
@@ -28,7 +28,7 @@ A node is at most three pure functions; this one needs two. `param` is the const
 ## 2. State
 
 ```python
-def integrator_def():
+def Integrator():
     def param(gain):
         return Struct(gain=jnp.asarray(gain))
     def init(param):
@@ -38,7 +38,7 @@ def integrator_def():
         return new, new
     return node_def(apply, param=param, init=init, name='integrator')
 
-node = integrator_def().parameterize(gain=1.0)
+node = Integrator().parameterize(gain=1.0)
 state = node.init()
 state, y = node.apply(state, 5.0)          # cyclic: (state, input) -> (state, output)
 final, trajectory = node.scan(state, jnp.ones(10))
@@ -50,7 +50,7 @@ The third function, `init`, builds the starting state, and its presence makes th
 ## 3. Composition
 
 ```python
-pipe = gain_def() >> integrator_def()
+pipe = Gain() >> Integrator()
 node = pipe.parameterize(gain=Struct(scale=2.0), integrator=Struct(gain=1.0))
 
 state = node.init()
@@ -65,7 +65,7 @@ assert final.integrator == 20.0            # state: same shape, same names
 ## 4. Shapes and keys
 
 ```python
-def linear_def(n_out):
+def Linear(n_out):
     def param(ndef, rng):
         n_in = ndef.apply_input_spec.shape[-1]
         return Struct(w=jax.random.normal(rng.next(), (n_in, n_out)) / jnp.sqrt(n_in),
@@ -77,7 +77,7 @@ def linear_def(n_out):
 relu = node_def(lambda input: jnp.maximum(input, 0.0), name='relu')
 
 X = jax.random.normal(jax.random.PRNGKey(0), (32, 4))
-net = linear_def(8) >> relu >> linear_def(1)
+net = Linear(8) >> relu >> Linear(1)
 model = net.with_input(X).parameterize(rng=jax.random.PRNGKey(1))
 assert model.param.linear.w.shape == (4, 8)
 assert model.apply(X).shape == (32, 1)
@@ -108,14 +108,14 @@ assert tstate.model.linear.w.shape == (4, 8)   # the weights, readable mid-train
 ## 6. Randomness at apply time
 
 ```python
-def jitter_def():
+def Jitter():
     def param(sigma):
         return Struct(sigma=jnp.asarray(sigma))
     def apply(param, x, rng):
         return x + param.sigma * jax.random.normal(rng.next())
     return node_def(apply, param=param, name='jitter')
 
-noisy = jitter_def().parameterize(sigma=0.1)
+noisy = Jitter().parameterize(sigma=0.1)
 a = noisy.apply(x=1.0, rng=jax.random.PRNGKey(0))
 b = noisy.apply(x=1.0, rng=jax.random.PRNGKey(0))
 assert a == b                              # same key, same draw: still pure
@@ -126,12 +126,12 @@ An apply that draws noise declares `rng` too, as an input field, and receives th
 ## 7. Wiring by hand
 
 ```python
-def residual_def(body):
+def residual(body):
     def apply(self, input):
         return input + self.body(input)
     return composite(apply, members=dict(body=body), name='residual')
 
-res = residual_def(linear_def(4) >> relu >> linear_def(4))
+res = residual(Linear(4) >> relu >> Linear(4))
 model = res.with_input(X).parameterize(rng=jax.random.PRNGKey(2))
 assert model.apply(X).shape == (32, 4)
 ```
@@ -141,7 +141,7 @@ When `>>` is not the shape of your dataflow, write the step as a function of `se
 ## 8. Transforms
 
 ```python
-mlp = linear_def(8) >> relu >> linear_def(1)
+mlp = Linear(8) >> relu >> Linear(1)
 population = ensemble(mlp.with_input(X), n=4).parameterize(rng=jax.random.PRNGKey(3))
 assert population.param.linear.w.shape == (4, 4, 8)   # a member axis, stacked
 assert population.apply(X).shape == (4, 32, 1)        # four models, one call

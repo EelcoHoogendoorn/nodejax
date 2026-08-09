@@ -23,31 +23,32 @@ import jax
 
 from nodejax.struct import Struct
 from nodejax.core import Node, NodeDef, Composite, _trivial_init_fn
-from nodejax.transforms.common import _split, _rewrap
+from nodejax.transforms.common import _over_bound
 
 
-def _freeze_def(nd: NodeDef, state) -> NodeDef:
+def _Freeze(nd: NodeDef, state) -> NodeDef:
     def apply(p, _, input):
         _, out = nd.apply_fn(p, state, input)
         return (), out
 
     return NodeDef(f'freeze({nd.name})', nd._param_impl, _trivial_init_fn, apply,
                    nd.parametric, cyclic=False,
-                   param_input_spec=nd.param_input_spec if nd.parametric else None)
+                   param_input_spec=nd.param_input_spec if nd.parametric else None,
+                   tags=nd.tags)
 
 
-def freeze(node: NodeDef | Node, state) -> NodeDef | Node:
+@_over_bound
+def freeze(nd: NodeDef, state) -> NodeDef:
     """Hold a node's whole state fixed: the result applies with `state`,
     discards the returned update, and is non-cyclic. Params unchanged."""
-    nd, param = _split(node)
-    return _rewrap(_freeze_def(nd, state), param)
+    return _Freeze(nd, state)
 
 
-def detach(node: NodeDef | Node) -> NodeDef | Node:
+@_over_bound
+def detach(nd: NodeDef) -> NodeDef:
     """Stop gradient through a node's params: training leaves its weights
     fixed (they receive zero gradient), state and behaviour otherwise
     unchanged."""
-    nd, param = _split(node)
 
     def apply(p, s, i):
         return nd.apply_fn(jax.lax.stop_gradient(p), s, i)
@@ -55,13 +56,15 @@ def detach(node: NodeDef | Node) -> NodeDef | Node:
     detached = NodeDef(f'detach({nd.name})', nd._param_impl, nd._init_impl, apply,
                        nd.parametric, nd.cyclic,
                        init_requires_input=nd.init_requires_input,
-                  init_reads_shape=nd.init_reads_shape,
+                       init_reads_shape=nd.init_reads_shape,
                        param_input_spec=nd.param_input_spec if nd.parametric else None,
-                       state_input_spec=nd.state_input_spec if nd.cyclic else None)
-    return _rewrap(detached, param)
+                       state_input_spec=nd.state_input_spec if nd.cyclic else None,
+                       tags=nd.tags)
+    return detached
 
 
-def tree_detach(node: NodeDef | Node, name: str | Callable[[str], bool]) -> NodeDef | Node:
+@_over_bound
+def tree_detach(nd: NodeDef, name: str | Callable[[str], bool]) -> NodeDef:
     """Detach the weights of the members `name` matches (by key),
     descending into the rest. The param-side twin of tree_freeze — but
     it selects by name directly rather than by a spec, because detaching
@@ -69,14 +72,13 @@ def tree_detach(node: NodeDef | Node, name: str | Callable[[str], bool]) -> Node
     predicate on a member key. Matching nothing is an error: a selective
     walk that selects nothing was aimed at the wrong tree."""
     match = (lambda n: name in n) if isinstance(name, str) else name
-    nd, param = _split(node)
     if not isinstance(nd, Composite):
         raise TypeError(f"tree_detach selects members and '{nd.name}' has none; "
                         'detach(node) stops gradient through a leaf whole')
     rebuilt, hits = _detach_walk(nd, match)
     if hits == 0:
         raise ValueError(f"tree_detach: {name!r} matched no member of '{nd.name}'")
-    return _rewrap(rebuilt, param)
+    return rebuilt
 
 
 def _detach_walk(nd: Composite, match: Callable[[str], bool]) -> tuple[NodeDef, int]:
@@ -93,14 +95,14 @@ def _detach_walk(nd: Composite, match: Callable[[str], bool]) -> tuple[NodeDef, 
     return nd.rebuild(new), hits
 
 
-def tree_freeze(node: NodeDef | Node, frozen: Struct) -> NodeDef | Node:
+@_over_bound
+def tree_freeze(nd: NodeDef, frozen: Struct) -> NodeDef:
     """Freeze the members present in `frozen` (a sparse Struct spec): a
     composite member descends, a leaf member is frozen with its state, an
     absent member stays threaded. Composites rebuild, so cyclicity
     propagates. Every spec field must land on a member — a field naming
     nothing is an error, so a spec aimed at structure a def does not
     expose fails at the call, never later inside an apply."""
-    nd, param = _split(node)
     if not isinstance(nd, Composite):
         raise TypeError(f"tree_freeze selects members and '{nd.name}' has none; "
                         'freeze(node, state) pins a leaf whole')
@@ -118,4 +120,4 @@ def tree_freeze(node: NodeDef | Node, frozen: Struct) -> NodeDef | Node:
             new[k] = freeze(m, frozen[k])                 # leaf -> freeze whole
         else:
             new[k] = m
-    return _rewrap(nd.rebuild(new), param)
+    return nd.rebuild(new)

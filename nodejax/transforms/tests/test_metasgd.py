@@ -8,7 +8,7 @@ from nodejax import node_def, metasgd, batch, train_step, KeyStream
 from nodejax.struct import Struct
 
 
-def scale_def():
+def Scale():
     def param(rng: KeyStream) -> Struct:
         return Struct(scale=jax.random.normal(rng.next(), ()))
 
@@ -25,7 +25,7 @@ def mse(pred, target):
 def test_metasgd_learns_init_and_rates():
     """Task family y = a*x: the meta-loop learns an init AND per-param
     step sizes such that a few inner steps identify each task's a."""
-    adapt = metasgd(scale_def(), mse, lr0=0.1)
+    adapt = metasgd(Scale(), mse, lr0=0.1)
     trainer = train_step(batch(adapt), mse, optax.adam(0.05))
     model = batch(adapt).parameterize(rng=jax.random.PRNGKey(0))
 

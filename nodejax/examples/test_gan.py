@@ -33,10 +33,7 @@ from nodejax import node_def, derive, train_step, nn
 BATCH, ZDIM, HIDDEN = 128, 4, 16
 MU, SIGMA = 3.0, 0.5
 
-tanh = node_def(lambda input: jnp.tanh(input), name='tanh')
-
-
-def noise_def():
+def Noise():
     """The latent source: BATCH draws from the declared apply-rng key."""
     def apply(rng):
         return jax.random.normal(rng.next(), (BATCH, ZDIM))
@@ -45,16 +42,16 @@ def noise_def():
 
 def mlp():
     """Both nets are the same stock sandwich; fan-ins from the shape walk."""
-    return nn.linear(HIDDEN) >> tanh >> nn.linear(1)
+    return nn.Linear(HIDDEN) >> nn.tanh >> nn.Linear(1)
 
 
-def generator_def():
+def Generator():
     """noise head >> mlp; resolving against the one-key input bundle lets
     the walk derive the linears' fan-ins from the noise head's output."""
-    return (noise_def() >> mlp()).with_input(Struct(rng=jax.random.PRNGKey(0)))
+    return (Noise() >> mlp()).with_input(Struct(rng=jax.random.PRNGKey(0)))
 
 
-def disc_def():
+def Discriminator():
     """sample -> realness logit; fan-in from the sample shape."""
     return mlp().with_input(jnp.zeros((BATCH, 1)))
 
@@ -63,12 +60,12 @@ def bce(logits, labels):
     return jnp.mean(optax.sigmoid_binary_cross_entropy(logits, labels))
 
 
-def gan_def(d_opt, g_opt):
+def GAN(d_opt, g_opt):
     """The adversarial round as ONE cyclic node, wired byol-style: both
     trainers' states nest in its state, the live critic crosses between
     them on the G step's INPUT channel, and the draws of a round come
     off the one apply-rng key."""
-    gen, disc = generator_def(), disc_def()
+    gen, disc = Generator(), Discriminator()
 
     def fooled(param, critic, rng):
         # the generator's own params; the critic's params are INPUT data
@@ -101,7 +98,7 @@ def gan_def(d_opt, g_opt):
 
 
 def test_gan_learns_a_gaussian():
-    gan, gen = gan_def(optax.adam(2e-3), optax.adam(5e-4))
+    gan, gen = GAN(optax.adam(2e-3), optax.adam(5e-4))
     state = gan.init(rng=jax.random.PRNGKey(0))
     run_chunk = jax.jit(gan.scan)
 
@@ -132,7 +129,7 @@ def test_gan_population_by_ensemble():
     moments and all) — under one vmap, knowing nothing about GANs."""
     from nodejax import ensemble
 
-    gan, gen = gan_def(optax.adam(2e-3), optax.adam(5e-4))
+    gan, gen = GAN(optax.adam(2e-3), optax.adam(5e-4))
     population = ensemble(gan.ndef, n=4).parameterize()
     state = population.init(rng=jax.random.PRNGKey(0))
     run_chunk = jax.jit(population.scan)
@@ -155,17 +152,16 @@ def test_meta_learn_the_learning_rates():
     game from scratch and scores the generator's output distribution, and
     the meta-gradient flows through every unrolled round — both adams
     included. The tower is stock: train_step over the game-scoring node."""
-    from nodejax.examples import tile
-
+    from nodejax.util import tile
     ROUNDS, META_STEPS = 60, 100
 
-    def score_def():
+    def Score():
         def param(g_lr, d_lr):
             return Struct(log_g=jnp.log(jnp.asarray(g_lr)),
                           log_d=jnp.log(jnp.asarray(d_lr)))
 
         def apply(param, rng):
-            gan, gen = gan_def(optax.adam(jnp.exp(param.log_d)),
+            gan, gen = GAN(optax.adam(jnp.exp(param.log_d)),
                                optax.adam(jnp.exp(param.log_g)))
             state = gan.init(rng=rng.next())
             state, _ = gan.scan(state, Struct(rng=jax.random.split(rng.next(), ROUNDS)))
@@ -177,7 +173,7 @@ def test_meta_learn_the_learning_rates():
     def dist(out, target):
         return (out.mean - target.mean) ** 2 + (out.std - target.std) ** 2
 
-    score = score_def()
+    score = Score()
     lr0 = score.parameterize(g_lr=1e-4, d_lr=1e-4).param     # far too slow to converge
     meta = train_step(score, dist, optax.adam(0.2))
 

@@ -3,9 +3,9 @@
 [![tests](https://github.com/EelcoHoogendoorn/nodejax/actions/workflows/test.yml/badge.svg)](https://github.com/EelcoHoogendoorn/nodejax/actions/workflows/test.yml)
 
 ```python
-core       = up(HIDDEN) >> reconstruction >> ttt(rnn(HIDDEN), mse, 0.01) >> readout(HIDDEN)
-controller = serial(norm=running_norm(), committee=ensemble(core, n=MEMBERS), mix=mean)
-rollout    = scan(closed_loop(controller >> motor(DT)))
+core       = Up(HIDDEN) >> reconstruction >> ttt(RNN(HIDDEN), mse, 0.01) >> Readout(HIDDEN)
+controller = serial(norm=Norm(), committee=ensemble(core, n=MEMBERS), mix=mix)
+rollout    = scan(closed_loop(controller >> Motor(DT)))
 trainer    = train_step(batch(rollout), mse, optax.adam(0.02))
 
 final, losses = jax.jit(trainer.scan)(trainer.init(model=params), reference_batches)
@@ -25,15 +25,15 @@ Six kinds of state are involved: the motor's, each RNN's carry, the running stat
 ## The node
 
 ```python
-def motor(dt):                                 # a physical plant
+def Motor(dt, kt=1.0, friction=0.5):           # a physical plant
     def init(ndef):
-        return jnp.zeros_like(ndef.input)      # state shaped by the incoming signal
+        return jnp.zeros_like(ndef.input)      # shape from the resolved input spec
     def apply(state, input):
-        omega = state + dt * (KT * input - B * state)
+        omega = state + dt * (kt * input - friction * state)
         return omega, omega
     return node_def(apply, init=init, name='motor')
 
-def linear(n_out):                             # a neural layer
+def Linear(n_out):                             # a neural layer
     def param(ndef, rng):
         n_in = ndef.apply_input_spec.shape[-1]
         return Struct(w=jax.random.normal(rng.next(), (n_in, n_out)) / jnp.sqrt(n_in),
@@ -43,7 +43,7 @@ def linear(n_out):                             # a neural layer
     return node_def(apply, param=param, name='linear')
 ```
 
-Code: [`nodejax/tests/test_motor_control.py`](nodejax/tests/test_motor_control.py), [`nodejax/nn.py`](nodejax/nn.py).
+Code: [`nodejax/tests/test_motor_control.py`](nodejax/tests/test_motor_control.py), [`nodejax/nn/`](nodejax/nn/).
 
 Everything in the opening block is, underneath, of this form: up to three pure functions against one rigid contract. It is similar in feel to an equinox or torch Module, but crucially it is a purely functional representation, with distinct slots for static arguments, parameters, state, and input.
 
@@ -60,13 +60,13 @@ The contract and its container live in [`nodejax/core.py`](nodejax/core.py). Sta
 Nodejax aims to make composition and transformations of nodes frictionless, with or without state.
 
 ```python
-net   = linear(64) >> gelu >> linear(10)
+net   = Linear(64) >> gelu >> Linear(10)
 model = net.with_input(images).parameterize(rng=key)   # one key, split per member
 
 model.param.linear.w.shape          # (784, 64): named trees, plain pytrees
 model.apply(images)                 # logits
 ```
-Code: [`nodejax/examples/test_digits_committee.py`](nodejax/examples/test_digits_committee.py)
+Code: [`nodejax/nn/`](nodejax/nn/), and section 4 of [`docs/cookbook.md`](docs/cookbook.md).
 
 `>>` chains nodes into a node. The pipe's params and state are trees named by member, each member sized from what its own upstream produces.
 
@@ -95,8 +95,8 @@ targets = enc.apply(state.ema, v2)  # BYOL: an EMA node smoothing a weight subtr
 `train_step` is itself a Node whose state holds the weights, the optimizer moments, and the model's own state. This makes it easy to implement concepts like meta-learning. Code: [`nodejax/examples/test_population.py`](nodejax/examples/test_population.py), [`nodejax/transforms/tests/test_finetune.py`](nodejax/transforms/tests/test_finetune.py), [`nodejax/examples/test_byol.py`](nodejax/examples/test_byol.py).
 
 ```python
-gan = gan_def(adam(d_lr), adam(g_lr))     # one adversarial round; two trainers inside
-meta = train_step(replay(gan, rounds=60), sample_quality, adam(0.2))
+gan, gen = GAN(adam(d_lr), adam(g_lr))   # one adversarial round; two trainers inside
+meta = train_step(Score(), dist, adam(0.2))   # Score's params are the lrs; its apply scans a whole game
 ```
 
 And node transforms nest without limit: the adversarial round holds two trainers, and an outer trainer learns their learning rates through the replayed game. Code: [`nodejax/examples/test_gan.py`](nodejax/examples/test_gan.py).
@@ -108,7 +108,7 @@ Each is a test; each runs.
 - [`nodejax/tests/test_motor_control.py`](nodejax/tests/test_motor_control.py): the opening block; a test-time-training committee drives a motor, trained through the physics.
 - [`nodejax/examples/test_gan.py`](nodejax/examples/test_gan.py): a GAN as one node; a population of games via `ensemble`; the learning rates meta-learned through the unrolled game.
 - [`nodejax/examples/test_byol.py`](nodejax/examples/test_byol.py): BYOL, where the target network is an EMA filter applied to the encoder's weight subtree.
-- [`nodejax/examples/comparisons/ttt_nodejax.py`](nodejax/examples/comparisons/ttt_nodejax.py): test-time training with a RECURRENT inner model, benchmarked against ttt variants and plain RNNs; the same model in flax, torch, and raw JAX sits beside it.
+- [`nodejax/examples/comparisons/ttt_nodejax.py`](nodejax/examples/comparisons/ttt_nodejax.py): test-time training with a RECURRENT inner model; the same model in flax, torch, and raw JAX sits beside it, and [`ttt_variants.py`](nodejax/examples/comparisons/ttt_variants.py) runs the wider study (fixed baselines, other inner models) on the shared harness.
 - [`nodejax/examples/test_meta_controller.py`](nodejax/examples/test_meta_controller.py): MAML over controllers: `train_step(batch(metasgd(task)))` adapts to plants unseen at training time.
 - [`nodejax/examples/test_char_lm.py`](nodejax/examples/test_char_lm.py): a character LM with mixture-of-experts aux losses, tied embeddings, and a sampling loop as a scanned node.
 - [`nodejax/examples/test_digits_committee.py`](nodejax/examples/test_digits_committee.py): deep residual recurrent committee over pixel rows; whitening stats live inside the stack, frozen-read at eval.

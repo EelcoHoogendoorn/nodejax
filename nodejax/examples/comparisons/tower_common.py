@@ -14,6 +14,7 @@ import jax.numpy as jnp
 HIDDEN, LAYERS = 8, 2
 B, T, STEPS = 16, 40, 800
 TASKS, K, META_STEPS, INNER_LR = 8, 4, 400, 0.05
+MOMENTUM = 0.1              # the streaming norm's running-stats rate
 
 
 def mse(pred, target):

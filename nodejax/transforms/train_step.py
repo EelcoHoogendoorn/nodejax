@@ -74,5 +74,6 @@ def train_step(node: NodeDef | Node, loss_fn: LossFn,
         inner=node.ndef.state_input_spec if node.ndef.cyclic else Struct()))
     out = NodeDef(f'train({node.ndef.name})', _trivial_param_fn, init_fn, apply_fn,
                   parametric=False, cyclic=True, apply_input_spec=apply_input_spec,
-                  state_input_spec=state_input_spec.replace(model=REQUIRED))
+                  state_input_spec=state_input_spec.replace(model=REQUIRED),
+                  tags=node.ndef.tags)
     return Node(out, ())

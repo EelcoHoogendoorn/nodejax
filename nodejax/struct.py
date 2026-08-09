@@ -133,6 +133,11 @@ class Struct:
 		return Struct(**result)
 
 
+class Aux(Struct):
+	"""Explicit auxiliary data container for sown metrics, losses, and taps."""
+	pass
+
+
 # === JAX PyTree registration ===
 
 def _struct_flatten(tree):
@@ -157,5 +162,9 @@ try:
 	import jax
 	jax.tree_util.register_pytree_with_keys(
 		Struct, _struct_flatten_with_keys, _struct_unflatten, _struct_flatten)
+	def _aux_unflatten(aux_data, children):
+		return Aux(**dict(zip(aux_data, children)))
+	jax.tree_util.register_pytree_with_keys(
+		Aux, _struct_flatten_with_keys, _aux_unflatten, _struct_flatten)
 except ImportError:
 	pass  # JAX not available

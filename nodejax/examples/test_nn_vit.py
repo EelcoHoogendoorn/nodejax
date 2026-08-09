@@ -29,15 +29,15 @@ BATCH, EPOCHS = 125, 40
 def build():
     return serial(
         image=node_def(lambda input: input.reshape(IMAGE, IMAGE, 1), name='image'),
-        conv1=nn.conv(STEM),
+        conv1=nn.Conv(STEM),
         act1=nn.gelu,
-        conv2=nn.conv(HIDDEN, stride=2),
+        conv2=nn.Conv(HIDDEN, stride=2),
         act2=nn.gelu,
         tokens=nn.tokens(),
-        pos=nn.pos_embed(),
-        blocks=stack(nn.block(HIDDEN, heads=HEADS, ratio=4), n=DEPTH),
+        pos=nn.PosEmbed(),
+        blocks=stack(nn.Block(HIDDEN, heads=HEADS, ratio=4), n=DEPTH),
         flat=nn.flat,
-        head=nn.linear(10),
+        head=nn.Linear(10),
     )
 
 
@@ -62,7 +62,7 @@ def test_nn_assembly():
     assert batched.apply(jnp.zeros((5, IMAGE * IMAGE))).shape == (5, 10)
 
     # def reuse across widths: same pipe, different example
-    small = nn.linear(4) >> nn.gelu >> nn.linear(2)
+    small = nn.Linear(4) >> nn.gelu >> nn.Linear(2)
     a = small.with_input(jnp.zeros(7)).parameterize(rng=jax.random.PRNGKey(0))
     b = small.with_input(jnp.zeros(3)).parameterize(rng=jax.random.PRNGKey(0))
     assert a.param.linear.w.shape == (7, 4) and b.param.linear.w.shape == (3, 4)

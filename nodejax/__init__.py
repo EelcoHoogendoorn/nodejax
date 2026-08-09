@@ -55,35 +55,39 @@ Package layout (one file per concern):
     examples/      example nodes and end-to-end tests
 """
 
-from nodejax.struct import Struct
+from nodejax.struct import Struct, Aux
 from nodejax.types import (PyTree, Param, State, Input, Output,
                                  ParamFn, InitFn, ApplyFn, LossFn, StaticTree)
-from nodejax.core import Node, NodeDef, split_aux, hoist_rng, REQUIRED
+from nodejax.core import Node, NodeDef, Composite, Serial, split_aux, hoist_rng, REQUIRED
 from nodejax.authoring import node_def, derive, KeyStream
 from nodejax.generic import GenericDef, generic
 from nodejax.ambient import ambient
 from nodejax.paths import replace_by_path, set_by_path
 from nodejax.transforms import batch, ensemble, stack, repeat, scan, residual, train_step, finetune, metasgd, taps, tie, externalize, parallel, at, ttt, reconstruction, freeze, tree_freeze, detach, tree_detach, tree_filter, map_members
 from nodejax.compose import serial, serial_generic, composite, composite_init, wrapper
+from nodejax import control
 from nodejax.control import closed_loop, observed_loop
 from nodejax.spec import spec, spec_of, materialize, initialize, meta
 
 __all__ = [
     'Struct',
+    'Aux',
     'REQUIRED',
     # types
     'PyTree', 'Param', 'State', 'Input', 'Output',
     'ParamFn', 'InitFn', 'ApplyFn', 'LossFn', 'StaticTree',
     # core
-    'Node', 'NodeDef', 'split_aux',
+    'Node', 'NodeDef', 'Composite', 'Serial', 'split_aux',
     # authoring
     'node_def', 'derive', 'KeyStream',
     # static stage
     'GenericDef', 'generic',
+    # submodules
+    'control',
     # transforms
     'batch', 'ensemble', 'stack', 'repeat', 'scan', 'residual', 'train_step',
     'finetune', 'metasgd', 'taps', 'externalize', 'parallel', 'at', 'ttt', 'reconstruction',
-    'freeze', 'tree_freeze', 'detach', 'tree_detach', 'tree_filter', 'map_members', 'closed_loop', 'observed_loop', 'set_by_path',
+    'freeze', 'tree_freeze', 'detach', 'tree_detach', 'tree_filter', 'map_members', 'set_by_path', 'closed_loop', 'observed_loop',
     # composition
     'serial', 'serial_generic', 'composite', 'composite_init', 'wrapper',
     # spec layer

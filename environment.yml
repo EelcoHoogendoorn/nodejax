@@ -1,0 +1,13 @@
+name: nodejax
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - jax
+  - jaxlib
+  - optax  # For testing optimization integration
+  - pytest
+  - pip
+  - matplotlib
+  - scikit-learn  # small real datasets for the NN dogfood tests

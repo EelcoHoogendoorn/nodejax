@@ -23,7 +23,7 @@ from nodejax.struct import Struct
 import nodejax.examples.test_meta_controller as mc
 
 
-def gru_def(hidden: int) -> NodeDef:
+def GRU(hidden: int) -> NodeDef:
     """The classic gated cell: update and reset gates, candidate mixed
     through a reset-gated hidden state."""
     def param(rng: KeyStream) -> Struct:
@@ -47,7 +47,7 @@ def gru_def(hidden: int) -> NodeDef:
     return node_def(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN), name='gru')
 
 
-def mingru_def(hidden: int, tanh_candidate: bool) -> NodeDef:
+def MinGRU(hidden: int, tanh_candidate: bool) -> NodeDef:
     """minGRU: gate and candidate depend on the input alone (no
     hidden-to-hidden matrix), so the temporal gradient is a product of
     (1 - z) factors — stable by construction. The form has a
@@ -71,7 +71,7 @@ def mingru_def(hidden: int, tanh_candidate: bool) -> NodeDef:
     return node_def(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN), name='mingru')
 
 
-def lru_def(hidden: int) -> NodeDef:
+def LRU(hidden: int) -> NodeDef:
     """Diagonal leaky-integrator units: per-unit poles sigmoid-bounded
     in (0, 1) — gradient-stable by construction, mixing only through
     depth."""
@@ -94,13 +94,13 @@ def lru_def(hidden: int) -> NodeDef:
 def task_with_cell(cell: NodeDef, layers: int) -> NodeDef:
     """The meta-controller task node with the given recurrent core."""
     from nodejax import externalize, observed_loop, at
-    pipe = at(mc.filters_def(mc.DT), 'error') >> mc.flat \
-        >> mc.up_def(3 + mc.ORDER + 1, mc.HIDDEN) \
-        >> stack(cell, n=layers) >> mc.readout_def(mc.HIDDEN) \
-        >> mc.identified(mc.motor_def(mc.DT), mc.ORDER)
+    pipe = at(mc.Filters(mc.DT), 'error') >> mc.flat \
+        >> mc.Up(3 + mc.ORDER + 1, mc.HIDDEN) \
+        >> stack(cell, n=layers) >> mc.Readout(mc.HIDDEN) \
+        >> mc.identified(mc.Motor(mc.DT), mc.ORDER)
     rollout = scan(observed_loop(pipe, belief0=jnp.zeros(mc.ORDER + 1)),
                    persist=('rls', 'belief'))
-    return externalize(rollout, 'motor', at_init=mc.motor_def(mc.DT).build_param())
+    return externalize(rollout, 'motor', at_init=mc.Motor(mc.DT).build_param())
 
 
 def run(name: str, cell: NodeDef, layers: int) -> None:
@@ -138,14 +138,14 @@ def run(name: str, cell: NodeDef, layers: int) -> None:
 
 
 def main() -> None:
-    run('elman-2', mc.rnn_def(mc.HIDDEN), 2)
-    run('gru-2', gru_def(mc.HIDDEN), 2)
-    run('mingru-tanh-2', mingru_def(mc.HIDDEN, tanh_candidate=True), 2)
-    run('mingru-tanh-4', mingru_def(mc.HIDDEN, tanh_candidate=True), 4)
-    run('mingru-lin-2', mingru_def(mc.HIDDEN, tanh_candidate=False), 2)
-    run('mingru-lin-4', mingru_def(mc.HIDDEN, tanh_candidate=False), 4)
-    run('lru-2', lru_def(mc.HIDDEN), 2)
-    run('lru-4', lru_def(mc.HIDDEN), 4)
+    run('elman-2', mc.RNN(mc.HIDDEN), 2)
+    run('gru-2', GRU(mc.HIDDEN), 2)
+    run('mingru-tanh-2', MinGRU(mc.HIDDEN, tanh_candidate=True), 2)
+    run('mingru-tanh-4', MinGRU(mc.HIDDEN, tanh_candidate=True), 4)
+    run('mingru-lin-2', MinGRU(mc.HIDDEN, tanh_candidate=False), 2)
+    run('mingru-lin-4', MinGRU(mc.HIDDEN, tanh_candidate=False), 4)
+    run('lru-2', LRU(mc.HIDDEN), 2)
+    run('lru-4', LRU(mc.HIDDEN), 4)
 
 
 if __name__ == '__main__':

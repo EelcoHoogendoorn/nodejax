@@ -66,6 +66,7 @@ def externalize(ndef: NodeDef, member: str, at_init=None) -> NodeDef:
     return NodeDef(f'externalize({ndef.name})', param_fn, init_fn, apply_fn,
                    ndef.parametric, ndef.cyclic,
                    init_requires_input=ndef.init_requires_input,
-                  init_reads_shape=ndef.init_reads_shape,
+                   init_reads_shape=ndef.init_reads_shape,
                    param_input_spec=ndef.param_input_spec if ndef.parametric else None,
-                   state_input_spec=ndef.state_input_spec if ndef.cyclic else None)
+                   state_input_spec=ndef.state_input_spec if ndef.cyclic else None,
+                   tags=ndef.tags)

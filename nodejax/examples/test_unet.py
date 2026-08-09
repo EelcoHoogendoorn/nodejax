@@ -8,7 +8,7 @@ simplifies multi-resolution skip connections:
 - The skip connection is simply a Python local (`e = self.enc(input)`)!
 
 Structure:
-  level_def(c_outer, c_inner, inner):
+  UNetLevel(c_outer, c_inner, inner):
     enc: c_outer -> c_inner
     inner: recursive level or bottleneck
     dec: 2 * c_inner -> c_outer
@@ -19,23 +19,13 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from nodejax import NodeDef, node_def, composite, batch, train_step, KeyStream
+from nodejax import NodeDef, composite, batch, train_step, nn
 from nodejax.struct import Struct
 
 
-def conv_def(c_in: int, c_out: int, kernel: int = 3) -> NodeDef:
-    """3x3 SAME convolution over ONE (H, W, C) feature map."""
-    def param(rng: KeyStream) -> Struct:
-        k = jax.random.normal(rng.next(), (kernel, kernel, c_in, c_out))
-        return Struct(kernel=k / jnp.sqrt(kernel * kernel * c_in), bias=jnp.zeros(c_out))
-
-    def apply(param: Struct, input: jax.Array) -> jax.Array:
-        out = jax.lax.conv_general_dilated(
-            input[None], param.kernel, window_strides=(1, 1), padding='SAME',
-            dimension_numbers=('NHWC', 'HWIO', 'NHWC'))[0]
-        return jax.nn.relu(out + param.bias)
-
-    return node_def(apply, param=param, name=f'conv_{c_in}_{c_out}')
+def conv(c_out: int, kernel: int = 3) -> NodeDef:
+    """Convolution + ReLU block using stock nn.Conv."""
+    return nn.Conv(c_out, kernel=kernel) >> nn.relu
 
 
 def pool(x: jax.Array) -> jax.Array:
@@ -50,12 +40,12 @@ def upsample(x: jax.Array, target_hw: tuple[int, int]) -> jax.Array:
     return jax.image.resize(x, (h, w, x.shape[-1]), method='bilinear')
 
 
-def level_def(c_outer: int, c_inner: int, inner: NodeDef) -> NodeDef:
+def UNetLevel(c_outer: int, c_inner: int, inner: NodeDef) -> NodeDef:
     """One level of the recursive U-Net."""
     members = dict(
-        enc=conv_def(c_outer, c_inner),
+        enc=conv(c_inner),
         inner=inner,
-        dec=conv_def(2 * c_inner, c_outer)
+        dec=conv(c_outer)
     )
 
     def apply(self, input: jax.Array) -> jax.Array:
@@ -67,7 +57,7 @@ def level_def(c_outer: int, c_inner: int, inner: NodeDef) -> NodeDef:
     return composite(apply, members=members, name=f'level_{c_outer}_{c_inner}')
 
 
-def unet_def(channels: list[int]) -> NodeDef:
+def UNet(channels: list[int]) -> NodeDef:
     """Build a U-Net recursively from a list of channel depths.
     
     e.g. channels = [1, 16, 32] builds:
@@ -76,16 +66,16 @@ def unet_def(channels: list[int]) -> NodeDef:
     - Top level connecting 1 <-> 16
     """
     if len(channels) < 2:
-        raise ValueError('UNet needs at least 2 channel specs (input/output and bottleneck)')
+        raise ValueError('U-Net needs at least 2 channel specs (input/output and bottleneck)')
     
     # Bottleneck at innermost level
-    current = conv_def(channels[-1], channels[-1])
+    current = conv(channels[-1])
     
     # Wrap levels from inside out
     for i in reversed(range(len(channels) - 1)):
         c_outer = channels[i]
         c_inner = channels[i + 1]
-        current = level_def(c_outer, c_inner, current)
+        current = UNetLevel(c_outer, c_inner, current)
         
     return current
 
@@ -93,8 +83,8 @@ def unet_def(channels: list[int]) -> NodeDef:
 # --- Tests & Verification ---
 
 def test_unet_shapes_and_forward_pass():
-    """Verify recursive UNet parameterization, shape propagation, and forward pass."""
-    model = unet_def([1, 8, 16])
+    """Verify recursive U-Net parameterization, shape propagation, and forward pass."""
+    model = UNet([1, 8, 16]).with_input(jnp.zeros((16, 16, 1)))
     rng = jax.random.PRNGKey(0)
     
     # Parameterize model with random weights
@@ -114,14 +104,13 @@ def test_unet_shapes_and_forward_pass():
 
 def test_batched_unet_training():
     """Verify batched U-Net with train_step for image-to-image reconstruction."""
-    model_def = unet_def([1, 4, 8])
-    batched_model = batch(model_def)
+    model = UNet([1, 4, 8]).with_input(jnp.zeros((16, 16, 1)))
+    batched_model = batch(model)
     
     def mse(pred, target):
         return jnp.mean((pred - target) ** 2)
 
     trainer = train_step(batched_model, mse, optax.adam(0.01))
-    
     bound = batched_model.parameterize(rng=jax.random.PRNGKey(42))
     state = trainer.init(model=bound.param)
     

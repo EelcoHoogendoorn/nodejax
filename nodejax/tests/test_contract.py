@@ -15,10 +15,21 @@ import pytest
 
 from nodejax.struct import Struct
 from nodejax import node_def, serial
-from nodejax.examples import gain_def, integrator_def, walker_def, plant_node
+from nodejax.control import Gain, Integrator, Walker
 
 
-def pi():
+def Plant(dt=0.01, spring_k=1.0, damping_c=0.1):
+    def init(ndef):
+        return Struct(pos=jnp.zeros_like(ndef.input), vel=jnp.zeros_like(ndef.input))
+    def apply(state, input):
+        acc = input - spring_k * state.pos - damping_c * state.vel
+        vel = state.vel + dt * acc
+        pos = state.pos + dt * vel
+        return Struct(pos=pos, vel=vel), pos
+    return node_def(apply, init=init, name='plant')
+
+
+def PI():
     def param(kp, ki=0.0):
         return Struct(kp=jnp.asarray(kp), ki=jnp.asarray(ki))
     def apply(param, input):
@@ -26,7 +37,7 @@ def pi():
     return node_def(apply, param=param, name='pi')
 
 
-def noisy():
+def Noisy():
     def param(rng, width=3):
         return Struct(w=jax.random.normal(rng.next(), (width,)))
     def apply(param, input):
@@ -37,45 +48,45 @@ def noisy():
 # --- build_param ---
 
 def test_build_param_leaf():
-    p = gain_def().build_param(Struct(scale=2.0))
+    p = Gain().build_param(Struct(scale=2.0))
     assert jnp.allclose(p.scale, 2.0)
-    assert gain_def().bind(p).apply(3.0) == 6.0
+    assert Gain().bind(p).apply(3.0) == 6.0
 
-    q = pi().build_param(Struct(kp=1.0))       # ki falls to the ctor's default
+    q = PI().build_param(Struct(kp=1.0))       # ki falls to the ctor's default
     assert jnp.allclose(q.ki, 0.0)
 
 
 def test_build_param_validates_the_bundle():
     with pytest.raises(TypeError, match='unknown bundle fields'):
-        gain_def().build_param(Struct(scale=2.0, gain=1.0))
+        Gain().build_param(Struct(scale=2.0, gain=1.0))
     with pytest.raises(TypeError, match='missing required'):
-        gain_def().build_param(Struct())
+        Gain().build_param(Struct())
     with pytest.raises(TypeError, match='missing required'):
-        noisy().build_param(Struct(width=4))   # rng is REQUIRED in the spec
+        Noisy().build_param(Struct(width=4))   # rng is REQUIRED in the spec
     with pytest.raises(TypeError, match='not parametric'):
-        plant_node(0.1, 1.0, 0.1).ndef.build_param(Struct(x=1.0))
-    assert plant_node(0.1, 1.0, 0.1).ndef.build_param(Struct()) == ()
+        Plant(0.1, 1.0, 0.1).ndef.build_param(Struct(x=1.0))
+    assert Plant(0.1, 1.0, 0.1).ndef.build_param(Struct()) == ()
 
 
 def test_build_param_rng_rides_the_bundle():
     key = jax.random.PRNGKey(0)
-    p1 = noisy().build_param(Struct(rng=key))
-    p2 = noisy().build_param(Struct(rng=key))
-    p3 = noisy().build_param(Struct(rng=jax.random.PRNGKey(1)))
+    p1 = Noisy().build_param(Struct(rng=key))
+    p2 = Noisy().build_param(Struct(rng=key))
+    p3 = Noisy().build_param(Struct(rng=jax.random.PRNGKey(1)))
     assert jnp.allclose(p1.w, p2.w)
     assert not jnp.allclose(p1.w, p3.w)
     assert p1.w.shape == (3,)                  # width falls to its default
 
 
 def test_build_param_composite_boundary_rng():
-    net = serial(n=noisy(), g=gain_def())
+    net = serial(n=Noisy(), g=Gain())
     p = net.build_param(Struct(rng=jax.random.PRNGKey(0), g=Struct(scale=2.0)))
     assert p.n.w.shape == (3,)
     assert jnp.allclose(p.g.scale, 2.0)
     with pytest.raises(TypeError, match='missing required'):
         net.build_param(Struct(g=Struct(scale=2.0)))   # boundary rng enforced
 
-    det = serial(a=gain_def(), b=pi())
+    det = serial(a=Gain(), b=PI())
     q = det.build_param(Struct(a=Struct(scale=2.0), b=Struct(kp=1.0)))
     assert jnp.allclose(q.b.ki, 0.0)
     with pytest.raises(TypeError, match='unknown bundle fields'):
@@ -86,10 +97,10 @@ def test_build_param_composite_boundary_rng():
 # --- build_state ---
 
 def test_build_state_leaf_and_seed():
-    node = integrator_def().parameterize(gain=1.0)
+    node = Integrator().parameterize(gain=1.0)
     assert node.ndef.build_state(node.param) == 0.0
 
-    w = walker_def().parameterize(sigma=1.0)
+    w = Walker().parameterize(sigma=1.0)
     s = w.ndef.build_state(w.param, Struct(rng=jax.random.PRNGKey(0)))
     assert s.x == 0.0 and s.rng is not None
     with pytest.raises(TypeError, match='missing required'):
@@ -97,15 +108,15 @@ def test_build_state_leaf_and_seed():
 
 
 def test_build_state_non_cyclic_requires_empty_bundle():
-    g = gain_def().parameterize(scale=1.0)
+    g = Gain().parameterize(scale=1.0)
     assert g.ndef.build_state(g.param) == ()
     with pytest.raises(TypeError, match='not cyclic'):
         g.ndef.build_state(g.param, Struct(rng=jax.random.PRNGKey(0)))
 
 
 def test_build_state_primes_from_the_input_channel():
-    from nodejax.examples import derivative_node
-    d = derivative_node(0.1)
+    from nodejax.examples.comparisons.imu_nodejax import Derivative
+    d = Derivative(0.1)
     # input is its OWN channel, typed by apply_input_spec — never a bundle field
     s = d.ndef.build_state((), input=jnp.asarray(5.0))
     assert jnp.allclose(s, 5.0)                # primed from the real value
@@ -115,7 +126,7 @@ def test_build_state_primes_from_the_input_channel():
 
 
 def test_build_state_composite_boundary_rng():
-    net = serial(w=walker_def(), g=gain_def()).parameterize(
+    net = serial(w=Walker(), g=Gain()).parameterize(
         w=Struct(sigma=1.0), g=Struct(scale=2.0))
     s = net.ndef.build_state(net.param, Struct(rng=jax.random.PRNGKey(0)))
     assert s.w.x == 0.0                        # walker seeded from the split
@@ -159,11 +170,11 @@ def test_cyclic_apply_fields_keep_state_positional():
 def test_unbound_surface_mirrors_the_bound_one():
     """d.apply(param, ...) == d.bind(param).apply(...), sugar included;
     init and scan mirror the same way."""
-    d = gain_def()
+    d = Gain()
     p = d.build_param(Struct(scale=2.0))
     assert d.apply(p, 3.0) == d.bind(p).apply(3.0) == 6.0
 
-    idef = integrator_def()
+    idef = Integrator()
     q = idef.build_param(Struct(gain=1.0))
     s = idef.init(q)
     assert s == idef.bind(q).init()

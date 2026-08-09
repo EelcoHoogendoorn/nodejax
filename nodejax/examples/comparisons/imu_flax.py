@@ -92,7 +92,10 @@ class IMU(nnx.Module):
         self.quant = Quantizer(RES)
 
     def __call__(self, x):
-        # mutation threads the state: the cleanest step of the three files
+        # mutation threads the state: the cleanest step of the three files.
+        # nnx.Sequential could fold this line, but it composes CALLS only:
+        # the constructor plumbing above (priming value, rng routing) is
+        # the part a serial combinator would need to compose, and does not
         return self.quant(self.drift(self.noise(self.d2(self.d1(x)))))
 
 
@@ -114,6 +117,7 @@ def main():
         return state, y
 
     state, accel = jax.lax.scan(step, state, positions)
+    print(state)
     imu = nnx.merge(graphdef, state)
 
     true_accel = np.gradient(np.gradient(np.asarray(positions), DT), DT)

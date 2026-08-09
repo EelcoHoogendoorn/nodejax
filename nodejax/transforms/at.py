@@ -4,11 +4,12 @@ from nodejax.core import Node, NodeDef, _input_or_none, _resolve
 from nodejax.struct import Struct
 from nodejax.generic import _over_generic
 from nodejax.spec import materialize
-from nodejax.transforms.common import _split, _rewrap
+from nodejax.transforms.common import _over_bound
 
 
 @_over_generic
-def at(node: NodeDef | Node, field: str) -> NodeDef | Node:
+@_over_bound
+def at(nd: NodeDef, field: str) -> NodeDef:
     """Route a node onto one field of a Struct input: the output is the
     input Struct with `field` replaced by the node's output, every
     other field passed through untouched. Pipes chain whole signals;
@@ -19,7 +20,6 @@ def at(node: NodeDef | Node, field: str) -> NodeDef | Node:
     node's own, an offered init input is projected to the field, and
     the wrapper keeps the inner node's name, so pipe member keys and
     state paths read as if the node were placed directly."""
-    nd, param = _split(node)
 
     def init_fn(ndef, p, state_input=Struct(), input=None):
         carry = input if input is not None else _input_or_none(ndef)
@@ -37,5 +37,6 @@ def at(node: NodeDef | Node, field: str) -> NodeDef | Node:
                   init_requires_input=nd.init_requires_input,
                   init_reads_shape=nd.init_reads_shape,
                   param_input_spec=nd.param_input_spec if nd.parametric else None,
-                  state_input_spec=nd.state_input_spec if nd.cyclic else None)
-    return _rewrap(out, param)
+                  state_input_spec=nd.state_input_spec if nd.cyclic else None,
+                  tags=nd.tags)
+    return out

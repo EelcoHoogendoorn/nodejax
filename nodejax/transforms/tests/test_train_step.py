@@ -5,15 +5,15 @@ import optax
 
 from nodejax import Node, train_step
 from nodejax.struct import Struct
-from nodejax.examples import gain_def
+from nodejax.control import Gain
 
 
 def test_train_step_convergence():
-    Gain = gain_def()
-    trainer = train_step(Gain, lambda pred, target: (pred - target) ** 2, optax.sgd(0.01))
+    gain = Gain()
+    trainer = train_step(gain, lambda pred, target: (pred - target) ** 2, optax.sgd(0.01))
     assert isinstance(trainer, Node) and trainer.cyclic
 
-    state = trainer.init(model=Gain.parameterize(scale=jnp.array(1.0)).param)
+    state = trainer.init(model=gain.parameterize(scale=jnp.array(1.0)).param)
     inputs = Struct(input=jnp.full(500, 2.0), target=jnp.full(500, 6.0))
     final, losses = trainer.scan(state, inputs)
 

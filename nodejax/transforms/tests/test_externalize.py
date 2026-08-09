@@ -6,11 +6,11 @@ import pytest
 
 from nodejax import externalize
 from nodejax.struct import Struct
-from nodejax.examples import gain_def, integrator_def
+from nodejax.control import Gain, Integrator
 
 
 def test_externalize_member():
-    pipe = gain_def() >> gain_def()
+    pipe = Gain() >> Gain()
     ext = externalize(pipe, 'gain_2')
 
     node = ext.parameterize(gain=Struct(scale=jnp.asarray(2.0)),
@@ -29,7 +29,7 @@ def test_externalize_at_init():
     """A cyclic pipe's init spec-propagates by running each member, so
     the externalized slot needs values there; at_init supplies the
     stand-in, and apply still binds the member from the input."""
-    pipe = gain_def() >> integrator_def()
+    pipe = Gain() >> Integrator()
 
     bare = externalize(pipe, 'gain').parameterize(
         gain=Struct(scale=jnp.asarray(0.0)), integrator=Struct(gain=jnp.asarray(0.5)))

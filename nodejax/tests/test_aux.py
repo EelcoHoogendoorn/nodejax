@@ -19,25 +19,26 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from nodejax import node_def, serial, scan, train_step, split_aux
+from nodejax import node_def, serial, scan, train_step, split_aux, Aux
 from nodejax.struct import Struct
-from nodejax.examples import gain_def, mse, tile
+from nodejax.control import Gain
+from nodejax.util import mse, tile
 
 
-def watched_def():
+def Watched():
     """A node that sows: emits its activity alongside its output."""
     def param(w):
         return Struct(w=jnp.asarray(w))
     def apply(param, input):
         y = param.w * input
-        return y, Struct(activity=y ** 2)
+        return y, Aux(activity=y ** 2)
     return node_def(apply, param=param, name='watched')
 
 
 def test_aux_diverts_and_carry_flows_clean():
     """Downstream members see the raw signal; the aux surfaces at the top,
     keyed by member name."""
-    pipe = gain_def() >> watched_def() >> gain_def()
+    pipe = Gain() >> Watched() >> Gain()
     bound = pipe.parameterize(gain=Struct(scale=jnp.asarray(2.0)),
                               watched=Struct(w=jnp.asarray(3.0)),
                               gain_2=Struct(scale=jnp.asarray(10.0)))
@@ -47,8 +48,8 @@ def test_aux_diverts_and_carry_flows_clean():
 
 
 def test_aux_nests_through_composition():
-    inner = gain_def() >> watched_def()
-    outer = serial(core=inner, post=gain_def())
+    inner = Gain() >> Watched()
+    outer = serial(core=inner, post=Gain())
     bound = outer.parameterize(core=Struct(gain=Struct(scale=2.0), watched=Struct(w=3.0)),
                                post=Struct(scale=10.0))
     out, aux = bound.apply(1.0)
@@ -65,10 +66,10 @@ def test_aux_stacks_under_scan():
             return jnp.asarray(0.0)
         def apply(param, state, input):
             new = state + param.gain * input
-            return new, (new, Struct(mag=new ** 2))   # (state, (output, aux))
+            return new, (new, Aux(mag=new ** 2))
         return node_def(apply, param=param, init=init, name='wint')
 
-    pipe = watched_integrator() >> gain_def()
+    pipe = watched_integrator() >> Gain()
     seq = scan(pipe).parameterize(wint=Struct(gain=1.0), gain=Struct(scale=10.0))
     ys, aux = seq.apply(jnp.array([1.0, 1.0, 1.0]))
 
@@ -79,7 +80,7 @@ def test_aux_stacks_under_scan():
 def test_aux_loss_in_training():
     """The sow-a-regularizer use case: the loss destructures the pair, and
     the trained weight lands at the analytic compromise."""
-    model = watched_def()   # y = w*x, aux.activity = y^2
+    model = Watched()   # y = w*x, aux.activity = y^2
     lam = 0.125
 
     def loss(output, target):
@@ -99,11 +100,44 @@ def test_aux_loss_in_training():
 
 def test_split_aux_is_the_whole_convention():
     """The channel is one public function; custom composites reuse it."""
-    out, aux = split_aux((1.0, Struct(a=2.0)))
+    out, aux = split_aux((1.0, Aux(a=2.0)))
     assert out == 1.0 and aux.a == 2.0            # pair = (output, aux)
     out, aux = split_aux(Struct(y=1.0, z=2.0))
     assert out.y == 1.0 and aux is None           # Structs are plain outputs
     out, aux = split_aux(jnp.asarray(3.0))
     assert aux is None                            # arrays too
-    with pytest.raises(TypeError, match='2-tuple'):
-        split_aux((1.0, 2.0, 3.0))                # loud, not misread
+    out, aux = split_aux((1.0, 2.0))              # plain 2-tuple of numbers is clean positional data
+    assert out == (1.0, 2.0) and aux is None
+
+
+def test_self_sow_sugar():
+    """Verify self.sow(**kwargs) imperatively sows aux fields into the step's aux channel."""
+    from nodejax import composite
+
+    def Block():
+        def apply(self, input):
+            self.sow(activity=input ** 2)
+            return input * 2.0
+        return composite(apply, members={}, name='sower')
+
+    node = Block()
+    out, aux = node.apply(3.0)
+    assert out == 6.0
+    assert aux.activity == 9.0
+
+
+def test_leaf_self_sow_sugar():
+    """Verify self.sow(**kwargs) works symmetrically on leaf nodes declaring `self`."""
+    def LeafSower():
+        def param(w):
+            return Struct(w=jnp.asarray(w))
+        def apply(self, input):
+            y = self.param.w * input
+            self.sow(activity=y ** 2)
+            return y
+        return node_def(apply, param=param, name='leaf_sower')
+
+    node = LeafSower().parameterize(w=3.0)
+    out, aux = node.apply(2.0)
+    assert out == 6.0
+    assert aux.activity == 36.0

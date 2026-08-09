@@ -1,11 +1,10 @@
 """The static stage: blueprints awaiting static arguments.
 
-A plain closure returning a NodeDef is a perfectly good generic node;
-GenericDef exists for when statics should COMPOSE: a pipe of generics
-exposes its members' statics as one nested tree, supplied at a single point
-of use instead of threaded through constructors by hand. This is the same
-Struct-over-members pattern the core applies to param and state, applied to
-the static stage.
+Plain Python closures do not compose at the static stage. GenericDef wraps
+static blueprints so static trees compose as nested Structs, supplied at a single
+point of use instead of threaded through constructors by hand. This is the same
+Struct-over-members pattern the core applies to param and state, applied to the
+static stage.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ import inspect
 from functools import partial, wraps
 from typing import Any, Callable
 
+from nodejax.struct import Struct
 from nodejax.types import StaticTree
 from nodejax.core import Node, NodeDef
 
@@ -49,23 +49,48 @@ class GenericDef:
         self.defaults = defaults or {}
         self.members = members
 
-    def specialize(self, *args: Any, **statics: Any) -> NodeDef | Node:
+    @property
+    def static_input_spec(self) -> Struct:
+        """The member-keyed tree of static parameters expected by this generic (REQUIRED or default)."""
+        if self.members is not None:
+            return Struct(**{nm: d.static_input_spec for nm, d in self.members.items()})
+        sig = inspect.signature(self.specialize_fn)
+        spec_fields = {}
+        for nm, p in sig.parameters.items():
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+                if nm in self.defaults:
+                    spec_fields[nm] = self.defaults[nm]
+                elif p.default is not inspect.Parameter.empty:
+                    spec_fields[nm] = p.default
+                else:
+                    from nodejax.core import REQUIRED
+                    spec_fields[nm] = REQUIRED
+        return Struct(**spec_fields)
+
+    def specialize(self, *args: Any, **statics: Any) -> GenericDef | NodeDef | Node:
         """Bind static arguments; defaults merge under the supplied statics.
 
-        AMBIENT STATICS: a key of the form '*.<name>' BROADCASTS — the
-        value is delivered to every member, at any depth, whose generic
-        DECLARES <name> (a named parameter of its closure); members that
-        don't declare it are untouched, constants ignore it, and explicit
-        member statics win over the broadcast. Threading mode-like flags
-        through a construction graph dissolves into one entry at the
-        single point of use:
-
-            model_g.specialize(**{'*.train': False}, head={'train': True})
+        Supports dot-notation pathing (e.g. `linear.in_features=4`), wildcard
+        broadcasting (`*.train=False`), and partial binding (returns a refined
+        GenericDef if required statics remain unfulfilled).
         """
+        statics = _unflatten_dot_paths(statics)
         wilds = {k[2:]: statics.pop(k) for k in list(statics) if k.startswith('*.')}
         if wilds:
             statics = self._distribute(wilds, statics)
-        return self.specialize_fn(*args, **_merge_statics(self.defaults, statics))
+        merged = _merge_statics(self.defaults, statics)
+        try:
+            return self.specialize_fn(*args, **merged)
+        except TypeError as e:
+            # If arguments are partially supplied, return a refined GenericDef carrying merged defaults
+            if self.members is None:
+                sig = inspect.signature(self.specialize_fn)
+                try:
+                    sig.bind_partial(*args, **merged)
+                    return GenericDef(self.name, self.specialize_fn, defaults=merged, members=self.members)
+                except TypeError:
+                    pass
+            raise e
 
     def _distribute(self, wilds: StaticTree, statics: StaticTree) -> StaticTree:
         """Resolve broadcast statics one level: composites re-inject the
@@ -86,7 +111,7 @@ class GenericDef:
         accepted = {k: v for k, v in wilds.items() if k in params}
         return _merge_statics(accepted, statics)
 
-    def __call__(self, *args: Any, **statics: Any) -> NodeDef | Node:
+    def __call__(self, *args: Any, **statics: Any) -> GenericDef | NodeDef | Node:
         """Shorthand for specialize."""
         return self.specialize(*args, **statics)
 
@@ -104,6 +129,23 @@ class GenericDef:
 
     def __repr__(self) -> str:
         return f'GenericDef({self.name})'
+
+
+def _unflatten_dot_paths(statics: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in statics.items():
+        if '.' in key and not key.startswith('*.'):
+            parts = key.split('.')
+            curr = out
+            for part in parts[:-1]:
+                curr = curr.setdefault(part, {})
+            curr[parts[-1]] = value
+        else:
+            if isinstance(value, dict) and key in out and isinstance(out[key], dict):
+                out[key] = _merge_statics(out[key], value)
+            else:
+                out[key] = value
+    return out
 
 
 def generic(fn: Callable[..., NodeDef | Node] | None = None, *,

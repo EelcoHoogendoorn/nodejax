@@ -18,10 +18,21 @@ import pytest
 from nodejax import (node_def, batch, scan,
                            spec, spec_of, materialize, initialize, meta)
 from nodejax.struct import Struct
-from nodejax.examples import integrator_def, Linear, pd_def, plant_node, walker_def
+from nodejax.control import Integrator, PD, Walker
 
 
-def tree_ema_def():
+def Plant(dt=0.01, spring_k=1.0, damping_c=0.1):
+    def init(ndef):
+        return Struct(pos=jnp.zeros_like(ndef.input), vel=jnp.zeros_like(ndef.input))
+    def apply(state, input):
+        acc = input - spring_k * state.pos - damping_c * state.vel
+        vel = state.vel + dt * acc
+        pos = state.pos + dt * vel
+        return Struct(pos=pos, vel=vel), pos
+    return node_def(apply, init=init, name='plant')
+
+
+def TreeEMA():
     """The rewrite.md tree-EMA case: state whose STRUCTURE copies the input,
     derived from the init input value — no declaration possible upfront."""
     def param(alpha):
@@ -56,7 +67,7 @@ def test_declared_input_spec_derives_meta():
 
 
 def test_meta_of_cyclic_node():
-    node = integrator_def().parameterize(gain=jnp.array(1.0))
+    node = Integrator().parameterize(gain=jnp.array(1.0))
     m = meta(node, input=spec(()))
     assert m.cyclic
     assert m.state_spec.shape == ()
@@ -66,7 +77,7 @@ def test_meta_of_cyclic_node():
 def test_state_structure_from_input():
     """State structure copies the input structure (tree-EMA): initialize
     materializes the spec as init's input value."""
-    ema = tree_ema_def().parameterize(alpha=0.5)
+    ema = TreeEMA().parameterize(alpha=0.5)
 
     state = initialize(ema, input=spec(3))
     assert state.shape == (3,)
@@ -83,7 +94,7 @@ def test_state_structure_from_input():
 def test_pipe_init_propagates_input():
     """Composite init hands each member ITS OWN input, threaded through the
     preceding members — pd and plant carry no shape statics at all."""
-    pipe = pd_def(0.1) >> plant_node(0.1, 1.0, 0.3).ndef
+    pipe = PD(0.1) >> Plant(0.1, 1.0, 0.3).ndef
     bound = pipe.parameterize(pd=Struct(kp=jnp.array(1.0), kd=jnp.array(0.0)))
 
     state = bound.with_input(spec(2)).init()
@@ -91,10 +102,23 @@ def test_pipe_init_propagates_input():
     assert state.plant.pos.shape == (2,)   # shaped by pd's OUTPUT, one hop downstream
 
 
+def DeclaredLinear(n_in, n_out):
+    """A layer whose fan-in is DECLARED rather than read from the offer,
+    so a pipe can be wired with members that disagree. nn.Linear sizes
+    itself from what it is handed and therefore cannot be mismatched."""
+    def param(weight, bias):
+        return Struct(weight=jnp.asarray(weight), bias=jnp.asarray(bias))
+
+    def apply(param, input):
+        return input @ param.weight + param.bias
+
+    return node_def(apply, param=param, name=f'linear{n_in}x{n_out}')
+
+
 def test_pipe_init_shape_error_names_member():
     """Shape mismatches between members surface at init time, named — not
     at first apply."""
-    pipe = Linear(4, 3) >> Linear(5, 2)  # 3 -> 5: incompatible
+    pipe = DeclaredLinear(4, 3) >> DeclaredLinear(5, 2)  # 3 -> 5: incompatible
     bound = pipe.parameterize(
         linear4x3=Struct(weight=jnp.ones((4, 3)), bias=jnp.zeros(3)),
         linear5x2=Struct(weight=jnp.ones((5, 2)), bias=jnp.zeros(2)),
@@ -106,7 +130,7 @@ def test_pipe_init_shape_error_names_member():
 def test_pipe_init_routes_rng():
     """Composite init splits rng per member: stochastic members mid-pipe get
     independent keys — the gap explicit-state rng couldn't cover."""
-    pipe = walker_def() >> walker_def()
+    pipe = Walker() >> Walker()
     bound = pipe.parameterize(walker=Struct(sigma=jnp.asarray(1.0)),
                               walker_2=Struct(sigma=jnp.asarray(1.0)))
 
@@ -123,12 +147,12 @@ def test_pipe_init_routes_rng():
 def test_batch_init_from_input():
     """batch(...).init derives n and the per-element input from a batched
     spec or example — no explicit n."""
-    b = batch(integrator_def()).parameterize(gain=jnp.array(1.0))
+    b = batch(Integrator()).parameterize(gain=jnp.array(1.0))
     state = b.with_input(spec(5)).init()
     assert state.shape == (5,)
 
     # stochastic case: n and independent keys, from the input value and boundary key
-    bw = batch(walker_def()).parameterize(sigma=jnp.asarray(1.0))
+    bw = batch(Walker()).parameterize(sigma=jnp.asarray(1.0))
     state = bw.with_input(spec(3)).init(rng=jax.random.PRNGKey(0))
     state, out = bw.apply(state, jnp.zeros(3))
     assert jnp.unique(out).size == 3
@@ -137,7 +161,7 @@ def test_batch_init_from_input():
 def test_scan_resolves_from_first_element():
     """scan internalizes init with the first sequence element as its input, so
     input-shaped state derives from the sequence itself."""
-    seq = scan(tree_ema_def()).parameterize(alpha=jnp.asarray(0.5))
+    seq = scan(TreeEMA()).parameterize(alpha=jnp.asarray(0.5))
     outs = seq.apply(jnp.ones((10, 3)))
     assert outs.shape == (10, 3)
     assert jnp.allclose(outs[0], 0.5)  # first step: ema from zeros toward ones
@@ -165,3 +189,41 @@ def test_declared_input_seeds_init():
     node = node_def(apply, init=init, name='seeded', apply_input_spec=jnp.zeros(3))
     assert node.init().shape == (3,)                          # seeded by declaration
     assert node.with_input(jnp.zeros((2, 3))).init().shape == (2, 3)  # with_input wins
+
+
+def test_resolved_bundle_spec_defaulted_fields_are_optional():
+    """A RESOLVED bundle spec validates by the bundle rule: a stream may
+    omit a defaulted field (the apply unpack fills its default), while
+    unknown fields and shape conflicts stay loud and named."""
+    from nodejax import composite, scan
+
+    def acc():
+        def param(gain=1.0):
+            return Struct(gain=gain)
+
+        def init():
+            return jnp.asarray(0.0)
+
+        def apply(param, state, input):
+            s = state + input * param.gain
+            return s, s
+
+        return node_def(apply, param=param, init=init, name='acc')
+
+    def rig():
+        members = dict(acc=acc())
+
+        def apply(self, x=0.0, bias=0.0):
+            return self.acc(x + bias)
+
+        return composite(apply, members=members, name='rig')
+
+    sc = scan(rig()).parameterize()
+    ys = sc.apply(Struct(x=jnp.ones(3)))
+    assert jnp.allclose(ys, jnp.array([1.0, 2.0, 3.0]))     # bias defaulted
+
+    with pytest.raises(TypeError, match='unknown input fields'):
+        sc.apply(Struct(x=jnp.ones(3), extra=jnp.ones(3)))
+
+    with pytest.raises(TypeError, match='rig.x'):
+        sc.apply(Struct(x=jnp.ones((3, 2))))

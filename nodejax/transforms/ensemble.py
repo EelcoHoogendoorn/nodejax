@@ -9,7 +9,8 @@ from nodejax.transforms.common import _mapped_init, _mapped_param_fn
 
 
 @_over_generic
-def ensemble(ndef: NodeDef, n: int | None = None) -> NodeDef:
+def ensemble(ndef: NodeDef, n: int | None = None,
+             axis: str = 'ensemble') -> NodeDef:
     """vmap over the member axis: input broadcast, output stacked.
 
     A parametric node carries one param row per member — parameterize with
@@ -19,6 +20,11 @@ def ensemble(ndef: NodeDef, n: int | None = None) -> NodeDef:
     under the one broadcast input (declare n; there is no param axis to
     infer it from). A node with neither params nor state has no member
     identity to ensemble — use it directly.
+
+    The member axis is NAMED (default 'ensemble', the reserved
+    convention), so members reduce across the population with jax
+    collectives; a declared axis need for the name is satisfied here,
+    and re-binding a name already bound inside refuses.
     """
     if ndef.bound:
         raise TypeError('ensemble changes the meaning of param; apply it to the '
@@ -30,26 +36,27 @@ def ensemble(ndef: NodeDef, n: int | None = None) -> NodeDef:
         raise TypeError(f'ensemble({ndef.name}) needs n=<member count>: with no '
                         'params, nothing else determines the ensemble size')
 
-    def apply_fn(p, s, i):
+    num_members = n
+    def apply_fn(param, state, input):
         # apply-side rng: members must not share one draw — the boundary key
         # splits per member, each injected into that member's input
-        p_axis = 0 if ndef.parametric else None
+        param_axis = 0 if ndef.parametric else None
         if ndef.apply_takes_rng:
-            count = jax.tree.leaves(p)[0].shape[0] if ndef.parametric else n
-            keys, data = _split_rng(i, count)
-            return jax.vmap(lambda p_, s_, k_: ndef.apply_fn(p_, s_, _with_rng(data, k_)),
-                            in_axes=(p_axis, 0, 0))(p, s, keys)
-        return jax.vmap(lambda p_, s_: ndef.apply_fn(p_, s_, i),
-                        in_axes=(p_axis, 0))(p, s)
+            count = jax.tree.leaves(param)[0].shape[0] if ndef.parametric else num_members
+            keys, data = _split_rng(input, count)
+            return jax.vmap(lambda m_param, m_state, m_key: ndef.apply_fn(m_param, m_state, _with_rng(data, m_key)),
+                            in_axes=(param_axis, 0, 0), axis_name=axis)(param, state, keys)
+        return jax.vmap(lambda m_param, m_state: ndef.apply_fn(m_param, m_state, input),
+                        in_axes=(param_axis, 0), axis_name=axis)(param, state)
 
     if ndef.cyclic:
-        init_fn = _mapped_init(ndef, n)
+        init_fn = _mapped_init(ndef, num_members)
     else:
-        def init_fn(nd_, p, state_input=Struct(), input=None):
+        def init_fn(def_obj, param, state_input=Struct(), input=None):
             # the (empty) state carries no member axis; build it from one
             # member's params so a resolved def's init walk sees
             # member-shaped params, not stacked (mirrors stack)
-            member0 = jax.tree.map(lambda x: x[0], p) if p != () else p
+            member0 = jax.tree.map(lambda x: x[0], param) if param != () else param
             return ndef.build_state(member0, state_input, input=input)
 
     return NodeDef(f'ensemble({ndef.name})', _mapped_param_fn(ndef, n),
@@ -60,4 +67,5 @@ def ensemble(ndef: NodeDef, n: int | None = None) -> NodeDef:
                    init_requires_input=ndef.init_requires_input,
                    init_reads_shape=ndef.init_reads_shape,
                    param_input_spec=ndef.param_input_spec if ndef.parametric else None,
-                   state_input_spec=ndef.state_input_spec if ndef.cyclic else None)
+                   state_input_spec=ndef.state_input_spec if ndef.cyclic else None,
+                   tags=ndef.tags)

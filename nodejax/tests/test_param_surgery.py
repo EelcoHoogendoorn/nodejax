@@ -12,12 +12,12 @@ import optax
 
 from nodejax import train_step
 from nodejax.struct import Struct
-from nodejax.examples import gain_def
+from nodejax.control import Gain
 
 
 def test_param_paths_are_named():
     """Pytree paths carry member and field names, not anonymous indices."""
-    bound = (gain_def() >> gain_def()).parameterize(
+    bound = (Gain() >> Gain()).parameterize(
         gain=Struct(scale=jnp.asarray(1.0)), gain_2=Struct(scale=jnp.asarray(2.0)))
 
     leaves = jax.tree_util.tree_flatten_with_path(bound.param)[0]
@@ -33,7 +33,7 @@ def test_param_paths_are_named():
 def test_freeze_by_path_with_plain_optax():
     """Freeze a member by name via optax.multi_transform — no framework
     surgery API, and train_step consumes the composed optimizer as-is."""
-    pipe = gain_def() >> gain_def()
+    pipe = Gain() >> Gain()
     model = pipe.parameterize(gain=Struct(scale=jnp.asarray(1.0)),
                               gain_2=Struct(scale=jnp.asarray(1.0)))
 
@@ -58,16 +58,16 @@ def test_replace_by_path():
     callables, loud failure on unknown addresses."""
     import pytest
     from nodejax import replace_by_path
-    from nodejax.examples import Linear
-
-    node = Linear(2, 2).parameterize(weight=jnp.eye(2), bias=jnp.ones(2))
+    from nodejax import nn
+    node = nn.Linear(2).with_input(jnp.zeros(2)).bind(
+        Struct(w=jnp.eye(2), b=jnp.ones(2)))
     edited = replace_by_path(node, {
-        '.bias': jnp.zeros(2),                    # absolute
-        '.weight': lambda w: 3.0 * w,             # relative
+        '.b': jnp.zeros(2),                       # absolute
+        '.w': lambda w: 3.0 * w,                  # relative
     })
-    assert jnp.allclose(edited.param.weight, 3.0 * jnp.eye(2))
-    assert jnp.allclose(edited.param.bias, 0.0)
-    assert jnp.allclose(node.param.weight, jnp.eye(2))  # original untouched
+    assert jnp.allclose(edited.param.w, 3.0 * jnp.eye(2))
+    assert jnp.allclose(edited.param.b, 0.0)
+    assert jnp.allclose(node.param.w, jnp.eye(2))  # original untouched
 
     with pytest.raises(KeyError):
         replace_by_path(node, {'.typo': 1.0})

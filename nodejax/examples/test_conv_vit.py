@@ -39,7 +39,8 @@ import jax.numpy as jnp
 import optax
 from sklearn.datasets import load_digits
 
-from nodejax import Node, NodeDef, node_def, serial, stack, residual, batch, train_step, ambient, KeyStream
+from nodejax import (Node, NodeDef, nn, node_def, serial, stack, residual,
+                     batch, train_step, ambient, KeyStream)
 from nodejax.struct import Struct
 
 IMAGE, STEM, HIDDEN, HEADS, DEPTH = 8, 16, 32, 4, 2
@@ -47,16 +48,13 @@ GRID = IMAGE // 2              # GEOMETRY: SAME padding, one stride-2 conv
 TOKENS = GRID * GRID           # GEOMETRY: sequence length seen by attention
 BATCH, EPOCHS = 125, 40
 
-gelu = node_def(lambda input: jax.nn.gelu(input), name='gelu')
-
-
-def reshape_def(shape: tuple[int, ...], name: str = 'reshape') -> Node:
+def reshape(shape: tuple[int, ...], name: str = 'reshape') -> Node:
     return node_def(lambda input: input.reshape(shape), name=name)
 
 
 # --- the conv stem: real conv layers, channels threaded by hand ---
 
-def conv_def(c_in: int, c_out: int, kernel: int = 3, stride: int = 1) -> NodeDef:
+def Conv(c_in: int, c_out: int, kernel: int = 3, stride: int = 1) -> NodeDef:
     """3x3 SAME convolution over ONE (H, W, C) feature map. lax demands
     a batch dim, so a unit one is added and stripped; under batch() the
     vmap fuses it into a real batched conv."""
@@ -74,7 +72,7 @@ def conv_def(c_in: int, c_out: int, kernel: int = 3, stride: int = 1) -> NodeDef
 
 
 @ambient
-def pos_def(tokens: int, hidden: int) -> NodeDef:
+def PosEmbed(tokens: int, hidden: int) -> NodeDef:
     """Learned position embedding over the token axis."""
     def param(rng: KeyStream) -> Struct:
         return Struct(embed=0.02 * jax.random.normal(rng.next(), (tokens, hidden)))
@@ -88,7 +86,7 @@ def pos_def(tokens: int, hidden: int) -> NodeDef:
 # --- the transformer block ---
 
 @ambient
-def ln_def(hidden: int, eps: float = 1e-5) -> NodeDef:
+def LayerNorm(hidden: int, eps: float = 1e-5) -> NodeDef:
     """Layernorm over the feature axis."""
     def param() -> Struct:
         return Struct(scale=jnp.ones(hidden), bias=jnp.zeros(hidden))
@@ -102,7 +100,7 @@ def ln_def(hidden: int, eps: float = 1e-5) -> NodeDef:
 
 
 @ambient
-def attn_def(hidden: int, heads: int) -> NodeDef:
+def Attention(hidden: int, heads: int) -> NodeDef:
     """Multi-head self-attention over one (T, hidden) sequence."""
     assert hidden % heads == 0
     dim = hidden // heads
@@ -122,7 +120,7 @@ def attn_def(hidden: int, heads: int) -> NodeDef:
     return node_def(apply, param=param, name='attn')
 
 
-def linear_def(n_in: int, n_out: int) -> NodeDef:
+def Linear(n_in: int, n_out: int) -> NodeDef:
     def param(rng: KeyStream) -> Struct:
         return Struct(w=jax.random.normal(rng.next(), (n_in, n_out)) / jnp.sqrt(n_in),
                       b=jnp.zeros(n_out))
@@ -133,14 +131,14 @@ def linear_def(n_in: int, n_out: int) -> NodeDef:
     return node_def(apply, param=param, name='linear')
 
 
-def block_def() -> NodeDef:
+def Block() -> NodeDef:
     """Pre-norm transformer block; shape-preserving, so stack-able."""
     return serial(
-        attn=residual(serial(norm=ln_def(), attn=attn_def())),
-        mlp=residual(serial(norm=ln_def(),
-                            up=linear_def(HIDDEN, 4 * HIDDEN),
-                            act=gelu,
-                            down=linear_def(4 * HIDDEN, HIDDEN))),
+        attn=residual(serial(norm=LayerNorm(), attn=Attention())),
+        mlp=residual(serial(norm=LayerNorm(),
+                            up=Linear(HIDDEN, 4 * HIDDEN),
+                            act=nn.gelu,
+                            down=Linear(4 * HIDDEN, HIDDEN))),
     )
 
 
@@ -148,16 +146,16 @@ def build() -> NodeDef:
     """The per-sample model: (64,) pixels -> (10,) logits."""
     with ambient(hidden=HIDDEN, heads=HEADS, tokens=TOKENS):
         return serial(
-            image=reshape_def((IMAGE, IMAGE, 1), name='image'),
-            conv1=conv_def(1, STEM),
-            act1=gelu,
-            conv2=conv_def(STEM, HIDDEN, stride=2),   # downsample: grid side halves
-            act2=gelu,
-            tokens=reshape_def((TOKENS, HIDDEN), name='tokens'),
-            pos=pos_def(),
-            blocks=stack(block_def(), n=DEPTH),
-            flat=reshape_def((-1,), name='flat'),
-            head=linear_def(TOKENS * HIDDEN, 10),   # GEOMETRY: the conv-flatten size
+            image=reshape((IMAGE, IMAGE, 1), name='image'),
+            conv1=Conv(1, STEM),
+            act1=nn.gelu,
+            conv2=Conv(STEM, HIDDEN, stride=2),   # downsample: grid side halves
+            act2=nn.gelu,
+            tokens=reshape((TOKENS, HIDDEN), name='tokens'),
+            pos=PosEmbed(),
+            blocks=stack(Block(), n=DEPTH),
+            flat=reshape((-1,), name='flat'),
+            head=Linear(TOKENS * HIDDEN, 10),   # GEOMETRY: the conv-flatten size
         )
 
 

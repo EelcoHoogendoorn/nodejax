@@ -8,7 +8,7 @@ from nodejax.authoring import KeyStream
 from nodejax.spec import materialize
 
 
-def parallel(**named: NodeDef | Node) -> NodeDef | Node:
+def parallel(**named: GenericDef | NodeDef | Node) -> GenericDef | NodeDef | Node:
     """Compose named nodes over the strands of a Struct signal — the
     product twin of serial: where a pipe chains members over one
     signal, parallel(**members) runs each member on the input field of
@@ -23,6 +23,21 @@ def parallel(**named: NodeDef | Node) -> NodeDef | Node:
     own field of the offered input, and rng splits route per member."""
     if not named:
         raise TypeError('parallel() needs at least one member')
+    from nodejax.generic import GenericDef
+    from nodejax.compose import _as_generic
+    if any(isinstance(v, GenericDef) for v in named.values()):
+        generic_members = {nm: _as_generic(v) for nm, v in named.items()}
+
+        def specialize_fn(**statics: Any) -> NodeDef | Node:
+            unknown = set(statics) - set(generic_members)
+            if unknown:
+                raise TypeError(f'unknown parallel generic members: {sorted(unknown)}')
+            specialized = {nm: generic_members[nm].specialize(**statics.get(nm, {}))
+                           for nm in generic_members}
+            return parallel(**specialized)
+
+        return GenericDef('(' + ' | '.join(named) + ')', specialize_fn, members=generic_members)
+
     if not all(v.bound for v in named.values()):
         promoted = {}
         for nm, v in named.items():
@@ -33,14 +48,14 @@ def parallel(**named: NodeDef | Node) -> NodeDef | Node:
                                     'parameterize the block instead')
                 v = v.ndef
             promoted[nm] = v
-        return _parallel_def(promoted)
+        return _Parallel(promoted)
     if all(v.bound for v in named.values()):
         defs = {nm: v.ndef for nm, v in named.items()}
-        return _parallel_def(defs).bind(Struct(**{nm: v.param for nm, v in named.items()}))
-    raise TypeError('parallel() members must be Nodes or NodeDefs')
+        return _Parallel(defs).bind(Struct(**{nm: v.param for nm, v in named.items()}))
+    raise TypeError('parallel() members must be Nodes, NodeDefs, or GenericDefs')
 
 
-def _parallel_def(defs: dict[str, NodeDef]) -> NodeDef:
+def _Parallel(defs: dict[str, NodeDef]) -> NodeDef:
     names = list(defs)
 
     def param_fn(ndef, param_input=Struct()):
@@ -114,4 +129,4 @@ def _parallel_def(defs: dict[str, NodeDef]) -> NodeDef:
                      parametric=any(d.parametric for d in defs.values()),
                      cyclic=any(d.cyclic for d in defs.values()),
                      members=dict(defs),
-                     rebuild=lambda new: _parallel_def(dict(new)))
+                     rebuild=lambda new: _Parallel(dict(new)))

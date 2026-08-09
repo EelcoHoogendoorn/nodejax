@@ -16,15 +16,15 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from nodejax import Node, node_def, batch, ensemble
+from nodejax import Node, node_def, batch, ensemble, KeyStream
 from nodejax.struct import Struct
-from nodejax.examples import walker_def, gain_def, integrator_def
+from nodejax.control import Gain, Integrator, Walker
 
 
 def test_rng_state_advances():
     """Successive applies draw different noise; the same state redraws the
     same noise (purity)."""
-    node = walker_def().parameterize(sigma=jnp.asarray(1.0))
+    node = Walker().parameterize(sigma=jnp.asarray(1.0))
     s0 = node.init(rng=jax.random.PRNGKey(0))
 
     s1, step1 = node.apply(s0, 0.0)
@@ -35,8 +35,28 @@ def test_rng_state_advances():
     assert jnp.allclose(step1, again)            # frozen state -> same draw
 
 
+def test_state_rng_is_keystream():
+    """self.rng presents as a KeyStream inside apply, supporting .next()."""
+    def param(scale):
+        return Struct(scale=jnp.asarray(scale))
+
+    def init(rng):
+        return Struct(rng=rng)
+
+    def apply(self, state, input):
+        k1 = self.rng.next()
+        k2 = self.rng.next()
+        return state, input + self.scale * (jax.random.normal(k1) + jax.random.normal(k2))
+
+    nd = node_def(apply, param=param, init=init).parameterize(scale=1.0)
+    s0 = nd.init(rng=jax.random.PRNGKey(42))
+    s1, out = nd.apply(s0, 1.0)
+    assert type(s1.rng) is not KeyStream        # stored state carries raw key, not stream
+    assert out != 1.0
+
+
 def test_rng_determinism_across_seeds():
-    node = walker_def().parameterize(sigma=jnp.asarray(1.0))
+    node = Walker().parameterize(sigma=jnp.asarray(1.0))
     xs = jnp.zeros(20)
 
     _, traj_a = node.scan(node.init(rng=jax.random.PRNGKey(0)), xs)
@@ -90,7 +110,7 @@ def test_apply_rng_is_a_declared_field():
 def test_batch_splits_keys():
     """batch(...).init tiles ordinary state but SPLITS the rng field: each
     batch element gets an independent noise stream."""
-    b = batch(walker_def(), n=3).parameterize(sigma=jnp.asarray(1.0))
+    b = batch(Walker(), n=3).parameterize(sigma=jnp.asarray(1.0))
     state = b.init(rng=jax.random.PRNGKey(0))
 
     state, out = b.apply(state, jnp.zeros(3))
@@ -100,7 +120,7 @@ def test_batch_splits_keys():
 
 def test_ensemble_splits_keys():
     """ensemble(...).init splits a single key across members."""
-    e = ensemble(walker_def()).parameterize(sigma=jnp.ones(2))
+    e = ensemble(Walker()).parameterize(sigma=jnp.ones(2))
     state = e.init(rng=jax.random.PRNGKey(0))
 
     state, out = e.apply(state, 0.0)
@@ -116,14 +136,14 @@ def test_rng_routing_by_inspection():
     from nodejax import node_def, composite
     from nodejax.struct import Struct
 
-    def noise_def():
+    def Noise():
         def init(rng):
             return Struct(rng=rng)
         def apply(state, input):
             return state, input
         return node_def(apply, init=init, name='noise')
 
-    def lag_def():
+    def Lag():
         def init():
             return jnp.zeros(())
         def apply(state, input):
@@ -136,8 +156,8 @@ def test_rng_routing_by_inspection():
         return composite(apply, members=members, name='m')
 
     key = jax.random.PRNGKey(0)
-    small = build(a=noise_def(), z=noise_def())
-    grown = build(a=noise_def(), extra=lag_def(), more=lag_def(), z=noise_def())
+    small = build(a=Noise(), z=Noise())
+    grown = build(a=Noise(), extra=Lag(), more=Lag(), z=Noise())
 
     s_small = small.init(rng=key)
     s_grown = grown.init(rng=key)
@@ -155,10 +175,10 @@ def test_rng_to_deterministic_node_is_an_error():
     ordinary unknown bundle field — no special-cased guard, the same
     validation as any other field."""
     with pytest.raises(TypeError, match='unknown bundle fields'):
-        gain_def().parameterize(scale=1.0, rng=jax.random.PRNGKey(0))
+        Gain().parameterize(scale=1.0, rng=jax.random.PRNGKey(0))
 
     with pytest.raises(TypeError, match='unknown bundle fields'):
-        integrator_def().parameterize(gain=1.0).init(rng=jax.random.PRNGKey(0))
+        Integrator().parameterize(gain=1.0).init(rng=jax.random.PRNGKey(0))
 
 
 def test_keystreams_never_escape_the_lifts():

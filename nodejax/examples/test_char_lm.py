@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import NodeDef, node_def, serial, stack, scan, residual, train_step, tie, split_aux, ambient, nn
+from nodejax import NodeDef, derive, serial, stack, scan, residual, train_step, tie, split_aux, ambient, nn
 from nodejax.types import Param
 from nodejax.struct import Struct
 
@@ -47,10 +47,10 @@ def build(vocab: int) -> NodeDef:
     ambient scope, so the members stay plain reusable factories."""
     with ambient(vocab=vocab, hidden=HIDDEN, experts=EXPERTS):
         pipe = serial(
-            embed=nn.embed(),
-            core=stack(residual(nn.rnn()), n=LAYERS),
-            moe=nn.moe(),
-            unembed=nn.unembed(),
+            embed=nn.Embed(),
+            core=stack(residual(nn.RNN()), n=LAYERS),
+            moe=nn.MoE(),
+            unembed=nn.Unembed(),
         )
     return tie(pipe, 'embed', 'unembed')
 
@@ -65,10 +65,12 @@ def lm_loss(pred: tuple, target: jax.Array) -> jax.Array:
 
 # --- generation: sampling as the feedback loop ---
 
-def sampler_def(lm: NodeDef, temperature: float = 0.8) -> NodeDef:
+def Sampler(lm: NodeDef, temperature: float = 0.8) -> NodeDef:
     """Autoregressive sampling as a feedback loop: state carries
     (model state, last char, rng); each step feeds the model its own
-    previous sample; the rng auto-advances."""
+    previous sample; the rng auto-advances. A DERIVATION of the model:
+    the sampler keeps the model's params (same constructor, same spec)
+    and overrides the step machinery."""
     def init(param: Param, rng: jax.Array) -> Struct:
         start = jnp.zeros((1,), dtype=jnp.int32)
         return Struct(inner=lm.build_state(param, input=start), last=start, rng=rng)
@@ -79,9 +81,7 @@ def sampler_def(lm: NodeDef, temperature: float = 0.8) -> NodeDef:
         char = jax.random.categorical(state.rng, logits / temperature, axis=-1)
         return Struct(inner=new_inner, last=char, rng=state.rng), char
 
-    lifted = node_def(apply, init=init, param=lambda: (), name=f'sample({lm.name})')
-    return lifted._replace(param_fn=lm._param_impl, param_input_spec=lm.param_input_spec,
-                           param_reads_shape=lm.param_reads_shape)
+    return derive(lm, apply=apply, init=init, name=f'sample({lm.name})')
 
 
 # --- tests ---
@@ -135,7 +135,7 @@ def test_trains_generates():
     assert jnp.max(aux.moe.usage) < 0.7, aux.moe.usage
 
     # generation: the feedback loop, keyed through the reserved rng input
-    sampler = sampler_def(lm)
+    sampler = Sampler(lm)
     gen = scan(sampler).bind(final.model)
     ticks = jnp.zeros(160)
     sample_a = gen.apply(rng=jax.random.PRNGKey(7), tick=ticks)

@@ -1,15 +1,14 @@
 """Block-level tests for the actuator package: the pipeline PID, DQ
-signal polymorphism, and the monolithic full-fidelity plant (cogging,
-stiction, hysteresis — the physics the split emotor/mechanical pair
-deliberately omits)."""
+signal polymorphism, and the bench motor (the electrical/mechanical
+composition at full fidelity: cogging, stiction, hysteresis)."""
 
 import jax
 import jax.numpy as jnp
 
 from nodejax import scan
 from nodejax.struct import Struct
-from nodejax.examples.actuator import (DQ, motor_params, bench_motor_def,
-                                    pid_def, rate_limit_def, clamp_def, wrap_def)
+from nodejax.control import PID, RateLimit, Clamp
+from nodejax.examples.actuator import DQ, BenchMotor, wrap
 
 DT = 1e-4
 
@@ -18,10 +17,10 @@ def test_pid_is_a_pipeline():
     """Optional PID behavior is a pipe stage you include or don't — and
     each stage is independently a node (the rate limiter carries its own
     state)."""
-    bare = pid_def(DT).parameterize(kp=2.0, ki=0.0)
+    bare = PID(DT).parameterize(kp=2.0, ki=0.0)
     assert bare.apply(bare.with_input(jnp.asarray(0.0)).init(), 1.0)[1] == 2.0
 
-    full = (wrap_def() >> pid_def(DT) >> rate_limit_def(DT) >> clamp_def()).parameterize(
+    full = (wrap() >> PID(DT) >> RateLimit(DT) >> Clamp()).parameterize(
         pid=Struct(kp=2.0, ki=0.0),
         rate_limit=Struct(max_rate=5000.0),        # units per second
         clamp=Struct(limit=1.5))
@@ -40,7 +39,7 @@ def test_pid_core_is_signal_polymorphic():
     """The SAME pid def runs scalars or DQ pairs: its state derives from
     the init input value — signal type is decided at init, not by
     subclassing."""
-    pid = pid_def(DT).parameterize(kp=2.0, ki=0.0)
+    pid = PID(DT).parameterize(kp=2.0, ki=0.0)
 
     s = pid.with_input(DQ()).init()
     assert isinstance(s.integral, DQ)
@@ -55,8 +54,8 @@ def test_stiction_holds_the_rotor():
     drive = Struct(v=DQ(jnp.zeros(400), jnp.full(400, 0.1)), load=jnp.zeros(400))
 
     def bench(torque_static):
-        return scan(bench_motor_def(DT)).parameterize(
-            motor=motor_params(),
+        # the electrical slot is absent: it constructs from its defaults
+        return scan(BenchMotor(DT)).parameterize(
             mechanical=Struct(inertia=0.1, friction=1e-3,
                               torque_static=torque_static))
 
@@ -67,8 +66,8 @@ def test_stiction_holds_the_rotor():
 def test_recorded_rollout():
     """scan(record=True): the full state trajectory rides along — the
     Simulation.run convention as a stock transform (keyless plants)."""
-    seq = scan(bench_motor_def(DT), record=True).parameterize(
-        motor=motor_params(), mechanical=Struct(inertia=0.1, friction=1e-3))
+    seq = scan(BenchMotor(DT), record=True).parameterize(
+        mechanical=Struct(inertia=0.1, friction=1e-3))
     drive = Struct(v=DQ(jnp.zeros(300), jnp.full(300, 1.0)), load=jnp.zeros(300))
     ys = seq.apply(drive)
 

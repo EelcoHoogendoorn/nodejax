@@ -21,7 +21,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from nodejax import NodeDef, node_def, scan, serial, train_step, tie
+from nodejax import NodeDef, node_def, nn, scan, serial, train_step, tie
 from nodejax.struct import Struct
 
 
@@ -41,7 +41,7 @@ def tile(tree, n):
 K = 3
 
 
-def encoder_def(k):
+def Encoder(k):
     def param(rng):
         return Struct(weight=jax.random.normal(rng.next(), (k,)))
     def apply(param, input):
@@ -49,7 +49,7 @@ def encoder_def(k):
     return node_def(apply, param=param, name='enc')
 
 
-def decoder_def(k):
+def Decoder(k):
     def param(rng):
         return Struct(weight=jax.random.normal(rng.next(), (k,)))
     def apply(param, input):
@@ -58,7 +58,7 @@ def decoder_def(k):
 
 
 def tied_autoencoder():
-    return tie(encoder_def(K) >> decoder_def(K), 'enc', 'dec')
+    return tie(Encoder(K) >> Decoder(K), 'enc', 'dec')
 
 
 def test_single_copy_survives_jax_boundaries():
@@ -83,7 +83,7 @@ def test_gradients_accumulate_across_uses():
 
     # ready-made param pytrees enter via bind; bundles carry recipes
     tied = tied_autoencoder().bind(Struct(enc=Struct(weight=w), dec=()))
-    untied = (encoder_def(K) >> decoder_def(K)).bind(
+    untied = (Encoder(K) >> Decoder(K)).bind(
         Struct(enc=Struct(weight=w), dec=Struct(weight=w)))
 
     f = lambda n: jnp.sum(n.apply(x))
@@ -118,27 +118,11 @@ def test_alias_parameterization_rejected():
 VOCAB, DIM = 8, 4
 
 
-def embed_def():
-    def param(rng):
-        return Struct(table=jax.random.normal(rng.next(), (VOCAB, DIM)))
-    def apply(param, input):
-        return param.table[input]            # ids -> vectors
-    return node_def(apply, param=param, name='embed')
-
-
-def unembed_def():
-    def param(rng):
-        return Struct(table=jax.random.normal(rng.next(), (VOCAB, DIM)))
-    def apply(param, input):
-        return input @ param.table.T         # vectors -> logits
-    return node_def(apply, param=param, name='unembed')
-
-
 def test_tied_embeddings_are_one_object():
     """One table serves both views; training the round trip toward
     identity moves embed and unembed together, because there is nothing
     else to move."""
-    lm = tie(embed_def() >> unembed_def(), 'embed', 'unembed')
+    lm = tie(nn.Embed(VOCAB, DIM) >> nn.Unembed(VOCAB, DIM), 'embed', 'unembed')
     ids = jnp.arange(VOCAB)
 
     node = lm.parameterize(rng=jax.random.PRNGKey(0))
@@ -158,10 +142,9 @@ def test_tied_embeddings_are_one_object():
 def test_tie_rejects_leaves_and_unknown_members():
     """tie rewires member param slots, so a memberless def and a name that
     is no member both fail at construction."""
-    from nodejax.examples import gain_def
-
+    from nodejax.control import Gain
     with pytest.raises(TypeError, match='has none'):
-        tie(gain_def(), 'enc', 'dec')
-    pipe = serial(enc=gain_def(), dec=gain_def())
+        tie(Gain(), 'enc', 'dec')
+    pipe = serial(enc=Gain(), dec=Gain())
     with pytest.raises(TypeError, match='name no member'):
         tie(pipe, 'enc', 'deocder')

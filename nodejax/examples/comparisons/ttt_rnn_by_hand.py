@@ -7,7 +7,7 @@ meta-learned — on the same two-sine task family, same budget, same
 scoring. Exists as the comparison exhibit for the pitch: what the
 library row expresses as
 
-    model = batch(scan(ttt(rnn_def(HIDDEN), mse, 0.01)))
+    model = batch(scan(ttt(RNN(HIDDEN), mse, 0.01)))
 
 is here the whole file. Everything the transforms carry implicitly is
 explicit below: the (weights, hidden) carry tuple, the rate tree

@@ -17,12 +17,14 @@ import optax
 
 from nodejax import NodeDef, batch, finetune, train_step
 from nodejax.struct import Struct
-from nodejax.examples import gain_def, mse, tile, meta_sgd
+from nodejax.control import Gain
+from nodejax.transforms import metasgd as meta_sgd
+from nodejax.util import mse, tile
 
 
 def test_finetune_single_task():
     """finetune() alone: k inner steps from the given param, then query."""
-    tuned = finetune(gain_def(), mse, optax.sgd(0.1))
+    tuned = finetune(Gain(), mse, optax.sgd(0.1))
     assert isinstance(tuned, NodeDef) and tuned.parametric and not tuned.cyclic
 
     node = tuned.parameterize(scale=jnp.array(1.0))
@@ -44,8 +46,8 @@ def test_maml_convergence():
     Converging here requires gradients THROUGH the inner SGD loop
     (second-order), which the purity of the contract form gives for free.
     """
-    Gain = gain_def()
-    maml = batch(finetune(Gain, mse, optax.sgd(0.1)))
+    gain = Gain()
+    maml = batch(finetune(gain, mse, optax.sgd(0.1)))
     trainer = train_step(maml, mse, optax.adam(0.1))
 
     a = jnp.array([2.0, 4.0])
@@ -71,8 +73,8 @@ def test_maml_convergence():
 def test_maml_finetunes_to_unseen_task():
     """The meta-learned init finetunes to a task outside the training pair
     better than a naive init does."""
-    Gain = gain_def()
-    tuned = finetune(Gain, mse, optax.sgd(0.1))
+    gain = Gain()
+    tuned = finetune(gain, mse, optax.sgd(0.1))
     k = 3
 
     def query_error(init_scale, a):
@@ -94,8 +96,8 @@ def test_meta_sgd_learns_newton_step():
     step contracts the error by (1 - 2*lr), so the optimal one-step lr is
     the Newton step 0.5 — at which ANY task is solved in a single inner
     step. The meta-learner should discover it."""
-    Gain = gain_def()
-    single = meta_sgd(Gain, mse)
+    gain = Gain()
+    single = meta_sgd(gain, mse, lr0=0.1)
     trainer = train_step(batch(single), mse, optax.adam(0.05))
 
     a = jnp.array([2.0, 4.0])
@@ -103,7 +105,7 @@ def test_meta_sgd_learns_newton_step():
         support=Struct(input=jnp.ones((2, 1)), target=a[:, None]),  # ONE support point
         query=jnp.ones(2),
     )
-    state = trainer.init(model=single.parameterize(init=Struct(scale=jnp.array(0.0)), lr=0.1).param)
+    state = trainer.init(model=single.parameterize(scale=jnp.array(0.0)).param)
     steps = 800
     inputs = Struct(input=tile(task_batch, steps), target=tile(a, steps))
     final, losses = trainer.scan(state, inputs)
@@ -111,7 +113,7 @@ def test_meta_sgd_learns_newton_step():
     # analytic initial meta-loss: (1 - 2*0.1)^2 * ((0-3)^2 + 1) = 6.4
     assert jnp.allclose(losses[0], 6.4, atol=0.01)
     # the learned lr is the Newton step for this quadratic
-    assert jnp.allclose(final.model.lr, 0.5, atol=0.05)
+    assert jnp.allclose(final.model.lr.scale, 0.5, atol=0.05)
     assert losses[-1] < 1e-2
 
     # with the learned lr, one inner step nails a task far outside the

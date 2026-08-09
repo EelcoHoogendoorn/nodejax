@@ -1,12 +1,12 @@
 """PMSM motor model.
 
-motor_model_def is the base object: the motor's params and its model
-equations as methods, stateless, existing to be the internal-model
-FIELD of a controller (being non-cyclic its state slot is (), so
-composites hold it without acquiring state). emotor_def derives from
-it, growing the electrical dynamics; the motor on a bench is
-bench_motor_def, a COMPOSITION of that same electrical motor with the
-mechanism, so the bench and the assembled system run identical parts.
+Electrical is THE motor: params, the model equations as methods,
+and the electrical dynamics. The same def serves every role — the plant
+in the assembled stack, half of BenchMotor (its composition with
+the mechanism), and the controller's internal model, where it is held
+as a member and consulted through its methods and params. The model
+equations are module-level functions on the param bundle; the def
+attaches them as methods.
 
 The cogging harmonic amplitude is the motor param `cogging`, so
 clean-plant tests can zero it.
@@ -18,73 +18,60 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax import ambient, node_def, derive
+from nodejax import ambient, node_def, composite
 
 from nodejax.examples.actuator.dq import DQ
 
 
-def motor_params(resistance=0.24, inductance_d=2e-4, inductance_q=3e-4,
-                 kt=1.2, pole_pairs=16.0, slots=36.0, inertia=1e-1,
-                 friction=1e-3, hysteresis=0.0, torque_static=0.0,
-                 cogging=0.8, dedent_offset=0.0) -> Struct:
-    """One physical motor object; defaults describe a small direct-drive outrunner."""
-    fields = dict(resistance=resistance, inductance_d=inductance_d,
-                  inductance_q=inductance_q, kt=kt, pole_pairs=pole_pairs,
-                  slots=slots, inertia=inertia, friction=friction,
-                  hysteresis=hysteresis, torque_static=torque_static,
-                  cogging=cogging, dedent_offset=dedent_offset)
-    return Struct(**{k: jnp.asarray(v, dtype=jnp.float32) for k, v in fields.items()})
-
-
 # --- phase-neutral conversions (dq params carry a 2/3 factor) ---
 
-def _R(m):
-    return m.resistance * (2.0 / 3.0)
+def _R(param):
+    return param.resistance * (2.0 / 3.0)
 
 
-def _L(m):
-    return DQ(m.inductance_d * (2.0 / 3.0), m.inductance_q * (2.0 / 3.0))
+def _L(param):
+    return DQ(param.inductance_d * (2.0 / 3.0), param.inductance_q * (2.0 / 3.0))
 
 
-def _flux_linkage(m):
-    return m.kt / m.pole_pairs / 1.5
+def _flux_linkage(param):
+    return param.kt / param.pole_pairs / 1.5
 
 
 # --- the model equations; module-level as
 # implementation, attached to every motor-shaped node as METHODS ---
 
-def voltage_terms(m, i: DQ, di_dt: DQ, velocity_mech) -> Struct:
+def voltage_terms(param, i: DQ, di_dt: DQ, velocity_mech) -> Struct:
     """The PMSM voltage equation, SPLIT: resistive drop, inductive
     transient, and speed voltage (back-EMF + reluctance coupling) — so a
     controller can weight its trust per term."""
-    omega = velocity_mech * m.pole_pairs
-    L = _L(m)
-    return Struct(resistive=i * _R(m),
+    omega = velocity_mech * param.pole_pairs
+    L = _L(param)
+    return Struct(resistive=i * _R(param),
                   inductive=di_dt * L,
-                  bemf=DQ(d=-(L.q * i.q), q=(L.d * i.d + _flux_linkage(m))) * omega)
+                  bemf=DQ(d=-(L.q * i.q), q=(L.d * i.d + _flux_linkage(param))) * omega)
 
 
-def voltage_feedforward(m, i: DQ, di_dt: DQ, velocity_mech) -> DQ:
+def voltage_feedforward(param, i: DQ, di_dt: DQ, velocity_mech) -> DQ:
     """V = R*I + L*dI/dt + omega * flux coupling (the fused sum)."""
-    terms = voltage_terms(m, i, di_dt, velocity_mech)
+    terms = voltage_terms(param, i, di_dt, velocity_mech)
     return terms.resistive + terms.inductive + terms.bemf
 
 
-def current_feedforward(m, v: DQ, i: DQ, velocity_mech) -> DQ:
+def current_feedforward(param, v: DQ, i: DQ, velocity_mech) -> DQ:
     """dI/dt = (V - R*I - omega * flux coupling) / L."""
-    omega = velocity_mech * m.pole_pairs
-    L = _L(m)
-    v_omega = DQ(d=-(L.q * i.q), q=(L.d * i.d + _flux_linkage(m))) * omega
-    return (v - i * _R(m) - v_omega) / L
+    omega = velocity_mech * param.pole_pairs
+    L = _L(param)
+    omega_v = DQ(d=-(L.q * i.q), q=(L.d * i.d + _flux_linkage(param))) * omega
+    return (v - i * _R(param) - omega_v) / L
 
 
-def current_model(m, v: DQ, di_dt: DQ, velocity_mech) -> DQ:
+def current_model(param, v: DQ, di_dt: DQ, velocity_mech) -> DQ:
     """I = (V - L*dI/dt - omega*flux) / R — the inverse voltage equation
     (q-axis-only back-EMF approximation), used by the model-based
     current estimator."""
-    omega = velocity_mech * m.pole_pairs
-    v_omega = DQ(d=jnp.zeros_like(omega), q=_flux_linkage(m) * omega)
-    return (v - di_dt * _L(m) - v_omega) / _R(m)
+    omega = velocity_mech * param.pole_pairs
+    omega_v = DQ(d=jnp.zeros_like(omega), q=_flux_linkage(param) * omega)
+    return (v - di_dt * _L(param) - omega_v) / _R(param)
 
 
 def _saturation_factor(amps):
@@ -93,21 +80,21 @@ def _saturation_factor(amps):
     return softmaxout(1.0, (jnp.abs(amps) / saturation - 1.0) / 4.0 + 1.0, 20.0)
 
 
-def torque(m, i: DQ):
+def torque(param, i: DQ):
     """Output torque from DQ current, with magnetic saturation applied."""
-    L = _L(m)
-    return 1.5 * m.pole_pairs * (
-        _flux_linkage(m) * i.q + (L.d - L.q) * i.d * i.q
+    L = _L(param)
+    return 1.5 * param.pole_pairs * (
+        _flux_linkage(param) * i.q + (L.d - L.q) * i.d * i.q
     ) / _saturation_factor(i.q)
 
 
-def _dedent(m, angle):
+def _dedent(param, angle):
     """Cogging torque harmonics (pole and slot orders)."""
-    aa = angle + m.dedent_offset
-    poles = m.pole_pairs * 2.0
-    h = lambda f: jnp.sin(aa * f) * m.cogging
+    aa = angle + param.dedent_offset
+    poles = param.pole_pairs * 2.0
+    h = lambda f: jnp.sin(aa * f) * param.cogging
     return (h(poles * 0.5) + h(poles) + h(poles * 2.0)
-            + h(m.slots) + h(m.slots * 2.0) + h(m.slots * 3.0))
+            + h(param.slots) + h(param.slots * 2.0) + h(param.slots * 3.0))
 
 
 MOTOR_METHODS = dict(voltage_feedforward=voltage_feedforward,
@@ -117,50 +104,29 @@ MOTOR_METHODS = dict(voltage_feedforward=voltage_feedforward,
                      torque=torque)
 
 
-def motor_model_def():
-    """The motor as a pure MODEL object: no state, no dynamics — a
-    carrier for params + methods, to live as a field inside controllers
-    and estimators. Its apply is the model's map,
-    current -> torque."""
-    def apply(self, input):
-        return torque(self, input)
-    return node_def(apply, param=motor_params, name='motor_model',
-                    methods=MOTOR_METHODS)
-
-
-# --- the motor on a bench: composition, the same parts the system uses ---
+# --- the electrical motor: mechanics live outside ---
 
 @ambient
-def bench_motor_def(dt):
-    """The whole motor on a bench, composed from the SAME parts the
-    assembled system uses: the electrical motor plus the mechanism,
-    in a feedback loop (previous mechanical state feeds the motor,
-    the motor's torque steps the mechanism). Voltage + load in,
-    mechanical state out."""
-    from nodejax import composite
-    members = dict(motor=emotor_def(dt), mechanical=mechanical_def(dt))
-
-    def apply(self, v, load=0.0):
-        out = self.motor(mechanical=self.state.mechanical, v=v)
-        return self.mechanical(torque=out.torque, load=load)
-
-    return composite(apply, members=members, name='bench_motor')
-
-
-# --- split plant: electrical motor + external mechanics ---
-
-@ambient
-def emotor_def(dt, substeps=4):
+def Electrical(dt, substeps=4):
     """The electrical motor: mechanics live outside (the mechanism's
-    inertia and loads are integrated by mechanical_def, at the bench or
+    inertia and loads are integrated by Mechanical, at the bench or
     the environment), so position and velocity arrive as INPUT and
     torque goes out. The torque is everything the MOTOR produces:
     electromagnetic, cogging (position harmonics), and iron hysteresis
     drag; what the mechanism does with it (inertia, bearing friction,
     stiction) is the mechanism's. Voltage in, torque and current out;
-    `self` is the motor."""
+    `self` is the motor. Param defaults describe a small direct-drive
+    outrunner."""
+    def param(resistance=0.24, inductance_d=2e-4, inductance_q=3e-4,
+              kt=1.2, pole_pairs=16.0, slots=36.0, hysteresis=0.0,
+              cogging=0.8, dedent_offset=0.0):
+        return Struct(resistance=resistance, inductance_d=inductance_d,
+                      inductance_q=inductance_q, kt=kt, pole_pairs=pole_pairs,
+                      slots=slots, hysteresis=hysteresis,
+                      cogging=cogging, dedent_offset=dedent_offset)
+
     def init():
-        return DQ(jnp.asarray(0.0), jnp.asarray(0.0))
+        return DQ(0.0, 0.0)
 
     def apply(self, state, mechanical, v):
         h = dt / substeps
@@ -174,21 +140,21 @@ def emotor_def(dt, substeps=4):
               - self.hysteresis * jnp.sign(mechanical.velocity))
         return current, Struct(torque=tq, current=current)
 
-    # the model object grows electrical dynamics only
-    return derive(motor_model_def(), apply=apply, init=init, name='emotor')
+    return node_def(apply, param=param, init=init, name='electrical',
+                    methods=MOTOR_METHODS)
 
 
 @ambient
-def mechanical_def(dt):
+def Mechanical(dt):
     """The mechanism: torque + load -> position/velocity. Owns what a
     mechanism owns: inertia, bearing friction, and stiction (stick to
     zero below the static torque threshold)."""
     def param(inertia, friction=0.0, torque_static=0.0):
-        return Struct(inertia=jnp.asarray(inertia), friction=jnp.asarray(friction),
-                      torque_static=jnp.asarray(torque_static))
+        return Struct(inertia=inertia, friction=friction,
+                      torque_static=torque_static)
 
-    def init(param, position=0.0):
-        return Struct(position=jnp.asarray(position), velocity=jnp.asarray(0.0))
+    def init(position=0.0):
+        return Struct(position=position, velocity=0.0)
 
     def apply(self, state, torque, load=0.0):
         total = torque - self.friction * state.velocity - load
@@ -200,3 +166,21 @@ def mechanical_def(dt):
         return new, new
 
     return node_def(apply, init=init, param=param, name='mechanical')
+
+
+# --- the motor on a bench: composition, the same parts the system uses ---
+
+@ambient
+def BenchMotor(dt):
+    """The whole motor on a bench, composed from the SAME parts the
+    assembled system uses: the electrical motor plus the mechanism,
+    in a feedback loop (previous mechanical state feeds the motor,
+    the motor's torque steps the mechanism). Voltage + load in,
+    mechanical state out."""
+    members = dict(electrical=Electrical(dt), mechanical=Mechanical(dt))
+
+    def apply(self, v, load=0.0):
+        out = self.electrical(mechanical=self.state.mechanical, v=v)
+        return self.mechanical(torque=out.torque, load=load)
+
+    return composite(apply, members=members, name='bench_motor')

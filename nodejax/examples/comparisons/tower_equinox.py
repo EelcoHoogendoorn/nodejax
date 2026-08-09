@@ -28,7 +28,19 @@ import jax.numpy as jnp
 import optax
 
 from nodejax.examples.comparisons.tower_common import (
-    HIDDEN, LAYERS, STEPS, META_STEPS, INNER_LR, make_data, make_tasks)
+    HIDDEN, LAYERS, STEPS, META_STEPS, INNER_LR, MOMENTUM, make_data, make_tasks)
+
+
+def norm_step(stats, x):
+    m1, var = stats
+    out = (x - m1) / jnp.sqrt(var + 1e-5)
+    new_m1 = (1 - MOMENTUM) * m1 + MOMENTUM * x
+    new_var = (1 - MOMENTUM) * var + MOMENTUM * (x - m1) ** 2
+    return (new_m1, new_var), out
+
+
+def norm_init():
+    return (jnp.zeros(HIDDEN), jnp.ones(HIDDEN))
 
 class Cell(eqx.Module):
     wx: jax.Array
@@ -53,23 +65,29 @@ class Net(eqx.Module):
     ro_w: jax.Array
     ro_b: jax.Array
 
-    def step(self, h_layers, x):
-        """One timestep: scan over depth; lax.scan slices the stacked
-        cell per layer, the layer's hidden rides alongside as xs."""
+    def step(self, carry, x):
+        """One timestep: the streaming norm's stats are one more slot
+        in the hand-threaded carry, then a scan over depth; lax.scan
+        slices the stacked cell per layer, the layer's hidden rides
+        alongside as xs."""
+        h_layers, stats = carry
+        stats, signal = norm_step(stats, self.up_w * x)
+
         def depth(signal, xs):
             cell, h = xs
             h_new, y = cell(h, signal)
             return y, h_new
 
-        signal, h_new = jax.lax.scan(depth, self.up_w * x, (self.cells, h_layers))
-        return h_new, self.ro_w @ signal + self.ro_b
+        signal, h_new = jax.lax.scan(depth, signal, (self.cells, h_layers))
+        return (h_new, stats), self.ro_w @ signal + self.ro_b
 
     def rollout(self, xs):
-        """Scan over time, carrying the (LAYERS, HIDDEN) state block."""
-        def t_step(h_layers, x):
-            return self.step(h_layers, x)
+        """Scan over time, carrying the (LAYERS, HIDDEN) state block
+        and the norm stats beside it."""
+        def t_step(carry, x):
+            return self.step(carry, x)
 
-        _, ys = jax.lax.scan(t_step, jnp.zeros((LAYERS, HIDDEN)), xs)
+        _, ys = jax.lax.scan(t_step, (jnp.zeros((LAYERS, HIDDEN)), norm_init()), xs)
         return ys
 
 

@@ -3,9 +3,9 @@
 import jax.numpy as jnp
 
 from nodejax import stack
-from nodejax.examples import gain_def
+from nodejax.control import Gain
 
 
 def test_stack():
-    s = stack(gain_def()).parameterize(scale=jnp.array([2.0, 3.0]))
+    s = stack(Gain()).parameterize(scale=jnp.array([2.0, 3.0]))
     assert jnp.allclose(s.apply(1.0), 6.0)

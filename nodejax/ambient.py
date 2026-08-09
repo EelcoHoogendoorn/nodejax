@@ -7,10 +7,10 @@ every call site is noise (while registries of wrapped factories are
 worse). The solution is dynamic scope, tightly fenced:
 
     @ambient                       # at the definition site
-    def pid_def(dt, dwrap=None): ...
+    def PID(dt, dwrap=None): ...
 
     with ambient(dt=1e-4):         # at the single point of use
-        pid_def()                  # dt filled from scope
+        PID()                      # dt filled from scope
 
 Rules that keep it fenced:
 - Eligibility is declared by the decorator, visible where the factory is

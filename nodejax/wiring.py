@@ -14,13 +14,13 @@ build_state / apply_fn, with_input resolution).
 from __future__ import annotations
 
 import inspect
-from functools import partial
 
 import jax
 import jax.numpy as jnp
 
-from nodejax.struct import Struct
-from nodejax.core import NodeDef, split_aux, _as_bundle, _input_or_none, _resolve, _has_rng
+from nodejax.struct import Struct, Aux
+from nodejax.core import (NodeDef, split_aux, _as_bundle, _bind_method,
+                          _input_or_none, _resolve, _has_rng)
 from nodejax.authoring import KeyStream
 
 _NO_INPUT = object()   # a read, distinct from a feed of any value (None included)
@@ -28,19 +28,20 @@ _NO_INPUT = object()   # a read, distinct from a feed of any value (None include
 class _Member:
     """A live member handle on the transient self: calling it steps the
     member (repeated calls chain); attribute access reaches the def's
-    methods, bound to the LIVE slices — never a stored construction.
-    The param binds always (methods are param-first by contract); a
-    second parameter NAMED `state` declares the role and receives the
-    member's live state slice — chained, so a read after a step sees
-    the advance. Unbound calls through the def pass both explicitly,
-    in the same order."""
-    __slots__ = ('_call', '_ndef', '_param', '_state_fn')
+    methods, channel-bound to the LIVE slices — never a stored
+    construction. The reserved parameter names are the channels
+    (core._bind_method): ndef is the member's def, param its param,
+    state its chained state slice (a read after a step sees the
+    advance), rng the wiring's boundary stream. Unbound calls through the def
+    pass the channels explicitly."""
+    __slots__ = ('_call', '_ndef', '_param', '_state_fn', '_rng_fn')
 
-    def __init__(self, call, ndef, param, state_fn):
+    def __init__(self, call, ndef, param, state_fn, rng_fn=None):
         self._call = call
         self._ndef = ndef
         self._param = param
         self._state_fn = state_fn
+        self._rng_fn = rng_fn
 
     def __call__(self, *args, **fields):
         if fields:
@@ -53,11 +54,11 @@ class _Member:
     def __getattr__(self, name):
         methods = self._ndef.methods
         if methods and name in methods:
-            fn = methods[name]
-            sig = tuple(inspect.signature(fn).parameters)
-            if sig[1:2] == ('state',):
-                return partial(fn, self._param, self._state_fn())
-            return partial(fn, self._param)
+            offers = dict(param=lambda: self._param, state=self._state_fn,
+                          ndef=lambda: self._ndef)
+            if self._rng_fn is not None:
+                offers['rng'] = self._rng_fn
+            return _bind_method(methods[name], offers)
         raise AttributeError(f"member def {self._ndef.name!r} has no method {name!r}")
 
 
@@ -89,6 +90,11 @@ class _Wired:
         member's stored value); member calls advance the live slots."""
         return self._state
 
+    def sow(self, **kwargs: Any) -> None:
+        """Sow auxiliary values (taps, losses, activity) into the step's aux channel."""
+        for k, v in kwargs.items():
+            self._aux[k] = v
+
     @property
     def rng(self) -> KeyStream:
         """The step's KeyStream. With a boundary key (the composite's input
@@ -110,7 +116,7 @@ class _Wired:
         # .ndef normalizes NodeDef and param-less bound Node alike
         if name not in self._members:
             raise TypeError(f"'{name}' is not a member; read data directly off the object")
-        block_def, block_param = self._members[name].ndef, self._obj[name]
+        Block, block_param = self._members[name].ndef, self._obj[name]
 
         def call(input):
             if self._closed:
@@ -121,14 +127,14 @@ class _Wired:
             # a member that consumes apply-rng draws from the boundary
             # stream unless the wiring routed a key itself — every call an
             # independent draw, explicit keys winning
-            if (self._boundary is not None and block_def.apply_takes_rng
+            if (self._boundary is not None and Block.apply_takes_rng
                     and 'rng' not in input):
                 input = input.replace(rng=self._boundary.next())
             # repeated calls CHAIN: each reads the member's latest state
             # within this step, so calling twice steps twice — integrators
             # accumulate, and rng streams advance (independent draws)
             current = self._new.get(name, self._state[name])
-            new_state, out = block_def.apply_fn(block_param, current, input)
+            new_state, out = Block.apply_fn(block_param, current, input)
             self._new[name] = new_state
             # aux is DIVERTED (core.split_aux doctrine): the wiring
             # receives the clean signal, the collection re-emits at
@@ -139,8 +145,9 @@ class _Wired:
                 self._aux[name] = member_aux
             return out
 
-        return _Member(call, block_def, block_param,
-                       lambda: self._new.get(name, self._state[name]))
+        return _Member(call, Block, block_param,
+                       lambda: self._new.get(name, self._state[name]),
+                       (lambda: self._boundary) if self._boundary is not None else None)
 
     def collect(self, **extra: Any) -> Struct:
         """The composite's new state: original slots, called members at
@@ -253,12 +260,15 @@ class _InitWired:
                 self._called.add(name)
             if d.apply_takes_rng and not _has_rng(x):
                 x = x.replace(rng=jax.random.PRNGKey(0))   # probe key; discarded
-            new_state, out = d.apply_fn(self._param[name], self._work[name], x)
+            from nodejax.compose import _probe_apply
+            new_state, out = _probe_apply(
+                d.apply_fn, self._param[name], self._work[name], x)
             self._work[name] = new_state
             return split_aux(out)[0]
 
         return _Member(call, d, self._param[name],
-                       lambda: self._work[name] if name in self._work else self._ensure(name))
+                       lambda: self._work[name] if name in self._work else self._ensure(name),
+                       lambda: self._boundary)
 
     def collect(self) -> Struct:
         for nm in self._defs:
@@ -312,28 +322,42 @@ class _BuildingWired:
 class _Solo:
     """wrapper's transient step object: the inner node at (param,
     state) — callable to step it, repeated calls chaining; param and
-    state readable; the def's methods bound to the live param; the
-    advanced state is collected at return."""
-    __slots__ = ('_nd', 'param', 'state', '_current')
+    state readable; the def's methods channel-bound to the live slices
+    (core._bind_method), the state channel chained so a read after a
+    step sees the advance; the advanced state is collected at return."""
+    __slots__ = ('_nd', 'param', 'state', '_current', '_aux')
 
     def __init__(self, nd, param, state):
         self._nd = nd
         self.param = param
         self.state = state        # incoming, for direct reads
         self._current = state
+        self._aux = {}
 
     def __call__(self, input):
+        from nodejax.core import split_aux
         self._current, out = self._nd.apply_fn(self.param, self._current, input)
-        return out
+        clean_out, member_aux = split_aux(out)
+        if member_aux is not None:
+            if isinstance(member_aux, Struct):
+                for k, v in member_aux.__items__:
+                    self._aux[k] = v
+            elif isinstance(member_aux, dict):
+                for k, v in member_aux.items():
+                    self._aux[k] = v
+        return clean_out
+
+    def sow(self, **kwargs: Any) -> None:
+        for k, v in kwargs.items():
+            self._aux[k] = v
 
     def __getattr__(self, name):
         methods = self._nd.methods
         if methods and name in methods:
-            fn = methods[name]
-            sig = tuple(inspect.signature(fn).parameters)
-            if sig[1:2] == ('state',):
-                return partial(fn, self.param, self._current)
-            return partial(fn, self.param)
+            return _bind_method(methods[name],
+                                dict(param=lambda: self.param,
+                                     state=lambda: self._current,
+                                     ndef=lambda: self._nd))
         raise AttributeError(f"def {self._nd.name!r} has no method {name!r}")
 
 
@@ -386,11 +410,18 @@ def _wrap_apply(apply: Callable, defs: dict[str, NodeDef]) -> Callable:
             input = input.without('rng')
         self = _Wired(p, s, defs, boundary_key=key)
         out = call(self, input)
+        clean_out, direct_aux = split_aux(out)
+        if direct_aux is not None:
+            if isinstance(direct_aux, Struct):
+                for k in direct_aux.__keys__:
+                    self._aux[k] = direct_aux[k]
+            elif isinstance(direct_aux, dict):
+                for k, v in direct_aux.items():
+                    self._aux[k] = v
         new_state = self.collect()
         if self._aux:
-            # member aux, diverted under member names, re-emitted as
-            # the (output, collection) pair — the channel nests
-            return new_state, (out, Struct(**self._aux))
-        return new_state, out
+            # member aux & self.sow(...) re-emitted as the (output, collection) pair
+            return new_state, (clean_out, Aux(**self._aux))
+        return new_state, clean_out
     return apply_fn
 

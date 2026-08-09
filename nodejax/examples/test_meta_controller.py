@@ -103,7 +103,7 @@ INNER_LR0, META_LR = 0.02, 1e-3  # INNER_LR0 seeds the meta-learned step sizes
 
 # --- the plant: a saturated DC motor; mechanics are its params ---
 
-def motor_def(dt: float, resistance: float = 1.0, inductance: float = 0.2,
+def Motor(dt: float, resistance: float = 1.0, inductance: float = 0.2,
               ke: float = 1.0, v_max: float = 6.0) -> NodeDef:
 	"""Voltage command -> measured angular velocity. The electrical
 	constants are fixed hardware statics; the mechanical coefficients
@@ -130,7 +130,7 @@ def motor_def(dt: float, resistance: float = 1.0, inductance: float = 0.2,
 
 # --- the controller: filter bank >> mix in beliefs >> projection >> deep rnn >> readout ---
 
-def filters_def(dt: float) -> Node:
+def Filters(dt: float) -> Node:
 	"""Classical PID filter bank over the scalar error: emits
 	[error, integral, de/dt]. The basis is fixed structure — the network
 	learns only how to mix it, so no filter coefficient is ever exposed
@@ -158,7 +158,7 @@ flat = node_def(lambda input: jnp.concatenate(
 	[jnp.ravel(leaf) for leaf in jax.tree.leaves(input)]), name='flat')
 
 
-def up_def(n_in: int, hidden: int) -> NodeDef:
+def Up(n_in: int, hidden: int) -> NodeDef:
 	"""Projects the sensed channels to the working width."""
 
 	def param(rng: KeyStream) -> Struct:
@@ -170,7 +170,7 @@ def up_def(n_in: int, hidden: int) -> NodeDef:
 	return node_def(apply, param=param, name='up')
 
 
-def rnn_def(hidden: int) -> NodeDef:
+def RNN(hidden: int) -> NodeDef:
 	"""A vanilla tanh cell, sufficient here by design: the filter
 	bank's integral channel owns the long timescale (the pole gated
 	cells exist to approximate), leaving the cell only short-horizon
@@ -192,7 +192,7 @@ def rnn_def(hidden: int) -> NodeDef:
 	return node_def(apply, init=init, param=param, apply_input_spec=jnp.zeros(HIDDEN), name='rnn')
 
 
-def readout_def(hidden: int) -> NodeDef:
+def Readout(hidden: int) -> NodeDef:
 	def param(rng: KeyStream) -> Struct:
 		return Struct(w=0.1 * jax.random.normal(rng.next(), (hidden,)), b=jnp.zeros(()))
 
@@ -270,7 +270,7 @@ def identified(plant: NodeDef, order: int) -> NodeDef:
 	return node_def(apply, param=plant.param_fn, init=init, name=plant.name)
 
 
-def task_def() -> NodeDef:
+def Task() -> NodeDef:
 	"""One per-task episode: Struct(motor=<plant params>, input=<refs>)
 	in, velocity trajectory out. The controller-plant chain rides the
 	observed loop: the measurement feeds back as tracking error, the
@@ -285,13 +285,13 @@ def task_def() -> NodeDef:
 	the plant. at_init lends the motor its param defaults for the one
 	init-time spec-propagation pass; every deployed episode binds a
 	real plant."""
-	pipe = at(filters_def(DT), 'error') >> flat \
-	       >> up_def(3 + ORDER + 1, HIDDEN) \
-	       >> stack(rnn_def(HIDDEN), n=LAYERS) >> readout_def(HIDDEN) \
-	       >> identified(motor_def(DT), ORDER)
+	pipe = at(Filters(DT), 'error') >> flat \
+	       >> Up(3 + ORDER + 1, HIDDEN) \
+	       >> stack(RNN(HIDDEN), n=LAYERS) >> Readout(HIDDEN) \
+	       >> identified(Motor(DT), ORDER)
 	rollout = scan(observed_loop(pipe, belief0=jnp.zeros(ORDER + 1)),
 	               persist=('rls', 'belief'))
-	return externalize(rollout, 'motor', at_init=motor_def(DT).build_param())
+	return externalize(rollout, 'motor', at_init=Motor(DT).build_param())
 
 
 def mse(pred: jax.Array, target: jax.Array) -> jax.Array:
@@ -396,7 +396,7 @@ def test_meta_controller_adapts():
 	episodes: the episodes help (adapted beats unadapted on the query),
 	and meta-learning helps (adapting the meta init beats adapting a
 	random init)."""
-	task = task_def()
+	task = Task()
 	adapt = metasgd(task, mse, INNER_LR0)
 	_, _shape_tasks, _ = make_tasks(np.random.RandomState(1), TASKS, k=K)
 	model = batch(adapt).with_input(_shape_tasks).parameterize(rng=jax.random.PRNGKey(0))

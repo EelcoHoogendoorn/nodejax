@@ -19,14 +19,14 @@ from nodejax.examples.actuator.utils import lerp
 
 
 @ambient
-def battery_def(dt):
+def Battery(dt):
     def param(voltage_max=48.0, voltage_min=0.0, capacity=jnp.inf):
-        return Struct(voltage_max=jnp.asarray(voltage_max),
-                      voltage_min=jnp.asarray(voltage_min),
-                      capacity=jnp.asarray(capacity))
+        return Struct(voltage_max=voltage_max,
+                      voltage_min=voltage_min,
+                      capacity=capacity)
 
     def init(param):
-        return jnp.asarray(1.0)   # charge, [0, 1]
+        return 1.0   # charge, [0, 1]
 
     def apply(self, state, input):
         # input: power drawn (W); an empty battery stays empty (floor at 0)
@@ -44,15 +44,15 @@ def battery_def(dt):
 
 
 @ambient
-def thermal_def(dt):
+def Thermal(dt):
     """Single-node lumped thermal model: dissipated power in, temperature
     out, exponential relaxation to ambient; one node per component."""
     def param(r_th, c_th, ambient=25.0):
-        return Struct(r_th=jnp.asarray(r_th), c_th=jnp.asarray(c_th),
-                      ambient=jnp.asarray(ambient))
+        return Struct(r_th=r_th, c_th=c_th,
+                      ambient=ambient)
 
     def init(param):
-        return jnp.asarray(param.ambient, dtype=jnp.float32)
+        return param.ambient
 
     def apply(self, state, input):
         t = state + (input - (state - self.ambient) / self.r_th) / self.c_th * dt
@@ -62,16 +62,16 @@ def thermal_def(dt):
 
 
 @ambient
-def derating_thermal_def(dt):
-    """thermal_def + the derating story, via derive(): a temperature
+def DeratingThermal(dt):
+    """The thermal model plus the derating story, via derive(): a temperature
     limit and a sigmoid derating curve as a METHOD — whoever owns this
     node's state derates a current by it (read-then-step). The thermal
     dynamics are inherited untouched."""
-    parent = thermal_def(dt)
+    parent = Thermal(dt)
 
     def param(r_th, c_th, limit, hardness=4.0, ambient=25.0):
         return parent.build_param(Struct(r_th=r_th, c_th=c_th, ambient=ambient)).replace(
-            limit=jnp.asarray(limit), hardness=jnp.asarray(hardness))
+            limit=limit, hardness=hardness)
 
     def derate(param, state, current):
         # state is the node's temperature; the name declares the role
@@ -83,18 +83,18 @@ def derating_thermal_def(dt):
 
 
 @ambient
-def fet_def(dt):
+def FET(dt):
     """The power stage: derived once more — it owns its conduction losses
     (r_dson), so apply takes the SQUARED CURRENT magnitude and converts to
     watts itself; super is the explicit parent apply call."""
-    parent = derating_thermal_def(dt)
+    parent = DeratingThermal(dt)
 
     def param(r_th, c_th, limit=80.0, r_dson=0.02, hardness=4.0, ambient=25.0):
         return parent.build_param(Struct(r_th=r_th, c_th=c_th, limit=limit,
                                          hardness=hardness, ambient=ambient)).replace(
-            r_dson=jnp.asarray(r_dson))
+            r_dson=r_dson)
 
     def apply(self, state, input):
-        return parent.apply_fn(self, state, input * self.r_dson)
+        return parent.apply_fn(self.param, state, input * self.r_dson)
 
     return derive(parent, param=param, apply=apply, name='fets')

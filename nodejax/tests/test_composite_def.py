@@ -37,7 +37,7 @@ def mse(pred, target):
 
 # --- the blocks (identical to the param-level sibling's) ---
 
-def pi_def(dt):
+def PI(dt):
     """PI controller block: error -> command, integral as state."""
     def param(kp, ki):
         return Struct(kp=jnp.asarray(kp), ki=jnp.asarray(ki))
@@ -52,7 +52,7 @@ def pi_def(dt):
     return node_def(apply, init=init, param=param, name='pi')
 
 
-def observer_def(dt, alpha=0.4):
+def Observer(dt, alpha=0.4):
     """Position/velocity observer: differentiate the measured angle,
     EMA-smooth the velocity. Param-less — its slot in the union param
     is (), behavior rides the def on the def side."""
@@ -66,7 +66,7 @@ def observer_def(dt, alpha=0.4):
     return node_def(apply, init=init, name='observer')
 
 
-def motor_def():
+def Motor():
     """Motor model block, param-only: the back-EMF map from angular
     velocity to compensating voltage. Model data the composite reads is
     itself a member — its constants enter the member channel like every
@@ -80,7 +80,7 @@ def motor_def():
     return node_def(apply, param=param, name='motor')
 
 
-def delay_def():
+def Delay():
     """One-tick memory block: emits the value stored last step, stores
     its input — the feedback path's unit delay. A memory inits from a
     CONCRETE example (its step-zero value), not a shape read."""
@@ -93,7 +93,7 @@ def delay_def():
     return node_def(apply, init=init, name='delay')
 
 
-def servo_def(dt, kt=1.0, ke=0.1, damping=0.2, inertia=0.5):
+def Servo(dt, kt=1.0, ke=0.1, damping=0.2, inertia=0.5):
     """The physical plant: motor + load, back-EMF opposing drive."""
     def init():
         z = jnp.zeros(())
@@ -108,7 +108,7 @@ def servo_def(dt, kt=1.0, ke=0.1, damping=0.2, inertia=0.5):
 
 # --- the composite: members are factory arguments, apply wires ---
 
-def cascade_def(motor, observer, position_ctrl, velocity_ctrl, feedforward=1.0):
+def Cascade(motor, observer, position_ctrl, velocity_ctrl, feedforward=1.0):
     """FOC-shaped cascade controller, def-level: the blocks are program
     choices, made where program structure is built — the factory
     signature is the member list. The composite still only knows its
@@ -123,19 +123,19 @@ def cascade_def(motor, observer, position_ctrl, velocity_ctrl, feedforward=1.0):
         # free-form wiring: estimator -> cascaded loops -> model-based ff
         est = self.observer(input.theta)
         w_ref = self.position_ctrl(input.ref - est.theta)
-        v_fb = self.velocity_ctrl(w_ref - est.omega)
-        return v_fb + feedforward * self.motor(est.omega)     # back-EMF compensation
+        fb_v = self.velocity_ctrl(w_ref - est.omega)
+        return fb_v + feedforward * self.motor(est.omega)     # back-EMF compensation
 
     return composite(apply, members=members, name='cascade')
 
 
-def loop_def(dt, ctrl):
+def Loop(dt, ctrl):
     """Close the loop: reference angle in, measured angle out. The
     controller sees Struct(ref, theta) — richer than an error signal,
     which is why this is hand-wired rather than feedback(ctrl >> plant).
     The one-tick measurement memory is a delay member: its stored value
     is read off its state slot, its advance is its ordinary call."""
-    members = dict(ctrl=ctrl, plant=servo_def(dt), delay=delay_def())
+    members = dict(ctrl=ctrl, plant=Servo(dt), delay=Delay())
 
     def apply(self, input):
         v = self.ctrl(Struct(ref=input, theta=self.state.delay))
@@ -150,7 +150,7 @@ def stock_loop(position_ctrl, velocity_ctrl):
     """Test convenience: the full loop, blocks arriving CONSTRUCTED —
     bound Nodes crossing the factory boundary as transport containers,
     so the member tree is spelled here and nowhere else."""
-    return loop_def(DT, cascade_def(motor_def()(ke=0.1), observer_def(DT),
+    return Loop(DT, Cascade(Motor()(ke=0.1), Observer(DT),
                                     position_ctrl, velocity_ctrl))
 
 
@@ -158,12 +158,12 @@ def stock_loop(position_ctrl, velocity_ctrl):
 
 def test_composite_infers_member_param_shapes_from_input():
     # param-side discovery: shapes thread through free-form wiring, so
-    # shape-reading members (nn.linear) infer their fan-in inside a
+    # shape-reading members (nn.Linear) infer their fan-in inside a
     # hand-wired composite, not just a pipe
     from nodejax import nn
 
     def gated(width):
-        members = dict(a=nn.linear(width), b=nn.linear(width), gate=nn.linear(1))
+        members = dict(a=nn.Linear(width), b=nn.Linear(width), gate=nn.Linear(1))
 
         def apply(self, input):
             g = jax.nn.sigmoid(self.gate(input))
@@ -185,7 +185,7 @@ def test_members_live_on_the_def():
     members are readable off NodeDef.members (nested), the param tree is
     plain Structs of arrays throughout, paths read as the object graph,
     and two bindings of one def share a treedef by construction."""
-    loop = stock_loop(pi_def(DT)(kp=1.0, ki=0.0), pi_def(DT)(kp=1.0, ki=0.5))
+    loop = stock_loop(PI(DT)(kp=1.0, ki=0.0), PI(DT)(kp=1.0, ki=0.5))
     assert set(loop.members) == {'ctrl', 'plant', 'delay'}
     assert set(loop.members['ctrl'].members) == {'motor', 'observer',
                                                  'position_ctrl', 'velocity_ctrl'}
@@ -227,8 +227,8 @@ def test_members_live_on_the_def():
 def test_cascade_tracks_a_step():
     """With hand gains, the estimator + cascade + feedforward wiring holds
     the reference: type-1 loop, zero steady-state error."""
-    rollout = scan(stock_loop(pi_def(DT)(kp=4.0, ki=0.0),
-                              pi_def(DT)(kp=2.0, ki=1.0)))
+    rollout = scan(stock_loop(PI(DT)(kp=4.0, ki=0.0),
+                              PI(DT)(kp=2.0, ki=1.0)))
     bound = rollout.parameterize()
 
     thetas = bound.apply(jnp.ones(300))
@@ -242,7 +242,7 @@ def test_blocks_are_polymorphic():
     stock block, dropped in as a factory argument — the program choice
     made where the program is built; parameterize sees the same gain
     kwargs either way."""
-    base = pi_def(DT)
+    base = PI(DT)
 
     def apply(param, state, input):
         state, u = base.apply_fn(param, state, input)
@@ -250,7 +250,7 @@ def test_blocks_are_polymorphic():
 
     SatPI = derive(base, apply=apply, name='sat_pi')
 
-    rollout = scan(stock_loop(pi_def(DT)(kp=4.0, ki=0.0),
+    rollout = scan(stock_loop(PI(DT)(kp=4.0, ki=0.0),
                               SatPI(kp=2.0, ki=1.0)))
     bound = rollout.parameterize()
 
@@ -262,8 +262,8 @@ def test_blocks_are_polymorphic():
 def test_autotune_reaches_into_subblocks():
     """train_step tunes the PI gains inside the plain param tree —
     gradients flow through the hand-wired apply into the member slots."""
-    rollout = scan(stock_loop(pi_def(DT)(kp=0.5, ki=0.0),
-                              pi_def(DT)(kp=0.5, ki=0.1)))
+    rollout = scan(stock_loop(PI(DT)(kp=0.5, ki=0.0),
+                              PI(DT)(kp=0.5, ki=0.1)))
     trainer = train_step(rollout, mse, optax.adam(0.02))
 
     weak = rollout.parameterize()
@@ -286,7 +286,7 @@ def test_input_discovery_from_the_wiring():
     traces apply once at shape level, records the input each member
     receives at its wire call site, and re-initializes members with
     those specs — built into composite(), driven by the def's members."""
-    def acc_def():
+    def Accumulator():
         def init(ndef):                              # shape genuinely from the wiring
             return jnp.zeros_like(ndef.input)
         def apply(state, input):
@@ -294,15 +294,15 @@ def test_input_discovery_from_the_wiring():
             return new, new
         return node_def(apply, init=init, name='acc')
 
-    def proj_def():
+    def Projection():
         def param(w):
             return Struct(w=jnp.asarray(w))
         def apply(param, input):
             return input @ param.w
         return node_def(apply, param=param, name='proj')
 
-    def comp_def():
-        members = dict(a=acc_def(), proj=proj_def(), b=acc_def())
+    def Chain():
+        members = dict(a=Accumulator(), proj=Projection(), b=Accumulator())
 
         def apply(self, input):
             hidden = self.a(input)                   # sees (3,)
@@ -310,7 +310,7 @@ def test_input_discovery_from_the_wiring():
 
         return composite(apply, members=members, name='comp')
 
-    node = comp_def().parameterize(proj=Struct(w=jnp.ones((3, 2))))
+    node = Chain().parameterize(proj=Struct(w=jnp.ones((3, 2))))
     state = node.with_input(jnp.zeros(3)).init()
     assert state.a.shape == (3,)                     # discovered at the call site
     assert state.b.shape == (2,)                     # NOT the outer input's shape
@@ -328,7 +328,7 @@ def test_full_custom_overrides():
     apply takes the raw contract triple — the all-custom corner:
     helper stood down, member states threaded by hand through the
     defs' own apply_fns."""
-    members = dict(coarse=pi_def(DT), fine=pi_def(DT))
+    members = dict(coarse=PI(DT), fine=PI(DT))
 
     def param(kp, ki):
         gains = Struct(kp=jnp.asarray(kp), ki=jnp.asarray(ki))
@@ -362,7 +362,7 @@ def test_wrapper_is_a():
     def apply(pid, input):
         return jnp.clip(pid(input), -1.0, 1.0)
 
-    sat = wrapper(apply, pi_def(DT), name='sat_pi')
+    sat = wrapper(apply, PI(DT), name='sat_pi')
     bound = sat.parameterize(kp=4.0, ki=1.0)          # the pi's ctor, unchanged
     assert '.kp' in {jax.tree_util.keystr(p)
                      for p, _ in jax.tree_util.tree_flatten_with_path(bound.param)[0]}
@@ -378,7 +378,7 @@ def test_pipes_take_constructed_members():
     become stored construction values, parameterize fills what kwargs
     leave open — the member tree spelled once, at the composition
     site."""
-    pipe = pi_def(DT)(kp=2.0, ki=0.0) >> pi_def(DT)
+    pipe = PI(DT)(kp=2.0, ki=0.0) >> PI(DT)
     bound = pipe.parameterize(pi_2=Struct(kp=3.0, ki=0.0))
     assert bound.param.pi.kp == 2.0                  # stored construction
     assert bound.param.pi_2.kp == 3.0                # kwarg-supplied
@@ -389,12 +389,12 @@ def test_member_aux_is_diverted():
     receives the clean signal, and the composite re-emits
     (output, Struct(<aux by member name>)) — core.split_aux's
     composite doctrine, self-shaped, nesting like the pipes'."""
-    def loud_def():
+    def loud():
         def apply(input):
             return input * 2.0, Struct(gain=jnp.asarray(2.0))
         return node_def(apply, name='loud')
 
-    members = dict(loud=loud_def())
+    members = dict(loud=loud())
 
     def apply(self, input):
         y = self.loud(input)                         # the clean signal
@@ -412,14 +412,14 @@ def test_self_rng_stream_advances():
     folds back into the rng slot at collect — one key enters at init
     (a KeyStream in the init's hands too), fresh draws every step,
     jax.random.split nowhere in user code."""
-    def lag_def():
+    def Lag():
         def init():
             return jnp.zeros(())
         def apply(state, input):
             return input, state
         return node_def(apply, init=init, name='lag')
 
-    members = dict(lag=lag_def())
+    members = dict(lag=Lag())
 
     def init(param, rng):
         states = composite_init(members, apply, param)
@@ -441,11 +441,11 @@ def test_self_rng_stream_advances():
 
 
 def test_member_methods_bind_live_slices():
-    """Methods reached through self bind the live param slice, and a
-    second parameter NAMED `state` declares the state role and binds
-    the member's live slice — chained, so a read after a step sees the
-    advance. Unbound calls through the def take both explicitly."""
-    def tank_def():
+    """Methods reached through self bind the live slices by channel
+    name: leading param and state inject, state chained, so a read
+    after a step sees the advance. Unbound calls through the def take
+    the channels explicitly."""
+    def Tank():
         def param(capacity):
             return Struct(capacity=jnp.asarray(capacity))
         def init():
@@ -457,7 +457,7 @@ def test_member_methods_bind_live_slices():
         return node_def(apply, init=init, param=param,
                         methods=dict(fraction=fraction), name='tank')
 
-    members = dict(tank=tank_def())
+    members = dict(tank=Tank())
 
     def apply(self, input):
         before = self.tank.fraction()
@@ -471,7 +471,7 @@ def test_member_methods_bind_live_slices():
     assert out.before == 1.0
     assert out.after == 0.5
 
-    tank = tank_def()                        # unbound: slices explicit
+    tank = Tank()                        # unbound: slices explicit
     assert tank.ndef.fraction(Struct(capacity=jnp.asarray(2.0)), 0.25) == 0.25
 
 
@@ -480,7 +480,7 @@ def test_collect_closes_the_step():
     member call after it raises, because its advance could never reach
     the collected state. The self form collects automatically at
     return; an explicit early collect closes the step the same way."""
-    def acc_def():
+    def Accumulator():
         def init():
             return jnp.zeros(())
         def apply(state, input):
@@ -488,7 +488,7 @@ def test_collect_closes_the_step():
             return new, new
         return node_def(apply, init=init, name='acc')
 
-    members = dict(acc=acc_def())
+    members = dict(acc=Accumulator())
 
     def apply(self, input):
         self.acc(input)
@@ -508,7 +508,7 @@ def test_pure_state_composite_binds_itself():
     composite() returns the bound Node directly (node_def's convention),
     its param the leafless Struct of member slots."""
     from nodejax import Node
-    members = dict(plant=servo_def(DT), delay=delay_def())
+    members = dict(plant=Servo(DT), delay=Delay())
 
     def apply(self, input):
         theta = self.plant(input - self.state.delay)  # unit feedback via the memory
@@ -530,7 +530,7 @@ def test_rng_routes_by_def_and_calls_chain():
     never consulted. Repeated wire calls to one member stay SEQUENTIAL:
     an accumulator called twice advances twice, a stochastic member
     draws fresh noise per call."""
-    def acc_def():
+    def Accumulator():
         def init():
             return jnp.zeros(())
         def apply(state, input):
@@ -538,14 +538,14 @@ def test_rng_routes_by_def_and_calls_chain():
             return new, new
         return node_def(apply, init=init, name='acc')
 
-    def noise_def():
+    def Noise():
         def init(rng):
             return Struct(rng=rng)
         def apply(state, input):
             return state, input + jax.random.normal(state.rng)
         return node_def(apply, init=init, name='noise')
 
-    members = dict(acc=acc_def(), noise=noise_def())
+    members = dict(acc=Accumulator(), noise=Noise())
 
     def apply(self, input):
         self.acc(input)
@@ -596,7 +596,7 @@ def test_composite_init_threads_input_to_input_required_member():
 def test_composite_recurrent_read_before_feed_is_allowed():
     # a delay read before it is fed (a feedback loop) is legitimate when
     # the init state is shape-stable across a step
-    from nodejax.examples.actuator.blocks import delay_def
+    from nodejax.control import Delay
 
     def loop():
         def apply(self, input):
@@ -604,7 +604,7 @@ def test_composite_recurrent_read_before_feed_is_allowed():
             y = input + prev
             self.mem(y)                               # then store this step's
             return y
-        return composite(apply, members=dict(mem=delay_def(0.0)), name='loop')
+        return composite(apply, members=dict(mem=Delay(0.0)), name='loop')
 
     node = loop().parameterize()
     state = node.with_input(jnp.asarray(1.0)).init()
@@ -615,7 +615,7 @@ def test_composite_recurrent_read_before_feed_is_allowed():
 def test_composite_init_shape_instability_raises_at_init():
     # a delay fed a shape that differs from its declared bootstrap is a
     # named conflict, caught loudly at init, not as an obscure scan error
-    from nodejax.examples.actuator.blocks import delay_def
+    from nodejax.control import Delay
 
     def grow():
         def apply(self, input):
@@ -623,7 +623,7 @@ def test_composite_init_shape_instability_raises_at_init():
             y = jnp.concatenate([jnp.atleast_1d(p), jnp.atleast_1d(input)])
             self.mem(y)
             return y
-        return composite(apply, members=dict(mem=delay_def(0.0)), name='grow')
+        return composite(apply, members=dict(mem=Delay(0.0)), name='grow')
 
     with pytest.raises(TypeError, match='conflicts with its declared spec'):
         grow().with_input(jnp.asarray(1.0)).parameterize().init()
@@ -633,7 +633,7 @@ def test_init_seeds_dereference_per_member():
     """A non-reserved init argument routes to its member by name, the way
     param already does — dereferenced per member, never broadcast to every
     member. The reserved channels (input, rng, ndef) keep their own routing."""
-    def biased_def():
+    def Biased():
         # a cyclic node whose state seeds from a non-reserved init arg
         def init(bias=0.0):
             return jnp.asarray(bias)
@@ -642,7 +642,7 @@ def test_init_seeds_dereference_per_member():
         return node_def(apply, init=init, name='biased')
 
     # serial pipe path (the pipe init_fn)
-    pipe = serial(a=biased_def(), b=biased_def()).parameterize()
+    pipe = serial(a=Biased(), b=Biased()).parameterize()
     st = pipe.init(a=Struct(bias=1.0), b=Struct(bias=2.0))
     assert st.a == 1.0 and st.b == 2.0            # each member its own value
 
@@ -657,7 +657,7 @@ def test_init_seeds_dereference_per_member():
     # self-form composite path (_member_init) routes the same way
     def apply(self, input):
         return self.x(input)
-    comp = composite(apply, members=dict(x=biased_def(), y=biased_def()),
+    comp = composite(apply, members=dict(x=Biased(), y=Biased()),
                      name='c').parameterize()
     cs = comp.init(x=Struct(bias=3.0), y=Struct(bias=4.0))
     assert cs.x == 3.0 and cs.y == 4.0

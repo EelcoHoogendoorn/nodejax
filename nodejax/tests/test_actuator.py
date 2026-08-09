@@ -12,42 +12,43 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax.examples.actuator import (actuator_stack_def, battery_def, noisy_def,
-                                    ema_def, encoder_def, observer_def,
-                                    torque_command_def, current_controller_def,
-                                    model_estimator_def, foc_current_model,
-                                    current_sensor_def, pid_def, fet_def,
-                                    emotor_def, derating_thermal_def,
-                                    motor_model_def)
+from nodejax.control import EMA, PID
+from nodejax.examples.actuator import (ActuatorStack, Battery, Noisy,
+                                       Encoder, Observer, torque_command,
+                                       CurrentController, ModelEstimator,
+                                       foc_current_model, CurrentSensor, FET,
+                                       Electrical, DeratingThermal)
 
 DT = 1e-3
 
 
 def stock_stack():
     """The full stack, member tree spelled once — at the factories."""
-    return actuator_stack_def(
+    return ActuatorStack(
         DT,
-        battery=battery_def(DT)(capacity=100.0),
-        mechanical_est=encoder_def() >> observer_def(DT),
-        command_ctrl=torque_command_def(),
-        current_ctrl=current_controller_def(
+        battery=Battery(DT)(capacity=100.0),
+        mechanical_est=Encoder() >> Observer(DT),
+        command_ctrl=torque_command(),
+        current_ctrl=CurrentController(
             DT,
-            motor=motor_model_def()(),
-            estimator=model_estimator_def(
+            motor=Electrical(DT)(),
+            estimator=ModelEstimator(
                 DT,
-                filter=current_sensor_def() >> ema_def(DT)(tau=2e-3),
+                filter=CurrentSensor() >> EMA(DT)(tau=2e-3),
                 model_fn=foc_current_model(DT)),
-            controller=pid_def(DT)(kp=0.5, ki=500.0),
-            fets=fet_def(DT)(r_th=2.0, c_th=5.0),
-            bus_sensor=noisy_def(0.2) >> ema_def(DT)(tau=0.01)),
-        motor=emotor_def(DT)(),
-        motor_thermal=derating_thermal_def(DT)(r_th=1.5, c_th=40.0, limit=100.0))
+            controller=PID(DT)(kp=0.5, ki=500.0),
+            fets=FET(DT)(r_th=2.0, c_th=5.0),
+            bus_est=Noisy(0.2) >> EMA(DT)(tau=0.01)),
+        motor=Electrical(DT)(),
+        motor_thermal=DeratingThermal(DT)(r_th=1.5, c_th=40.0, limit=100.0))
 
 
 def test_stack_runs_and_tracks():
     stack = stock_stack().parameterize()
     state = stack.init(rng=jax.random.PRNGKey(0))
-    assert state.current_ctrl.bus_sensor.ema == 48.0  # booted reading the bus
+    # booted at the SAMPLED bus: the init walk threads real values, so
+    # the ema primes at 48 V through its own noisy sensor
+    assert jnp.abs(state.current_ctrl.bus_est.ema - 48.0) < 1.0
 
     n = 500
     t = jnp.arange(n) * DT

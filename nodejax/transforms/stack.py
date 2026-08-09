@@ -23,40 +23,44 @@ def stack(ndef: NodeDef, n: int | None = None) -> NodeDef:
     if not (ndef.parametric or ndef.cyclic):
         raise TypeError(f'stack requires a parametric or cyclic node, got {ndef!r}')
 
-    def apply_fn(p, s, i):
+    def apply_fn(param, state, input):
+        from nodejax.core import split_aux
         # apply-side rng: layers must not share one draw — the boundary key
         # splits per layer, each injected into that layer's carry
         if ndef.apply_takes_rng:
-            keys, first = _split_rng(i, jax.tree.leaves(p)[0].shape[0])
+            keys, first = _split_rng(input, jax.tree.leaves(param)[0].shape[0])
 
             def step(carry, layer):
-                p_, s_, k_ = layer
-                s_new, out = ndef.apply_fn(p_, s_, _with_rng(carry, k_))
-                return out, s_new
-            out, new_states = jax.lax.scan(step, first, (p, s, keys))
-            return new_states, out
+                layer_param, layer_state, layer_key = layer
+                new_state, out = ndef.apply_fn(layer_param, layer_state, _with_rng(carry, layer_key))
+                clean_out, aux = split_aux(out)
+                return clean_out, (new_state, aux)
+            out, (new_states, auxs) = jax.lax.scan(step, first, (param, state, keys))
+            return new_states, (out, auxs) if auxs is not None else out
 
         def step(carry, layer):
-            p_, s_ = layer
-            s_new, out = ndef.apply_fn(p_, s_, carry)
-            return out, s_new
-        out, new_states = jax.lax.scan(step, i, (p, s))
-        return new_states, out
+            layer_param, layer_state = layer
+            new_state, out = ndef.apply_fn(layer_param, layer_state, carry)
+            clean_out, aux = split_aux(out)
+            return clean_out, (new_state, aux)
+        out, (new_states, auxs) = jax.lax.scan(step, input, (param, state))
+        return new_states, (out, auxs) if auxs is not None else out
 
     if ndef.cyclic:
         init_fn = _mapped_init(ndef, n)
     else:
-        def init_fn(nd_, p, state_input=Struct(), input=None):
+        def init_fn(def_obj, param, state_input=Struct(), input=None):
             # a stateless stack's state carries no layer axis; build it
             # from one layer's params so spec propagation inside composite
             # inits sees per-layer shapes, not stacked
-            layer0 = jax.tree.map(lambda x: x[0], p) if p != () else p
+            layer0 = jax.tree.map(lambda leaf: leaf[0], param) if param != () else param
             return ndef.build_state(layer0, state_input,
                                     input=input)
 
     return NodeDef(f'stack({ndef.name})', _mapped_param_fn(ndef, n), init_fn, apply_fn,
                    ndef.parametric, ndef.cyclic, apply_input_spec=ndef.apply_input_spec,
                    init_requires_input=ndef.init_requires_input,
-                  init_reads_shape=ndef.init_reads_shape,
+                   init_reads_shape=ndef.init_reads_shape,
                    param_input_spec=ndef.param_input_spec if ndef.parametric else None,
-                   state_input_spec=ndef.state_input_spec if ndef.cyclic else None)
+                   state_input_spec=ndef.state_input_spec if ndef.cyclic else None,
+                   tags=ndef.tags)

@@ -28,7 +28,7 @@ DT = 0.01
 RES = 0.05
 
 
-def derivative_node(dt):
+def Derivative(dt):
     """Discrete derivative. Its state (the previous sample) PRIMES from the
     init input value — zero is a poor default; the first real sample
     is the right one. With priming, the
@@ -40,7 +40,7 @@ def derivative_node(dt):
     return node_def(apply, init=init, name='derivative')
 
 
-def noise_def():
+def Noise():
     """Additive white noise; density is a param (trainable, e.g. for sensor
     model fitting). Streaming randomness = rng-as-state: the reserved rng
     field auto-advances, and composite init routes a key here mid-pipe."""
@@ -53,7 +53,7 @@ def noise_def():
     return node_def(apply, param=param, init=init, name='noise')
 
 
-def drift_def(dt):
+def Drift(dt):
     """Slowly wandering bias (Ornstein-Uhlenbeck-ish): cyclic state carries
     both the bias and its noise stream."""
     def param(density, tau):
@@ -75,8 +75,8 @@ def quantizer(resolution):
 
 
 def imu_pipe():
-    return (derivative_node(DT) >> derivative_node(DT)
-            >> noise_def() >> drift_def(DT) >> quantizer(RES))
+    return (Derivative(DT) >> Derivative(DT)
+            >> Noise() >> Drift(DT) >> quantizer(RES))
 
 
 def make_imu(density=0.05, tau=1.0, drift_density=0.2):

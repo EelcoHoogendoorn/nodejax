@@ -1,0 +1,10 @@
+{
+    "python.defaultInterpreterPath": "/opt/miniconda3/envs/nodejax/bin/python",
+    "python.testing.pytestPath": "/opt/miniconda3/envs/nodejax/bin/pytest",
+    "python.testing.pytestArgs": [
+        "."
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "editor.inlineSuggest.enabled": false
+}

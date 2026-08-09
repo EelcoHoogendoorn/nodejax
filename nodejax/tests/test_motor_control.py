@@ -51,7 +51,7 @@ HIDDEN, MEMBERS, LAYERS = 4, 3, 2
 
 # --- the simulation component: a saturated DC motor ---
 
-def motor_def(dt, resistance=1.0, inductance=0.2, kt=1.0, ke=1.0,
+def Motor(dt, resistance=1.0, inductance=0.2, kt=1.0, ke=1.0,
               inertia=0.5, friction=0.5, v_max=6.0):
     """DC motor with electrical and mechanical state plus actuator
     saturation: voltage command -> measured angular velocity."""
@@ -72,7 +72,7 @@ def motor_def(dt, resistance=1.0, inductance=0.2, kt=1.0, ke=1.0,
 
 # --- the controller: running-stats norm >> committee of RNNs >> mean ---
 
-def norm_def(momentum=0.05, eps=1e-3):
+def Norm(momentum=0.05, eps=1e-3):
     """Streaming standardizer: running mean/var as cyclic state, shaped by
     the init input value. No mode flags, no shape statics."""
     def init(ndef):
@@ -86,7 +86,7 @@ def norm_def(momentum=0.05, eps=1e-3):
     return node_def(apply, init=init, name='norm')
 
 
-def up_def(hidden):
+def Up(hidden):
     """Input projection: scalar error -> (hidden,), so the signal threaded
     through the stacked RNN layers has a layer-invariant shape (a lax.scan
     carry may not change shape between layers)."""
@@ -99,7 +99,7 @@ def up_def(hidden):
     return node_def(apply, param=param, name='up')
 
 
-def rnn_def(hidden):
+def RNN(hidden):
     """Minimal recurrent cell over a (hidden,)-shaped signal. The param
     constructor is a plain callable — the tree(param) form: declaring rng,
     it receives a KeyStream and draws via rng.next(); explicit values could
@@ -121,7 +121,7 @@ def rnn_def(hidden):
     return node_def(apply, init=init, param=param, name='rnn')
 
 
-def readout_def(hidden):
+def Readout(hidden):
     """Linear head: RNN hidden state -> scalar voltage command. Small init
     scale means the untrained controller commands near-zero voltage — a
     safe, stable starting policy."""
@@ -135,15 +135,15 @@ def readout_def(hidden):
     return node_def(apply, param=param, name='readout')
 
 
-def controller_def():
+def Controller():
     """The learned controller: tracking error in, voltage command out.
     The error is standardized against its running statistics, fed to a
     committee of MEMBERS independent DEEP recurrent controllers — each a
     stack of LAYERS RNN cells with per-member, per-layer params and hidden
     state — and their votes are averaged."""
-    core = up_def(HIDDEN) >> stack(rnn_def(HIDDEN), n=LAYERS) >> readout_def(HIDDEN)
+    core = Up(HIDDEN) >> stack(RNN(HIDDEN), n=LAYERS) >> Readout(HIDDEN)
     mix = node_def(lambda input: jnp.mean(input, axis=0), name='mix')
-    return serial(norm=norm_def(), committee=ensemble(core, n=MEMBERS), mix=mix)
+    return serial(norm=Norm(), committee=ensemble(core, n=MEMBERS), mix=mix)
 
 
 def build():
@@ -151,7 +151,7 @@ def build():
     single-step closed loop (reference -> measured velocity), `rollout`
     its sequence-level scan (reference sequence -> velocity trajectory,
     controller and plant state internalized per episode)."""
-    loop = closed_loop(controller_def() >> motor_def(DT))
+    loop = closed_loop(Controller() >> Motor(DT))
     rollout = scan(loop)
     return loop, rollout
 
@@ -178,9 +178,9 @@ def test_assembly():
 
     # the rnn hidden-state ladder: each transform lifts the leaf state by
     # one axis — (H,) -> stack -> (L, H) -> ensemble (in the loop) -> (M, L, H)
-    cell = rnn_def(HIDDEN).parameterize(rng=jax.random.PRNGKey(1))
+    cell = RNN(HIDDEN).parameterize(rng=jax.random.PRNGKey(1))
     assert cell.init().shape == (HIDDEN,)
-    deep = stack(rnn_def(HIDDEN), n=LAYERS).parameterize(rng=jax.random.PRNGKey(1))
+    deep = stack(RNN(HIDDEN), n=LAYERS).parameterize(rng=jax.random.PRNGKey(1))
     assert deep.init().shape == (LAYERS, HIDDEN)
 
     state = node.with_input(0.0).init()
@@ -237,11 +237,11 @@ def test_ttt_in_the_loop():
     member's initial weights and per-weight adaptation rates."""
     from nodejax import ttt, reconstruction
 
-    core = (up_def(HIDDEN) >> reconstruction
-            >> ttt(rnn_def(HIDDEN), mse, 0.01) >> readout_def(HIDDEN))
+    core = (Up(HIDDEN) >> reconstruction
+            >> ttt(RNN(HIDDEN), mse, 0.01) >> Readout(HIDDEN))
     mix = node_def(lambda input: jnp.mean(input, axis=0), name='mix')
-    controller = serial(norm=norm_def(), committee=ensemble(core, n=MEMBERS), mix=mix)
-    fleet = batch(scan(closed_loop(controller >> motor_def(DT))))
+    controller = serial(norm=Norm(), committee=ensemble(core, n=MEMBERS), mix=mix)
+    fleet = batch(scan(closed_loop(controller >> Motor(DT))))
     trainer = train_step(fleet, mse, optax.adam(0.02))
 
     model = fleet.parameterize(rng=jax.random.PRNGKey(0))

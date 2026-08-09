@@ -16,8 +16,8 @@ from typing import Any, Callable
 import jax
 import jax.numpy as jnp
 
-from nodejax.struct import Struct
-from nodejax.core import (Node, NodeDef, Composite, split_aux, _input_or_none,
+from nodejax.struct import Struct, Aux
+from nodejax.core import (Node, NodeDef, Composite, Serial, split_aux, _input_or_none,
                                 _resolve, _bundle_spec_from_sig, REQUIRED,
                                 _hoist_apply_rng, hoist_rng, _has_rng)
 from nodejax.authoring import (KeyStream, _lift_param, _lift_init,
@@ -42,9 +42,9 @@ def serial(**named: NodeDef | Node) -> NodeDef | Node:
         raise TypeError('serial() needs at least one member')
     if all(v.bound for v in named.values()):
         defs = {nm: v.ndef for nm, v in named.items()}
-        return _pipe_def(defs).bind(Struct(**{nm: v.param for nm, v in named.items()}))
+        return _serial(defs).bind(Struct(**{nm: v.param for nm, v in named.items()}))
     defs, given = _promote_members(named)
-    return _pipe_def(defs, given)
+    return _serial(defs, given)
 
 
 def serial_generic(**named: GenericDef) -> GenericDef:
@@ -100,16 +100,44 @@ def _probe_seed(d: NodeDef) -> Struct:
             if 'rng' in d.state_input_spec else Struct())
 
 
+import re
+
+
+def _probe_apply(apply_fn: Callable, param: Any, state: Any, input: Any) -> Any:
+    """Run apply_fn during shape/state probing walks, dynamically binding size-1
+    dummy vmap axes if JAX raises `NameError: unbound axis name: <name>`."""
+    bound_axes = set()
+    fn = apply_fn
+    while True:
+        try:
+            return fn(param, state, input)
+        except NameError as e:
+            match = re.search(r"unbound axis name:\s*(\w+)", str(e))
+            if match and match.group(1) not in bound_axes:
+                axis_name = match.group(1)
+                bound_axes.add(axis_name)
+                prev_fn = fn
+                def make_bound(inner_fn, name):
+                    def bound_fn(p_, s_, i_):
+                        lead = lambda t: jax.tree.map(lambda x: jnp.asarray(x)[None], t)
+                        out = jax.vmap(inner_fn, axis_name=name)(lead(p_), lead(s_), lead(i_))
+                        return jax.tree.map(lambda x: x[0], out)
+                    return bound_fn
+                fn = make_bound(prev_fn, axis_name)
+            else:
+                raise e
+
+
 def _step_carry(d: NodeDef, param: Any, state: Any, carry: Any, nm: str) -> Any:
     """Advance the walk's carry through one member: run its apply on the
     carry and pass the clean output on (aux diverted off). A member that
     consumes apply-rng gets a probe key (the walk derives shapes; the draw
-    is discarded). Failures name the member — a shape mismatch surfaces at
-    the member that broke, not downstream."""
+    is discarded). Failures name the member — a shape mismatch surfaces at the
+    member that broke, not downstream."""
     if d.apply_takes_rng and not _has_rng(carry):
         carry = carry.replace(rng=jax.random.PRNGKey(0))   # probe key; discarded
     try:
-        _, out = d.apply_fn(param, state, carry)
+        _, out = _probe_apply(d.apply_fn, param, state, carry)
     except Exception as e:
         raise TypeError(f"walk failed at member '{nm}': {e}") from e
     return split_aux(out)[0]
@@ -137,7 +165,7 @@ def _member_param(nm: str, d: NodeDef, recipe: Any, key: Any, input: Any = None)
         raise TypeError(f"member '{nm}': {e}") from e
 
 
-def _pipe_def(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> NodeDef:
+def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> NodeDef:
     """Build the def of a serial pipe over named member defs;
     `given` carries stored construction values per member."""
     names = list(defs)
@@ -215,7 +243,7 @@ def _pipe_def(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> 
             member_in = carry
             if rng_members[nm]:
                 key, sub = jax.random.split(key)
-                if not isinstance(member_in, Struct):
+                if type(member_in) is not Struct:
                     raise TypeError(f"pipe member '{nm}' consumes rng from its input; "
                                     'the signal into it must be a named Struct to '
                                     'carry the key alongside the data')
@@ -229,7 +257,7 @@ def _pipe_def(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> 
         return Struct(**new_states), carry
 
     head = defs[names[0]]
-    return Composite(
+    return Serial(
         name='(' + ' >> '.join(names) + ')',
         param_fn=param_fn,
         init_fn=init_fn,
@@ -237,7 +265,7 @@ def _pipe_def(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> 
         parametric=any(d.parametric for d in defs.values()),
         cyclic=any(d.cyclic for d in defs.values()),
         members=dict(defs),
-        rebuild=lambda new: _pipe_def(dict(new), given),
+        rebuild=lambda new: _serial(dict(new), given),
         # a pre-bound member's slot carries its stored param as the slot
         # DEFAULT: the spec states the optionality that binding created
         param_input_spec=_given_defaults(
@@ -245,7 +273,6 @@ def _pipe_def(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> 
         if given else None,
         apply_input_spec=(_hoist_apply_rng(head.apply_input_spec)
                           if boundary_rng else head.apply_input_spec),
-        serial=True,
     )
 
 
@@ -275,7 +302,7 @@ def _member_init(defs, apply, param, input, rng, seeds):
         w = _InitWired(defs, param, rng, seeds)
         call(w, materialize(input))
         states = w.collect()
-        _check_state_stable(states, _wrap_apply(apply, defs), param, input)
+        _check_state_stable(states, lambda p, s, i: _probe_apply(_wrap_apply(apply, defs), p, s, i), param, input)
         return states
 
     key = rng
@@ -348,65 +375,37 @@ def _shape_sig(x):
     return (tree, tuple((jnp.shape(l), jnp.result_type(l)) for l in leaves))
 
 
-def composite(apply: Callable, *, members: dict[str, NodeDef | Node],
+def composite(apply: Callable, *, members: dict[str, GenericDef | NodeDef | Node],
               param: Callable[..., Any] | None = None,
               init: Callable[..., Any] | None = None,
-              apply_input_spec: Any = None, name: str | None = None) -> NodeDef:
-    """A hand-wired composite over DEF-level members: the member plumbing
-    of a serial pipe — param and state unioned as Structs by member name,
-    one rng routed toward consumers, per-member input derivation — with
-    the wiring supplied by `apply` in place of the serial fold. Program
-    containment lives on the def (members ride NodeDef.members, so
-    def-level services read structure from structure); the param tree is
-    plain data.
+              apply_input_spec: Any = None, name: str | None = None) -> GenericDef | NodeDef | Node:
+    """A hand-wired composite over DEF-level members.
 
-    apply is written against self, in either authored form the leaf
-    sugar accepts: apply(self, input) receives the whole input channel,
-    and apply(self, field, ...) receives the input bundle unpacked by
-    name, the signature declaring the spec (REQUIRED or carrying
-    defaults; a declared rng field arrives as the boundary key stream).
-    In the whole-input form — apply(self, input) -> output —
-    where self is the composite's one transient object, built per step
-    and closed at return: self.member(x) advances a member (repeated
-    calls chain), self.param and self.state read the union Structs
-    (data fields, a delay member's stored value), and the outgoing
-    state is collected automatically when apply returns. Defs and
-    params stay separate at rest; self is where they meet, for the
-    duration of one step. The raw signature
-    (param, state, input) -> (state, output) is accepted alongside:
-    the helper stands down and the author threads member states by
-    hand. A member handle carries the def's METHODS, bound to the live
-    slices: the param always (methods are param-first by contract),
-    and the member's state where the method's second parameter is
-    NAMED state — self.battery.voltage() reads the sag curve at the
-    live charge. The unbound def call, slices explicit —
-    battery.ndef.voltage(param.battery, states.battery) — is the raw
-    spelling, for init and other scopes with no self. Data the composite reads directly is
-    itself a member — a param-only block, its constants entering the
-    member channel like every other block's. The param bundle is
-    member-keyed (each slot that member's input arguments; a boundary
-    rng splits toward members whose bundles want one; unknown names
-    loud). init threads each member ITS OWN input, discovered by one
-    shape-level run of apply — the wiring is the source of truth for
-    who receives what.
+    THE HAS-A RULE: Every sub-component relationship in NodeJax MUST be
+    registered via `members=dict(...)` (in `composite`, `serial`, or `parallel`).
+    Privately closing over sub-nodes in Python variables bypasses NodeJax's
+    core mechanisms—disabling static specialization (GenericDef), nested
+    parameter/state Struct composition, RNG key splitting, shape inference,
+    and structural reflection/surgery (`map_members`, `freeze_by_path`).
 
-    `param` and `init` REPLACE the generated constructors wholesale —
-    full custom, authored through the same sugar channels — for
-    layouts the member union cannot
-    spell (tied fields, cross-member validation). The author then owns
-    the whole tree, member slots included; the generated routing and
-    discovery stand down.
+    apply is written against self: self.member(x) advances a member, and
+    self.param / self.state read the member union Structs.
+    """
+    if any(isinstance(v, GenericDef) for v in members.values()):
+        generic_members = {nm: _as_generic(v) for nm, v in members.items()}
 
-    Members may arrive as bound Nodes — transport containers: the def
-    joins members, the params become that member's stored construction
-    values, used wherever parameterize kwargs leave the slot open
-    (kwargs override). The member tree is thereby spelled once, at the
-    composition site, and parameterize() can be bare.
+        def specialize_fn(**statics: Any) -> NodeDef | Node:
+            unknown = set(statics) - set(generic_members)
+            if unknown:
+                raise TypeError(f'unknown composite generic members: {sorted(unknown)}')
+            specialized = {nm: generic_members[nm].specialize(**statics.get(nm, {}))
+                           for nm in generic_members}
+            return composite(apply, members=specialized, param=param, init=init,
+                             apply_input_spec=apply_input_spec, name=name)
 
-    Returns a NodeDef when parametric — any member parametric, or
-    param= given — and an already-bound Node otherwise (node_def's
-    convention): a composite of pure state members is usable as
-    built."""
+        return GenericDef(name or 'composite(' + ', '.join(members) + ')',
+                          specialize_fn, members=generic_members)
+
     defs, given = _promote_members(members)
     reserved = {'param', 'state', 'collect'} & set(defs)
     if reserved:
@@ -500,19 +499,21 @@ def composite(apply: Callable, *, members: dict[str, NodeDef | Node],
     return ndef if parametric else ndef.bind(param_fn(ndef))
 
 
-def wrapper(apply: Callable, inner: NodeDef | Node, *, name: str | None = None
-            ) -> NodeDef | Node:
+def wrapper(apply: Callable, inner: GenericDef | NodeDef | Node, *, name: str | None = None
+            ) -> GenericDef | NodeDef | Node:
     """IS-A adaptation of exactly one node: the wrapper's param, init,
     state layout, paths and methods ARE the inner's — flat, a nesting
     level nowhere — and apply wraps the step. The signature names the
     member: apply(<inner>, input) -> output, the first parameter your
     name for the transient step object (call it to step, repeated
     calls chain; .param and .state read the slices).
+    """
+    if isinstance(inner, GenericDef):
+        inner_gen = _as_generic(inner)
+        return GenericDef(name or f'wrapper({inner.name})',
+                          lambda **kw: wrapper(apply, inner_gen.specialize(**kw), name=name),
+                          members=dict(inner=inner_gen))
 
-    The neighboring spellings: derive() is the same flat inheritance
-    with a raw apply override (and the place for param-extending
-    is-a, like fets adding r_dson); a singleton composite() is HAS-A —
-    the member named, one nesting level deeper, own identity."""
     nd = inner.ndef
     sig = tuple(inspect.signature(apply).parameters)
     if len(sig) != 2 or sig[1] != 'input' or sig[0] in ('param', 'state', 'input'):
@@ -520,7 +521,19 @@ def wrapper(apply: Callable, inner: NodeDef | Node, *, name: str | None = None
 
     def apply_fn(param, state, input):
         solo = _Solo(nd, param, state)
-        out = apply(solo, input)
+        raw_out = apply(solo, input)
+        clean_out, direct_aux = split_aux(raw_out)
+        aux_fields = {}
+        if direct_aux is not None:
+            if isinstance(direct_aux, Struct):
+                for k in direct_aux.__keys__:
+                    aux_fields[k] = direct_aux[k]
+            elif isinstance(direct_aux, dict):
+                aux_fields.update(direct_aux)
+        if solo._aux:
+            aux_fields.update(solo._aux)
+
+        out = (clean_out, Aux(**aux_fields)) if aux_fields else clean_out
         return solo._current, out
 
     out = nd._replace(name=name or f'wrapper({nd.name})', apply_fn=apply_fn)
@@ -537,10 +550,10 @@ def _components(x: GenericDef | NodeDef | Node) -> dict[str, GenericDef | NodeDe
     stays flat; hand-wired composites have members but their wiring is
     free-form, so they enter a pipe atomically."""
     if x.bound:
-        if isinstance(x.ndef, Composite) and x.ndef.serial:
+        if isinstance(x.ndef, Serial):
             return {nm: Node(d, x.param[nm]) for nm, d in x.ndef.members.items()}
         return {_ident(x.ndef.name): x}
-    if isinstance(x, Composite) and x.serial:
+    if isinstance(x, Serial):
         return dict(x.members)
     if isinstance(x, GenericDef) and x.members:
         return dict(x.members)

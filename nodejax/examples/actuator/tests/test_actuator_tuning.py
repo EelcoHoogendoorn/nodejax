@@ -60,7 +60,7 @@ INITIAL_GAINS = {
     '.actuator.current_ctrl.ff.l': 0.1,
     '.actuator.mechanical_est.observer.tau_pos': 1.0,
     '.actuator.mechanical_est.observer.tau_vel': 100.0,
-    '.actuator.current_ctrl.bus_sensor.ema.tau': 1e-3,
+    '.actuator.current_ctrl.bus_est.ema.tau': 1e-3,
 }
 # (estimator.tau is deliberately NOT a gene: it is the model-blend
 # weight, and the FOC current model diverges above ~0.12dt — an

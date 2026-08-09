@@ -23,8 +23,8 @@ import optax
 
 from nodejax.struct import Struct
 from nodejax import train_step
-from nodejax.examples import Linear, mse, tile
-
+from nodejax import nn
+from nodejax.util import mse, tile
 CHUNK = 100          # steps fused into one scan call
 MAX_CHUNKS = 10
 
@@ -34,8 +34,8 @@ def test_chunked_loop_with_host_side_stats():
     X = jax.random.normal(jax.random.PRNGKey(0), (64, 4))
     y = X @ w_true
 
-    lin = Linear(4, 1)
-    model = lin.parameterize(weight=jnp.zeros((4, 1)), bias=jnp.zeros(1))
+    lin = nn.Linear(1).with_input(X)
+    model = lin.bind(Struct(w=jnp.zeros((4, 1)), b=jnp.zeros(1)))
     trainer = train_step(lin, mse, optax.sgd(0.1))
 
     state = trainer.init(model=model.param)
@@ -50,8 +50,8 @@ def test_chunked_loop_with_host_side_stats():
         log.append(Struct(
             chunk=i,
             loss=float(jnp.mean(losses)),
-            w_err=float(jnp.linalg.norm(state.model.weight - w_true)),
-            w_norm=float(jnp.linalg.norm(state.model.weight)),
+            w_err=float(jnp.linalg.norm(state.model.w - w_true)),
+            w_norm=float(jnp.linalg.norm(state.model.w)),
         ))
         print(f"[loop] chunk {i}: loss {log[-1].loss:.2e} "
               f"|w-w*| {log[-1].w_err:.2e}")

@@ -9,12 +9,12 @@ import jax.numpy as jnp
 
 from nodejax import NodeDef, node_def, scan
 from nodejax.struct import Struct
-from nodejax.examples import integrator_def
+from nodejax.control import Integrator
 
 
 def test_scan_transform():
     """PCN -> PN: sequence-level node with internalized state."""
-    seq = scan(integrator_def())
+    seq = scan(Integrator())
     assert isinstance(seq, NodeDef) and not seq.cyclic
     node = seq.parameterize(gain=jnp.array(1.0))
     outs = node.apply(jnp.array([1.0, 2.0, 3.0]))
@@ -24,7 +24,7 @@ def test_scan_transform():
 def test_scan_persist_slow_fast():
     """Named slots carry across episodes; unmatched slots re-initialize
     fresh at every episode start."""
-    def acc_def():
+    def Accumulator():
         def init():
             return Struct(count=jnp.zeros(()), register=jnp.zeros(()))
 
@@ -34,7 +34,7 @@ def test_scan_persist_slow_fast():
 
         return node_def(apply, init=init, name='acc')
 
-    seq = scan(acc_def(), persist=('count',))
+    seq = scan(Accumulator(), persist=('count',))
     assert seq.cyclic                             # slow state stays outside
 
     s1, counts = seq.apply(seq.init(), jnp.ones(5))
@@ -49,7 +49,7 @@ def test_scan_persist_frozen_refresh():
     """{'frozen': 'stats'} refreshes a read-copy from the carried
     accumulator at episode start — within an episode, reads never see
     that episode's own updates (the target-network shape)."""
-    def two_slot_def():
+    def TwoSlot():
         def init():
             return Struct(frozen=jnp.zeros(()), stats=jnp.zeros(()))
 
@@ -59,7 +59,7 @@ def test_scan_persist_frozen_refresh():
 
         return node_def(apply, init=init, name='twoslot')
 
-    seq = scan(two_slot_def(), persist={'frozen': 'stats', 'stats': 'stats'})
+    seq = scan(TwoSlot(), persist={'frozen': 'stats', 'stats': 'stats'})
 
     s1, reads = seq.apply(seq.init(), jnp.ones(4))
     assert jnp.all(reads == 0.0)                  # episode 1 reads the empty copy

@@ -8,15 +8,25 @@ import jax.numpy as jnp
 
 from nodejax.struct import Struct
 
-from nodejax import NodeDef, GenericDef, node_def, generic, ensemble
-from nodejax.examples import linear
+from nodejax import nn, NodeDef, GenericDef, node_def, generic, ensemble
+
+
+@generic(name='linear')
+def LinearGeneric(in_features, out_features):
+    """The same layer as a GenericDef: free statics, exposed for composition
+    (pipes of generics take nested statics at a single point of use)."""
+    def param(weight, bias):
+        return Struct(weight=jnp.asarray(weight), bias=jnp.asarray(bias))
+    def apply(param, input):
+        return input @ param.weight + param.bias
+    return node_def(apply, param=param, name='linear')
 
 
 def test_generic_leaf():
-    assert isinstance(linear, GenericDef)
-    nd = linear.specialize(in_features=3, out_features=2)
+    assert isinstance(LinearGeneric, GenericDef)
+    nd = LinearGeneric.specialize(in_features=3, out_features=2)
     assert isinstance(nd, NodeDef) and nd.parametric
-    node = linear(3, 2).parameterize(weight=jnp.ones((3, 2)), bias=jnp.zeros(2))
+    node = LinearGeneric(3, 2).parameterize(weight=jnp.ones((3, 2)), bias=jnp.zeros(2))
     assert jnp.allclose(node.apply(jnp.ones(3)), 3.0)
 
 
@@ -24,7 +34,7 @@ def test_generic_static_composition():
     """The point of the static stage: a pipe of generics exposes member
     statics as ONE nested tree at a single point of use — no threading
     statics through intermediate constructors."""
-    mlp = linear >> linear
+    mlp = LinearGeneric >> LinearGeneric
     assert isinstance(mlp, GenericDef)
 
     nd = mlp.specialize(
@@ -41,8 +51,7 @@ def test_generic_static_composition():
 def test_generic_pipe_with_plain_members():
     """AlexNet shape: generics mixed with plain (param-less, static-less)
     nodes; those members simply don't appear in the static or param trees."""
-    relu = node_def(lambda input: jnp.maximum(input, 0.0), name='relu')
-    mlp = linear >> relu >> linear
+    mlp = LinearGeneric >> nn.relu >> LinearGeneric
 
     nd = mlp.specialize(
         linear={'in_features': 2, 'out_features': 2},
@@ -59,7 +68,7 @@ def test_generic_pipe_with_plain_members():
 def test_generic_defaults_merge():
     """Authored generics pre-configure members; supplied statics merge over
     defaults leaf-wise."""
-    head = generic(linear.specialize_fn, name='head', out_features=2)
+    head = generic(LinearGeneric.specialize_fn, name='head', out_features=2)
     nd = head.specialize(in_features=3)                    # default out_features
     assert isinstance(nd, NodeDef)
     node = nd.parameterize(weight=jnp.ones((3, 2)), bias=jnp.zeros(2))
@@ -75,7 +84,7 @@ def test_generic_derived_statics_are_closures():
     (hidden wired between layers); FREE statics surface through the args."""
     @generic
     def mlp(in_features, hidden, out_features):
-        return (linear(in_features, hidden) >> linear(hidden, out_features))
+        return (LinearGeneric(in_features, hidden) >> LinearGeneric(hidden, out_features))
 
     bound = mlp(4, 8, 2).parameterize(
         linear=Struct(weight=jnp.ones((4, 8)), bias=jnp.zeros(8)),
@@ -87,16 +96,16 @@ def test_generic_derived_statics_are_closures():
 def test_transform_of_generic_commutes():
     """Transforms lift over the static stage by deferral:
     ensemble(G).specialize(s) == ensemble(G.specialize(s))."""
-    eG = ensemble(linear)
+    eG = ensemble(LinearGeneric)
     assert isinstance(eG, GenericDef)
 
     params = Struct(weight=jnp.ones((3, 2, 2)), bias=jnp.zeros((3, 2)))
     via_generic = eG.specialize(in_features=2, out_features=2).parameterize(params)
-    via_def = ensemble(linear.specialize(in_features=2, out_features=2)).parameterize(params)
+    via_nodedef = ensemble(LinearGeneric.specialize(in_features=2, out_features=2)).parameterize(params)
 
     x = jnp.array([1.0, 2.0])
     assert via_generic.apply(x).shape == (3, 2)
-    assert jnp.allclose(via_generic.apply(x), via_def.apply(x))
+    assert jnp.allclose(via_generic.apply(x), via_nodedef.apply(x))
 
 
 def test_wildcard_statics_broadcast():
@@ -111,8 +120,7 @@ def test_wildcard_statics_broadcast():
     def off(bias=0.0):
         return node_def(lambda input: input + bias, name='off')
 
-    relu = node_def(lambda input: jnp.maximum(input, 0.0), name='relu')
-    pipe = amp >> off >> amp >> relu               # amp, off, amp_2, relu
+    pipe = amp >> off >> amp >> nn.relu               # amp, off, amp_2, relu
 
     nd = pipe.specialize(**{'*.gain': 2.0}, amp_2={'gain': 5.0})
     node = nd.bind(nd.build_param())            # all-plain pipe: () per member
@@ -176,3 +184,50 @@ def test_wildcard_mode_flag():
     train_out = model.apply(jnp.asarray(1.0))
     eval_out = eval_nd.apply(model.param, jnp.asarray(1.0))        # same weights
     assert jnp.allclose(eval_out, train_out * 4.0)                 # 0.5^2 lifted
+
+
+def test_static_input_spec_and_dot_paths():
+    """Verify static_input_spec reflects required/default statics and dot-path specialization works."""
+    from nodejax.core import REQUIRED
+    from nodejax.struct import Struct
+
+    spec = LinearGeneric.static_input_spec
+    assert spec.in_features is REQUIRED and spec.out_features is REQUIRED
+
+    mlp = LinearGeneric >> LinearGeneric
+    mlp_spec = mlp.static_input_spec
+    assert mlp_spec.linear.in_features is REQUIRED
+    assert mlp_spec.linear_2.out_features is REQUIRED
+
+    # Dot-path specialization
+    nd = mlp.specialize(**{"linear.in_features": 4, "linear.out_features": 8,
+                           "linear_2.in_features": 8, "linear_2.out_features": 2})
+    assert isinstance(nd, NodeDef)
+
+
+def test_partial_static_binding():
+    """Verify partial static binding returns a refined GenericDef awaiting remaining statics."""
+    partial_g = LinearGeneric(in_features=10)
+    assert isinstance(partial_g, GenericDef)
+    assert partial_g.defaults['in_features'] == 10
+
+    full_nd = partial_g(out_features=5)
+    assert isinstance(full_nd, NodeDef)
+
+
+def test_generic_in_composite_and_parallel():
+    """Passing GenericDefs into composite() or parallel() yields a GenericDef composite/parallel block."""
+    from nodejax import composite, parallel
+
+    comp_g = composite(lambda self, x: self.fc2(self.fc1(x)),
+                       members=dict(fc1=LinearGeneric, fc2=LinearGeneric))
+    assert isinstance(comp_g, GenericDef)
+    comp_nd = comp_g.specialize(fc1={'in_features': 4, 'out_features': 8},
+                                fc2={'in_features': 8, 'out_features': 2})
+    assert isinstance(comp_nd, NodeDef)
+
+    par_g = parallel(a=LinearGeneric, b=LinearGeneric)
+    assert isinstance(par_g, GenericDef)
+    par_nd = par_g.specialize(a={'in_features': 4, 'out_features': 8},
+                              b={'in_features': 8, 'out_features': 2})
+    assert isinstance(par_nd, NodeDef)

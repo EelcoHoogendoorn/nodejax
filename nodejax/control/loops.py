@@ -1,4 +1,4 @@
-"""Control-loop combinators."""
+"""Control loop feedback combinators."""
 
 from __future__ import annotations
 
@@ -6,8 +6,32 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax.core import NodeDef
-from nodejax.authoring import node_def, derive
+from nodejax.core import NodeDef, hoist_rng
+from nodejax.authoring import derive
+
+
+def feedback(pipe: NodeDef, last: float = 0.0) -> NodeDef:
+    """Close the loop — a user-land control transform: the wrapped node maps
+    tracking error -> output, and feedback supplies error = reference - the
+    previous output. Cyclic -> cyclic; param meaning unchanged."""
+    def init(ndef, param, state=Struct()):
+        seed = state.inner if 'inner' in state else Struct()
+        if 'rng' in state:
+            seed = seed.replace(rng=state.rng)
+        if ndef.apply_input_spec is None:
+            return Struct(inner=pipe.build_state(param, seed),
+                          last=jax.tree.map(jnp.asarray, last))
+        return Struct(inner=pipe.build_state(param, seed, input=ndef.input),
+                      last=jax.tree.map(jnp.zeros_like, ndef.input))
+
+    def apply(param, state, input):
+        error = jax.tree.map(jnp.subtract, input, state.last)
+        new_inner, out = pipe.apply_fn(param, state.inner, error)
+        return Struct(inner=new_inner, last=out), out
+
+    seed_spec = hoist_rng(dict(inner=pipe.state_input_spec if pipe.cyclic else Struct()))
+    return derive(pipe, apply=apply, init=init, state_input_spec=seed_spec,
+                  name=f'feedback({pipe.name})')
 
 
 def closed_loop(pipe: NodeDef) -> NodeDef:
@@ -28,21 +52,7 @@ def closed_loop(pipe: NodeDef) -> NodeDef:
 
 def observed_loop(pipe: NodeDef, belief0) -> NodeDef:
     """closed_loop with an in-loop observer riding the plant side —
-    the indirect-adaptive-control block. The pipe maps
-    Struct(error, belief) -> Struct(output=<measurement>, belief=<the
-    observer's current estimate>): the measurement feeds back
-    subtractively as tracking error, while the belief feeds FORWARD to
-    the pipe's head unmodified — knowledge is offered, never
-    subtracted from a reference.
-
-    The loop is coupled to its observer by this output contract: the
-    pipe's TAIL must be an observer-wrapped plant emitting
-    Struct(output, belief) — identified() in the examples is the
-    producer — and belief0 must match the observer's belief
-    in shape and meaning: its SHAPE seeds the belief register (zeros
-    until the first real estimate lands) and the init-time spec
-    propagation. Each step's belief is read where the plant is, and
-    consumed by the controller one step later."""
+    the indirect-adaptive-control block."""
     def init(ndef, param):
         return Struct(inner=pipe.build_state(param, input=Struct(error=ndef.input, belief=belief0)),
                       last=jnp.zeros_like(ndef.input),

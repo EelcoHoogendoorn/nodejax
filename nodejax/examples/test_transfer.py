@@ -13,12 +13,11 @@ import optax
 
 from nodejax.struct import Struct
 from nodejax import node_def, serial, tree_detach, train_step
-from nodejax.examples import mse, tile
-
+from nodejax.util import mse, tile
 N_IN, FEAT = 4, 16
 
 
-def trunk_def():
+def Trunk():
     def param(rng):
         return Struct(w1=0.5 * jax.random.normal(rng.next(), (N_IN, FEAT)),
                       w2=0.5 * jax.random.normal(rng.next(), (FEAT, FEAT)))
@@ -29,7 +28,7 @@ def trunk_def():
     return node_def(apply, param=param, name='trunk')
 
 
-def head_def():
+def Head():
     def param(rng):
         return Struct(w=0.1 * jax.random.normal(rng.next(), (FEAT, 1)))
 
@@ -50,7 +49,7 @@ def test_freeze_trunk_swap_head_retrain():
     X = jax.random.normal(jax.random.PRNGKey(0), (64, N_IN))
     y_pretrain = jnp.sin(X @ jnp.array([[1.0], [-1.0], [0.5], [0.0]]))
 
-    pipe = serial(trunk=trunk_def(), head=head_def())
+    pipe = serial(trunk=Trunk(), head=Head())
 
     # task A: pretrain the whole pipe
     init = pipe.parameterize(rng=jax.random.PRNGKey(1)).param
@@ -59,11 +58,11 @@ def test_freeze_trunk_swap_head_retrain():
 
     # task B: targets linear in the LEARNED features, so a fresh head can
     # fit them exactly iff the trunk survives intact
-    feats = trunk_def().apply(pretrained.trunk, X)
+    feats = Trunk().apply(pretrained.trunk, X)
     y_transfer = feats @ jax.random.normal(jax.random.PRNGKey(2), (FEAT, 1))
 
     # swap the head (params are data), freeze the trunk (one transform)
-    fresh_head = head_def().parameterize(rng=jax.random.PRNGKey(3)).param
+    fresh_head = Head().parameterize(rng=jax.random.PRNGKey(3)).param
     surgery = pretrained.replace(head=fresh_head)
     tuned, losses_b = _fit(tree_detach(pipe, 'trunk'), surgery, X, y_transfer,
                            steps=1500, lr=3e-2)

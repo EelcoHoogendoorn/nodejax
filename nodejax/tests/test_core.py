@@ -5,7 +5,8 @@ import jax.numpy as jnp
 
 from nodejax import Node, NodeDef, node_def
 from nodejax.struct import Struct
-from nodejax.examples import gain_def, integrator_def, Linear
+from nodejax.control import Gain, Integrator
+from nodejax import nn
 
 
 def test_plain_node():
@@ -16,16 +17,16 @@ def test_plain_node():
 
 
 def test_parametric_node():
-    Gain = gain_def()
-    assert isinstance(Gain, NodeDef) and Gain.parametric
-    g = Gain.parameterize(scale=2.0)
+    gain = Gain()
+    assert isinstance(gain, NodeDef) and gain.parametric
+    g = gain.parameterize(scale=2.0)
     assert isinstance(g, Node)
     assert g.apply(3.0) == 6.0
 
 
 def test_cyclic_node():
-    Integrator = integrator_def()
-    node = Integrator.parameterize(gain=jnp.array(1.0))
+    integrator = Integrator()
+    node = integrator.parameterize(gain=jnp.array(1.0))
     state = node.init()
     state, out = node.apply(state, 2.0)
     assert out == 2.0
@@ -38,23 +39,24 @@ def test_cyclic_node():
 
 def test_generic_is_a_closure():
     """The matmul case that breaks discovery tracing: no dummies, no problem."""
-    linear = Linear(4, 3).parameterize(weight=jnp.ones((4, 3)), bias=jnp.zeros(3))
+    linear = nn.Linear(3).with_input(jnp.zeros(4)).bind(
+        Struct(w=jnp.ones((4, 3)), b=jnp.zeros(3)))
     out = linear.apply(jnp.arange(4.0))
     assert out.shape == (3,)
     assert jnp.allclose(out, 6.0)
 
 
 def test_treedef_stable_across_bindings():
-    Gain = gain_def()
-    a = Gain.parameterize(scale=jnp.array(1.0))
-    b = Gain.parameterize(scale=jnp.array(2.0))
+    gain = Gain()
+    a = gain.parameterize(scale=jnp.array(1.0))
+    b = gain.parameterize(scale=jnp.array(2.0))
     assert type(a) is type(b)
     assert jax.tree.structure(a) == jax.tree.structure(b)
 
 
 def test_grad_wrt_node():
     """The pytree is the object: grad w.r.t. the bound node itself."""
-    g = gain_def().parameterize(scale=jnp.array(2.0))
+    g = Gain().parameterize(scale=jnp.array(2.0))
     grads = jax.grad(lambda n: n.apply(3.0))(g)
     assert isinstance(grads, Node)
     assert jnp.allclose(grads.param.scale, 3.0)
@@ -62,9 +64,9 @@ def test_grad_wrt_node():
 
 def test_jit_and_treedef_reuse():
     """One class per Node means jit caches hit across rebindings."""
-    Gain = gain_def()
-    a = Gain.parameterize(scale=jnp.array(2.0))
-    b = Gain.parameterize(scale=jnp.array(5.0))
+    gain = Gain()
+    a = gain.parameterize(scale=jnp.array(2.0))
+    b = gain.parameterize(scale=jnp.array(5.0))
 
     @jax.jit
     def run(node, x):
@@ -81,8 +83,9 @@ def test_param_field_forwarding():
     import pytest
     from functools import partial as _p
 
-    inner = Linear(2, 2).parameterize(weight=jnp.eye(2), bias=jnp.ones(2))
-    assert jnp.allclose(inner.weight, jnp.eye(2))          # field forwarding
+    inner = nn.Linear(2).with_input(jnp.zeros(2)).bind(
+        Struct(w=jnp.eye(2), b=jnp.ones(2)))
+    assert jnp.allclose(inner.w, jnp.eye(2))               # field forwarding
 
     def param(block, gain=2.0):
         return Struct(block=block, gain=jnp.asarray(gain))
@@ -95,7 +98,7 @@ def test_param_field_forwarding():
 
     comp = node_def(apply, param=param, name='comp',
                     methods=dict(gain=gain)).parameterize(block=inner)
-    assert jnp.allclose(comp.block.weight, jnp.eye(2))     # chains through the Node
+    assert jnp.allclose(comp.block.w, jnp.eye(2))     # chains through the Node
     assert callable(comp.gain) and comp.gain() == 2.0      # methods beat fields
     assert comp.name == 'comp'                             # real attributes beat fields
     assert comp.param.gain == 2.0                          # the unambiguous spelling

@@ -13,19 +13,19 @@ from typing import Callable
 
 from nodejax.struct import Struct
 from nodejax.core import Node, NodeDef, Composite
-from nodejax.transforms.common import _split, _rewrap
+from nodejax.transforms.common import _over_bound
 
 
-def map_members(node: NodeDef | Node, fn: Callable[[NodeDef], NodeDef]) -> NodeDef | Node:
+@_over_bound
+def map_members(nd: NodeDef, fn: Callable[[NodeDef], NodeDef]) -> NodeDef:
     """Rewrite a node tree bottom-up: apply fn to every node, members
     first, rebuilding each composite from its recipe so cyclic/parametric
     recompute at each level. fn: NodeDef -> NodeDef."""
-    nd, param = _split(node)
     if isinstance(nd, Composite):
         if nd.rebuild is None:
             raise TypeError(f"cannot rewrite '{nd.name}': no rebuild recipe")
         nd = nd.rebuild({k: map_members(m, fn) for k, m in nd.members.items()})
-    return _rewrap(fn(nd), param)
+    return fn(nd)
 
 
 def tree_filter(state: Struct, name: str | Callable[[str], bool]) -> Struct:
@@ -52,3 +52,24 @@ def tree_filter(state: Struct, name: str | Callable[[str], bool]) -> Struct:
     if not pruned:
         raise ValueError(f'tree_filter: {name!r} matched nothing in the state tree')
     return Struct(**pruned)
+
+
+def map_node_leaves(nd: NodeDef, fn: Callable[[NodeDef], Any]) -> Any:
+    """Map `fn(leaf_node) -> value` over the leaf nodes of `nd`, building
+    a matching Struct tree over composite member structures."""
+    if not nd.cyclic:
+        return 0
+    if isinstance(nd, Composite):
+        return Struct(**{nm: map_node_leaves(m, fn) for nm, m in nd.members.items()})
+    return fn(nd)
+
+
+def map_state_leaves(nd: NodeDef, state: Any, fn: Callable[[NodeDef, Any], Any]) -> Any:
+    """Map `fn(leaf_node, leaf_state) -> leaf_state` over matching node and
+    state tree hierarchies."""
+    if not nd.cyclic or (isinstance(state, tuple) and len(state) == 0):
+        return state
+    if isinstance(nd, Composite):
+        return Struct(**{nm: map_state_leaves(m, state[nm], fn)
+                         for nm, m in nd.members.items() if nm in state})
+    return fn(nd, state)

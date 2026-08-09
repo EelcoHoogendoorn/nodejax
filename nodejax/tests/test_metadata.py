@@ -6,12 +6,24 @@ fields (required marked REQUIRED, optional carrying its default), rng kept as
 a bundle field, ndef excluded (self-def inspection is encapsulated). A
 composite is the member-keyed tree of its members'.
 """
+import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
 from nodejax import node_def, serial, parallel
 from nodejax.core import REQUIRED
-from nodejax.examples import gain_def, plant_node
+from nodejax.control import Gain
+
+
+def Plant(dt=0.01, spring_k=1.0, damping_c=0.1):
+    def init(ndef):
+        return Struct(pos=jnp.zeros_like(ndef.input), vel=jnp.zeros_like(ndef.input))
+    def apply(state, input):
+        acc = input - spring_k * state.pos - damping_c * state.vel
+        vel = state.vel + dt * acc
+        pos = state.pos + dt * vel
+        return Struct(pos=pos, vel=vel), pos
+    return node_def(apply, init=init, name='plant')
 
 
 def _pi():
@@ -23,7 +35,7 @@ def _pi():
 
 
 def test_param_input_spec_marks_required_and_carries_defaults():
-    g = gain_def().param_input_spec
+    g = Gain().param_input_spec
     assert list(g.__keys__) == ['scale'] and g.scale is REQUIRED
 
     p = _pi().param_input_spec
@@ -45,35 +57,34 @@ def test_param_input_spec_drops_ndef_keeps_rng():
 
 
 def test_param_input_spec_composes_by_member():
-    net = serial(a=gain_def(), b=_pi())
+    net = serial(a=Gain(), b=_pi())
     s = net.param_input_spec
     assert list(s.__keys__) == ['a', 'b']
     assert s.a.scale is REQUIRED
     assert s.b.kp is REQUIRED and s.b.ki == 0.0
 
     # nesting recurses
-    outer = serial(x=serial(a=gain_def(), b=_pi()), y=gain_def())
+    outer = serial(x=serial(a=Gain(), b=_pi()), y=Gain())
     assert outer.param_input_spec.x.b.kp is REQUIRED
     assert outer.param_input_spec.y.scale is REQUIRED
 
     # parallel composes the same way
-    par = parallel(a=gain_def(), b=gain_def())
+    par = parallel(a=Gain(), b=Gain())
     assert par.param_input_spec.a.scale is REQUIRED
 
 
 def test_param_input_spec_nonparametric_is_empty():
-    assert plant_node(0.1, 1.0, 0.1).ndef.param_input_spec == ()
+    assert Plant(0.1, 1.0, 0.1).ndef.param_input_spec == ()
 
 
 def test_state_input_spec_is_the_seed_bundle():
-    from nodejax.examples import integrator_def, walker_def
-
+    from nodejax.control import Integrator, Walker
     # rng seed: init(param, rng)
-    w = walker_def().state_input_spec
+    w = Walker().state_input_spec
     assert list(w.__keys__) == ['rng'] and w.rng is REQUIRED
 
     # plain init(param): nothing to seed
-    assert list(integrator_def().state_input_spec.__keys__) == []
+    assert list(Integrator().state_input_spec.__keys__) == []
 
     # explicit seed field carrying its default
     def seeded():
@@ -89,12 +100,12 @@ def test_state_input_spec_is_the_seed_bundle():
 
 
 def test_state_input_spec_non_cyclic_is_empty():
-    assert gain_def().state_input_spec == ()
+    assert Gain().state_input_spec == ()
 
 
 def test_state_input_spec_composes_by_member_with_boundary_rng():
-    from nodejax.examples import walker_def
-    net = serial(w=walker_def(), g=gain_def())
+    from nodejax.control import Walker
+    net = serial(w=Walker(), g=Gain())
     s = net.state_input_spec
     # rng is a BOUNDARY field: the caller passes one key, the composite splits
     # it toward members — so the member sub-bundles carry no rng of their own
@@ -112,7 +123,7 @@ def test_param_input_spec_hoists_rng_to_the_boundary():
             return param.w * input
         return node_def(apply, param=param, name='noisy')
 
-    net = serial(n=noisy(), g=gain_def())
+    net = serial(n=noisy(), g=Gain())
     s = net.param_input_spec
     assert list(s.__keys__) == ['rng', 'n', 'g']
     assert s.rng is REQUIRED
@@ -120,14 +131,14 @@ def test_param_input_spec_hoists_rng_to_the_boundary():
     assert s.g.scale is REQUIRED
 
     # nested: the inner pipe's boundary rng is itself hoisted outward
-    outer = serial(x=serial(n=noisy(), g=gain_def()), y=gain_def())
+    outer = serial(x=serial(n=noisy(), g=Gain()), y=Gain())
     o = outer.param_input_spec
     assert list(o.__keys__) == ['rng', 'x', 'y']
     assert 'rng' not in o.x             # filled by the outer split
 
     # a deterministic composite has NO rng field: a passed key is an
     # ordinary unknown-field rejection, not a special-cased guard
-    det = serial(a=gain_def(), b=gain_def())
+    det = serial(a=Gain(), b=Gain())
     assert 'rng' not in det.param_input_spec
 
 
@@ -158,7 +169,7 @@ def test_given_slots_are_spec_defaults_and_survive_rebuild():
     made optional — and structural rewrites carry the stored construction."""
     from nodejax import map_members
 
-    pipe = gain_def() >> gain_def().parameterize(scale=jnp.asarray(3.0))
+    pipe = Gain() >> Gain().parameterize(scale=jnp.asarray(3.0))
     spec = pipe.param_input_spec
     assert spec.gain.scale is REQUIRED               # open slot: still required
     assert jnp.allclose(spec.gain_2.scale, 3.0)      # bound slot: its param, as default

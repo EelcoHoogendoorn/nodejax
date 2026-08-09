@@ -7,7 +7,10 @@ framework makes you write that routing.
 
 The task: predict an exponential moving average of a noisy scalar
 sequence, chosen because the target is recurrent by construction. The
-model: an input projection, a stack of RNN cells, a linear readout.
+model: an input projection, a streaming Norm (running stats as
+ordinary cyclic state — the change-cost measurement: one pipe term
+here, hand-threaded carries in the flax file), a stack of RNN cells,
+a linear Readout.
 The tower: `stack` scans over depth, `scan` internalizes the time
 axis, `batch` maps over sequences, `train_step` internalizes the
 optimization scan. Four transform applications, one line each, no
@@ -31,9 +34,9 @@ import optax
 from nodejax import node_def, stack, scan, batch, train_step, finetune
 from nodejax.struct import Struct
 from nodejax.examples.comparisons.tower_common import (
-    HIDDEN, LAYERS, STEPS, INNER_LR, META_STEPS, mse, make_data, make_tasks)
+    HIDDEN, LAYERS, STEPS, INNER_LR, META_STEPS, MOMENTUM, mse, make_data, make_tasks)
 
-def up(hidden):
+def Up(hidden):
     def param(rng):
         return Struct(w=0.5 * jax.random.normal(rng.next(), (hidden,)))
     def apply(param, input):
@@ -41,7 +44,24 @@ def up(hidden):
     return node_def(apply, param=param, name='up')
 
 
-def rnn(hidden):
+def Norm(hidden, momentum):
+    """Streaming Norm: per-feature running mean and variance over TIME,
+    ordinary cyclic state. Every transform in the tower routes it off
+    the contract: scan carries it, batch gives each sequence its own
+    stats, train_step holds it in model state, finetune leaves it to
+    its own dynamics while the gradient step adapts params."""
+    def init():
+        return (jnp.zeros(hidden), jnp.ones(hidden))
+    def apply(state, input):
+        m1, var = state
+        out = (input - m1) / jnp.sqrt(var + 1e-5)
+        m1_new = (1 - momentum) * m1 + momentum * input
+        var_new = (1 - momentum) * var + momentum * (input - m1) ** 2
+        return (m1_new, var_new), out
+    return node_def(apply, init=init, name='norm')
+
+
+def RNN(hidden):
     def param(rng):
         return Struct(wx=0.5 * jax.random.normal(rng.next(), (hidden,)),
                       wh=0.3 * jax.random.normal(rng.next(), (hidden, hidden)) / jnp.sqrt(hidden),
@@ -54,7 +74,7 @@ def rnn(hidden):
     return node_def(apply, init=init, param=param, name='rnn')
 
 
-def readout(hidden):
+def Readout(hidden):
     def param(rng):
         return Struct(w=0.1 * jax.random.normal(rng.next(), (hidden,)), b=jnp.zeros(()))
     def apply(param, input):
@@ -63,7 +83,7 @@ def readout(hidden):
 
 
 def main():
-    net = up(HIDDEN) >> stack(rnn(HIDDEN), n=LAYERS) >> readout(HIDDEN)
+    net = Up(HIDDEN) >> Norm(HIDDEN, MOMENTUM) >> stack(RNN(HIDDEN), n=LAYERS) >> Readout(HIDDEN)
     rollout = scan(net)                       # time internalized
     trainer = train_step(batch(rollout), mse, optax.adam(3e-3))
 
@@ -81,7 +101,7 @@ def main():
 # --- one level deeper: meta-learning across a task family ---
 
 def main_meta():
-    net = up(HIDDEN) >> stack(rnn(HIDDEN), n=LAYERS) >> readout(HIDDEN)
+    net = Up(HIDDEN) >> Norm(HIDDEN, MOMENTUM) >> stack(RNN(HIDDEN), n=LAYERS) >> Readout(HIDDEN)
     rollout = scan(net)
     adapt = finetune(rollout, mse, optax.sgd(INNER_LR))     # the inner adaptation scan
     maml = train_step(batch(adapt), mse, optax.adam(3e-3))

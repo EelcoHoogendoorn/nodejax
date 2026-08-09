@@ -158,22 +158,41 @@ def _spec_sig(tree: Any) -> tuple:
 def _resolve(nd: 'NodeDef', value: Any) -> 'NodeDef':
     """Resolve a def's input spec against a value by the uniform rule:
     fill the spec from `spec_of(value)` when the def has no RESOLVED spec
-    (none declared, or only a signature-derived marker bundle), or validate
-    the value against a resolved spec and raise a NAMED conflict on
-    mismatch. Returns the def with a resolved spec."""
-    if not _spec_resolved(nd.apply_input_spec):
+    (none declared, or only a signature-derived marker bundle), or
+    validate the value against a resolved spec. Bundles validate by the
+    bundle rule, the same one every other bundle boundary applies:
+    unknown fields are a NAMED conflict, a present field must match the
+    spec's shape, and a spec field absent from the value is OPTIONAL —
+    its concrete spec value is the default the apply unpack fills.
+    Non-bundle trees compare whole. Returns the def with a resolved
+    spec."""
+    spec = nd.apply_input_spec
+    if not _spec_resolved(spec):
         return nd.with_input(value)
-    if _spec_sig(nd.apply_input_spec) != _spec_sig(value):
+    if isinstance(spec, Struct) and isinstance(value, Struct):
+        unknown = set(value.__keys__) - set(spec.__keys__)
+        if unknown:
+            raise TypeError(f"{nd.name}: unknown input fields {sorted(unknown)}; "
+                            f"the spec fields are {sorted(spec.__keys__)}")
+        for k in value.__keys__:
+            if _spec_sig(spec[k]) != _spec_sig(value[k]):
+                raise TypeError(
+                    f"{nd.name}.{k}: input shape {_spec_sig(value[k])[1]} conflicts "
+                    f"with its declared spec {_spec_sig(spec[k])[1]}")
+        return nd
+    if _spec_sig(spec) != _spec_sig(value):
         raise TypeError(
             f"{nd.name}: input shape {_spec_sig(value)[1]} conflicts with its "
-            f"declared spec {_spec_sig(nd.apply_input_spec)[1]}")
+            f"declared spec {_spec_sig(spec)[1]}")
     return nd
 
 
 def _input_or_none(nd: 'NodeDef | None') -> Any:
-    """The materialized input spec of a def (zeros at the shape), or None when the def
-    (or its spec) is absent — for framework carry computation, where an
-    unresolved shape means 'nothing to thread', not the loud read error."""
+    """The materialized zero input spec of a def, or None when the def (or its spec) is absent.
+
+    Used during composite shape walks where an unresolved shape means 'nothing to thread'.
+    Returns `materialize(apply_input_spec)` (zero arrays) when resolved, or `None` if unresolved.
+    """
     if nd is None or not _spec_resolved(nd.apply_input_spec):
         return None
     from nodejax.spec import materialize
@@ -181,29 +200,16 @@ def _input_or_none(nd: 'NodeDef | None') -> Any:
 
 
 def split_aux(output: Output) -> tuple[Output, Any]:
-    """The aux channel, and the output doctrine that makes it unambiguous.
+    """The aux channel: clean output and auxiliary data separation.
 
-    OUTPUT DOCTRINE: a node's output is an array or a Struct (lists remain
-    the escape hatch for genuinely positional data). Positional pairs as
-    DATA are written as named Structs — the same named-bundle style as
-    param/state/input. The 2-tuple is thereby freed to be contract syntax:
-
-        return output              # no aux
-        return output, aux         # aux (sown losses, taps, metrics)
-
-    Composites divert member aux under member names and re-emit
-    (carry, collection) — the same pair shape, so the channel nests with
-    no wrapper fields and no unwrapping heuristics; destructure at the
-    top: `out, aux = node.apply(x)`. Because aux rides ordinary outputs,
-    batch/ensemble/scan add their axes to it automatically.
-
-    Returns (output, aux); aux is None when the channel is unused. Tuples
-    of other lengths are a loud error, not a silent misread."""
-    if isinstance(output, tuple):
-        if len(output) != 2:
-            raise TypeError('node outputs are arrays or Structs; a 2-tuple means '
-                            f'(output, aux) — got a {len(output)}-tuple')
-        return output
+    Returns (clean_output, aux).
+    aux is non-None when output is a 2-tuple `(clean_output, aux_data)`
+    where `aux_data` is an Aux or Struct instance (sown losses, metrics, taps).
+    Positional 2-tuples returning raw arrays or lists pass through as clean output data.
+    """
+    from nodejax.struct import Struct, Aux
+    if isinstance(output, tuple) and len(output) == 2 and isinstance(output[1], (Struct, Aux)):
+        return output[0], output[1]
     return output, None
 
 
@@ -226,6 +232,52 @@ def _as_bundle(fields: dict) -> 'Struct':
     return Struct(**fields)
 
 
+# names that are CHANNELS in a method signature, injected by the view
+# that binds the method
+_METHOD_CHANNELS = frozenset({'param', 'state', 'ndef', 'rng'})
+
+
+def _bind_method(fn: Callable, offers: dict[str, Callable]) -> Callable:
+    """Bind a def method to a view. Reserved parameter names are CHANNELS
+    — ndef (the def), param (the object), state (the live state), rng
+    (the boundary key stream) — the same names with the same meaning as
+    in every authored signature, declared as a leading prefix in that
+    order (validated at authoring, _check_method_signature); every other
+    parameter is a call argument, filled positionally or by keyword. offers maps channel
+    name to a zero-arg supplier, read at CALL time, so a state read
+    after a member step sees the advance. A channel the view does not
+    offer is the caller's to pass by keyword, and an explicit keyword
+    always beats injection. rng arrives in the method as a KeyStream
+    either way: a view offers the boundary stream itself, an explicit
+    keyword passes a key that is wrapped at this seam — one drawing
+    idiom (rng.next()) in every context."""
+    names = list(inspect.signature(fn).parameters)
+    fields = [n for n in names if n not in _METHOD_CHANNELS]
+    channels = [n for n in names if n in _METHOD_CHANNELS]
+
+    def bound(*args: Any, **kwargs: Any) -> Any:
+        if len(args) > len(fields):
+            raise TypeError(f'{fn.__name__}() takes {len(fields)} call argument(s) '
+                            f'{fields}; the reserved names {channels} are injected')
+        kw = dict(zip(fields, args))
+        doubled = kw.keys() & kwargs.keys()
+        if doubled:
+            raise TypeError(f'{fn.__name__}() got multiple values for {sorted(doubled)}')
+        kw.update(kwargs)
+        for nm in channels:
+            if nm in kw:
+                if nm == 'rng':
+                    from nodejax.authoring import KeyStream
+                    kw[nm] = KeyStream(kw[nm])   # an explicit key, wrapped at the seam
+                continue
+            supplier = offers.get(nm)
+            if supplier is not None:
+                kw[nm] = supplier()
+        return fn(**kw)
+
+    return bound
+
+
 # === the form ===
 
 class NodeDef:
@@ -243,13 +295,15 @@ class NodeDef:
     cyclic: bool
     apply_input_spec: Any | None
     methods: dict[str, Callable] | None
+    tags: frozenset[str]
 
     def __init__(self, name: str, param_fn: ParamFn, init_fn: InitFn, apply_fn: ApplyFn,
                  parametric: bool, cyclic: bool,
                  apply_input_spec: Any | None = None, methods: dict[str, Callable] | None = None,
                  init_requires_input: bool = False, param_reads_shape: bool = False,
                  init_reads_shape: bool = False,
-                 param_input_spec: Any | None = None, state_input_spec: Any | None = None):
+                 param_input_spec: Any | None = None, state_input_spec: Any | None = None,
+                 tags: frozenset[str] = frozenset()):
         self.name = name
         # the IMPL fns, PRIVATE: param/init impls are def-first ((ndef, ...))
         # so the binding seam can hand any impl its own resolved def. self,
@@ -261,7 +315,7 @@ class NodeDef:
         self.parametric = parametric
         self.cyclic = cyclic
         self.apply_input_spec = apply_input_spec  # declared input (pytree of ShapeDtypeStruct); None = shape-generic
-        self.methods = methods  # non-reserved callables, param-first ('param plays self')
+        self.methods = methods  # callables whose reserved parameter names are CHANNELS (_bind_method)
         # init PRIMES from a real input value (a value of apply_input_spec —
         # its own channel, never a state_input field). Recorded at authoring
         # from the init signature; composite factories bubble it from members.
@@ -279,9 +333,10 @@ class NodeDef:
         # fall back to transitional derivation until every producer publishes.
         self._param_input_spec = param_input_spec
         self._state_input_spec = state_input_spec
+        self.tags = frozenset(tags)
 
     def __getattr__(self, name: str) -> Callable:
-        """Unbound method access: the raw param-first function."""
+        """Unbound method access: the raw function, channels explicit."""
         methods = object.__getattribute__(self, 'methods')
         if methods and name in methods:
             return methods[name]
@@ -332,14 +387,19 @@ class NodeDef:
         return False
 
     @property
-    def input(self) -> Any:   # SUGAR-MOVE
-        """SUGAR (shape reflection): the materialized input spec (zeros at the
-        shape), the convenience a shape-reading ctor reaches for —
-        `zeros_like(ndef.input)`. It exists for the ndef-offer sugar; the
-        contract has no ctor reading its own shape. Computed on the
-        fly (the def stores only the spec). Reading it with no spec resolved is
-        a loud, named error, never a silent None; use ndef.apply_input_spec
-        (which may be None) to test whether a spec exists."""
+    def input(self) -> Any:
+        """Convenience shape-reflection sugar.
+
+        Returns a dummy zero-filled PyTree (`jnp.zeros(shape, dtype)`) matching
+        the node's resolved `apply_input_spec`.
+
+        CRITICAL SEMANTICS:
+        - This property exists strictly as authoring sugar so constructors can write
+          `jnp.zeros_like(ndef.input)` or `jnp.ones_like(ndef.input)`.
+        - `ndef` carries ONLY static blueprint metadata and holds no real data.
+        - Zero arrays produced by `ndef.input` must NEVER be passed internally into
+          channels or arguments expecting real numerical data (`input`).
+        """
         if not _spec_resolved(self.apply_input_spec):
             raise TypeError(
                 f"{self.name}: reads its input shape (ndef.input) but no shape is "
@@ -405,11 +465,11 @@ class NodeDef:
 
     def build_state(self, param: Param, state_input: Struct = Struct(),
                     input: Any = None) -> State:
-        """Construct state from the param, ONE seed bundle, and optionally a
+        """Construct state from the param, `state_input` Struct, and optionally a
         real value of the node's INPUT — the contract entry. The
-        bundle is validated against state_input_spec (rng rides it as a raw
+        Struct is validated against state_input_spec (rng rides it as a raw
         key). `input` is its own channel, typed by apply_input_spec, never a
-        bundle field: the node's own input, supplied by the wiring (a
+        state_input field: the node's own input, supplied by the wiring (a
         composite's walk, scan's first element) or explicitly here, priming
         or shaping the state — and resolving the def's spec on the way in.
 
@@ -431,9 +491,14 @@ class NodeDef:
         missing = [k for k in spec.__keys__ if spec[k] is REQUIRED and k not in given]
         if missing:
             raise TypeError(f'{self.name}.build_state: missing required bundle fields {missing}')
-        if input is None and self.init_requires_input:
+        # an input-priming init is satisfiable two ways: a real value
+        # passed here (or threaded by a wiring), or a RESOLVED spec the
+        # init lift materializes as the fallback; only a def with
+        # neither must refuse
+        if (input is None and self.init_requires_input
+                and not _spec_resolved(self.apply_input_spec)):
             raise TypeError(f'{self.name} primes its state from a real input value; '
-                            'pass input=<value>')
+                            'pass input=<value> or declare an input spec')
         # a given input value resolves the def on the way in (fill or
         # validate), so a shape-reading init sees a resolved ndef
         nd = self if input is None else _resolve(self, input)
@@ -463,7 +528,8 @@ class NodeDef:
                       param_reads_shape=self.param_reads_shape,
                       init_reads_shape=self.init_reads_shape,
                       param_input_spec=self._param_input_spec,
-                      state_input_spec=self._state_input_spec)
+                      state_input_spec=self._state_input_spec,
+                      tags=self.tags)
         fields.update(changes)
         return type(self)(**fields)
 
@@ -507,20 +573,18 @@ class NodeDef:
 
 
 class Composite(NodeDef):
-    """A node whose functions produce and consume member-keyed Structs — the
-    output of serial/composite/parallel. Its NODE CONTRACT is identical to any
-    other node (the same param_fn/init_fn/apply_fn/specs/methods); Composite
-    adds only what the REWRITE layer needs — the member defs, a serial flag,
-    and a rebuild recipe — plus the member-keyed derivation of the input
-    specs, which is genuinely per-kind and so lives here, not on the base."""
+    """A node constructed from named member nodes. Its NODE CONTRACT is identical
+    to any other node (the same param_fn/init_fn/apply_fn/specs/methods); Composite
+    adds only what the REWRITE layer needs — the member defs and a rebuild recipe."""
 
     def __init__(self, name: str, param_fn: ParamFn, init_fn: InitFn, apply_fn: ApplyFn,
                  parametric: bool, cyclic: bool, members: dict[str, NodeDef],
                  apply_input_spec: Any | None = None, methods: dict[str, Callable] | None = None,
-                 serial: bool = False, rebuild: Callable | None = None,
+                 rebuild: Callable | None = None,
                  init_requires_input: bool | None = None,
                  param_reads_shape: bool | None = None, init_reads_shape: bool | None = None,
-                 param_input_spec: Any | None = None, state_input_spec: Any | None = None):
+                 param_input_spec: Any | None = None, state_input_spec: Any | None = None,
+                 tags: frozenset[str] = frozenset()):
         if init_requires_input is None:      # derived from members; _replace preserves
             init_requires_input = any(d.init_requires_input for d in members.values())
         if param_reads_shape is None:
@@ -530,16 +594,13 @@ class Composite(NodeDef):
         super().__init__(name, param_fn, init_fn, apply_fn, parametric, cyclic,
                          apply_input_spec, methods, init_requires_input=init_requires_input,
                          param_reads_shape=param_reads_shape, init_reads_shape=init_reads_shape,
-                         param_input_spec=param_input_spec, state_input_spec=state_input_spec)
+                         param_input_spec=param_input_spec, state_input_spec=state_input_spec,
+                         tags=tags)
         self.members = members
-        self.serial = serial
         self.rebuild = rebuild
 
     @property
     def param_input_spec(self) -> Any:
-        # stored when the factory published one (a composite with its OWN param
-        # ctor passes the ctor-derived spec); else the member-keyed tree with
-        # rng hoisted to the boundary
         if not self.parametric:
             return ()
         if self._param_input_spec is not None:
@@ -555,9 +616,14 @@ class Composite(NodeDef):
         return hoist_rng({nm: d.state_input_spec for nm, d in self.members.items()})
 
     def _replace(self, **changes: Any) -> NodeDef:
-        base = dict(members=self.members, serial=self.serial, rebuild=self.rebuild)
+        base = dict(members=self.members, rebuild=self.rebuild)
         base.update(changes)
         return super()._replace(**base)
+
+
+class Serial(Composite):
+    """A sequential pipeline composite where member outputs chain into subsequent inputs."""
+    pass
 
 
 class Node:
@@ -597,12 +663,12 @@ class Node:
         return self.ndef.parameterize(*args, **kwargs)
 
     def init(self, state_input: Any = None, /, *, input: Any = None, **fields) -> State:
-        """Construct this node's initial state: ONE seed bundle (or loose
+        """Construct this node's initial state: ONE `state_input` Struct (or loose
         fields packed into one), plus optionally a real value of the node's
-        INPUT — its own channel, typed by apply_input_spec, never a bundle
+        INPUT — its own channel, typed by apply_input_spec, never a state_input
         field. The value resolves/validates the def's spec on the way in."""
         if state_input is not None and fields:
-            raise TypeError('pass ONE seed bundle or loose fields, not both')
+            raise TypeError('pass ONE state_input Struct or loose fields, not both')
         bundle = state_input if state_input is not None else _as_bundle(fields)
         nd = self.ndef if input is None else _resolve(self.ndef, input)
         return nd.build_state(self.param, bundle, input=input)
@@ -664,15 +730,18 @@ class Node:
 
     def __getattr__(self, name: str) -> Any:
         """'Param plays self', readable from outside too: def methods
-        first (bound with this node's param as the first argument), then
-        param-field forwarding — a bound node reads like the object its
-        param tree describes, and the forwarding chains through nested
-        nodes (stack.current_ctrl.motor.resistance). Real Node attributes
+        first (channel-bound: param and ndef injected; a state or rng
+        channel is the caller's to pass by keyword, since a bare node
+        holds no live state and no stream), then param-field forwarding
+        — a bound node reads like the object its param tree describes,
+        and the forwarding chains through nested nodes
+        (stack.current_ctrl.motor.resistance). Real Node attributes
         (apply, init, param, name, ...) win over fields, and methods win
         over fields; node.param is always the unambiguous spelling."""
         methods = self.ndef.methods
         if methods and name in methods:
-            return partial(methods[name], self.param)
+            return _bind_method(methods[name],
+                                dict(param=lambda: self.param, ndef=lambda: self.ndef))
         param = object.__getattribute__(self, 'param')
         if isinstance(param, Struct) and name in param:
             return param[name]

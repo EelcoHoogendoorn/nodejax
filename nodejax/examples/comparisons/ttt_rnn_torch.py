@@ -30,6 +30,10 @@ rates are Parameters of the wrapper under mangled keys — registered
 names reserve '.' for the module tree — and the outer Adam reaches
 them through the ordinary parameters() walk.
 
+The exit is the same one tower_flax.py measures for nnx's streaming
+norm: mutable-object state leaves the object and rides transform
+boundaries as plain values, whichever object system it is.
+
 torch, like flax, is a reference-exhibit dependency: the file runs
 in any environment with torch installed.
 

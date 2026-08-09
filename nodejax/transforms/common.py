@@ -1,7 +1,18 @@
-"""Shared lifting helpers for the node transforms."""
+"""Shared lifting helpers for the node transforms.
+
+KNOWN GAP — spec propagation is partial. The mapped transforms below
+resolve the inner def from the outer carry at param and init time, but
+an outer with_input is not rewritten inward through wrapper transforms
+(scan, ttt): a shape-reading constructor inside such a tower cannot be
+resolved from outside, and the shape must be stated at construction
+instead. Closing this means each transform knowing how to transform a
+spec (strip the mapped axis, take the stream element, unwrap the
+sample bundle), the input-side mirror of what the transforms already
+do to params and state."""
 
 from __future__ import annotations
 
+from functools import wraps
 from typing import Any, Callable
 
 import jax
@@ -27,6 +38,20 @@ def _rewrap(ndef: NodeDef, param: Param) -> NodeDef | Node:
     """Rebind a transformed def, if the input was bound and the transform
     preserves the meaning of param."""
     return ndef if param is _UNBOUND else Node(ndef, param)
+
+
+def _over_bound(transform: Callable) -> Callable:
+    """ANNOTATION: this transform preserves the meaning of param, and
+    therefore lifts over bound nodes — a Node in, the transformed def
+    rebound to the same param out; the transform body speaks defs only.
+    A transform WITHOUT this annotation rewrites what param means
+    (ensemble stacks it per member, stack per layer) and refuses bound
+    input explicitly instead."""
+    @wraps(transform)
+    def wrapped(node, *args, **kwargs):
+        nd, param = _split(node)
+        return _rewrap(transform(nd, *args, **kwargs), param)
+    return wrapped
 
 
 def _tile_state(state: Any, n: int) -> Any:

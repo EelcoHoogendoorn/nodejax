@@ -12,12 +12,12 @@ from __future__ import annotations
 from nodejax import ambient, composite
 from nodejax.struct import Struct
 
-from nodejax.examples.actuator.blocks import blend_def, delay_def
+from nodejax.control import Blend, Delay
 from nodejax.examples.actuator.dq import DQ
 
 
 @ambient
-def model_estimator_def(dt, filter, model_fn=lambda filtered, previous, model: filtered):
+def ModelEstimator(dt, filter, model_fn=lambda filtered, previous, model: filtered):
     """Blend a filtered measurement with a model prediction.
 
     input fields: value (the measured value), model (whatever model_fn
@@ -25,7 +25,7 @@ def model_estimator_def(dt, filter, model_fn=lambda filtered, previous, model: f
     the default is the identity model, a pure measurement path. mix.tau
     is the model-influence time constant (0 = pure measurement); prev
     carries the previous blend (a DQ) for the model's prediction."""
-    members = dict(filter=filter, mix=blend_def(dt)(tau=0.0), prev=delay_def(DQ()))
+    members = dict(filter=filter, mix=Blend(dt)(tau=0.0), prev=Delay(DQ()))
 
     def apply(self, value, model=None):
         filtered = self.filter(value)

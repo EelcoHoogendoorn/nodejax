@@ -6,11 +6,12 @@ from nodejax.struct import Struct
 from nodejax.core import Node, NodeDef, _trivial_init_fn, _input_or_none, _resolve, _has_rng
 from nodejax.generic import _over_generic
 from nodejax.spec import materialize
-from nodejax.transforms.common import _split, _rewrap
+from nodejax.transforms.common import _over_bound
 
 
 @_over_generic
-def scan(node: NodeDef | Node, record: bool = False,
+@_over_bound
+def scan(nd: NodeDef, record: bool = False,
          persist: tuple[str, ...] | None = None) -> NodeDef | Node:
     """Internalize the state loop: a step-level cyclic node becomes a
     sequence-level non-cyclic one (CN -> N, PCN -> PN in lattice terms).
@@ -46,7 +47,6 @@ def scan(node: NodeDef | Node, record: bool = False,
     init, so batch-shaped fast state tolerates shape changes between
     applies). A callable merge(fresh, outer) -> episode-start state
     remains the general escape hatch."""
-    nd, param = _split(node)
     if not nd.cyclic:
         raise TypeError(f'scan requires a cyclic node, got {nd!r}')
 
@@ -85,8 +85,9 @@ def scan(node: NodeDef | Node, record: bool = False,
 
         out = NodeDef(f'scan({nd.name})', param_fn, _trivial_init_fn, apply_fn,
                       nd.parametric, cyclic=False,
-                      param_input_spec=nd.param_input_spec if nd.parametric else None)
-        return _rewrap(out, param)
+                      param_input_spec=nd.param_input_spec if nd.parametric else None,
+                      tags=nd.tags)
+        return out
 
     if callable(persist):
         merge = persist
@@ -141,5 +142,6 @@ def scan(node: NodeDef | Node, record: bool = False,
                   init_requires_input=nd.init_requires_input,
                   init_reads_shape=nd.init_reads_shape,
                   param_input_spec=nd.param_input_spec if nd.parametric else None,
-                  state_input_spec=nd.state_input_spec if nd.cyclic else None)
-    return _rewrap(out, param)
+                  state_input_spec=nd.state_input_spec if nd.cyclic else None,
+                  tags=nd.tags)
+    return out

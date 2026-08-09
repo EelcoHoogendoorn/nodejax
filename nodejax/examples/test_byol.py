@@ -5,7 +5,7 @@ learning with an EMA target network.
                                         |-> normalized MSE
     target:  aug(v2) -> enc_ema  -------'      (gradient-free side)
 
-THE TARGET NETWORK IS A LOW-PASS FILTER ON WEIGHTS: ema_def is a
+THE TARGET NETWORK IS A LOW-PASS FILTER ON WEIGHTS: EMA is a
 one-pole filter over an arbitrary pytree — the same node a simulation
 would put on a sensor signal — and feeding it the online encoder's
 param subtree IS the target network. The BYOL step is one user-land
@@ -61,17 +61,17 @@ bstd = node_def(lambda input: (input - jnp.mean(input, axis=0, keepdims=True))
                 / (jnp.std(input, axis=0, keepdims=True) + 1e-5), name='bstd')
 
 
-def enc_def() -> NodeDef:
+def Encoder() -> NodeDef:
     """Per-sample math only, so probe features are batch-independent."""
-    return serial(up=nn.linear(HIDDEN), ln=ln, act=nn.gelu,
-                  emb=nn.linear(EMBED))
+    return serial(up=nn.Linear(HIDDEN), ln=ln, act=nn.gelu,
+                  emb=nn.Linear(EMBED))
 
 
-def pred_def() -> NodeDef:
+def Predictor() -> NodeDef:
     """The predictor is train-time only, so batch standardization lives
     here — collapse pressure where it works, eval untouched."""
-    return serial(up=nn.linear(HIDDEN), bn=bstd, act=nn.gelu,
-                  down=nn.linear(EMBED))
+    return serial(up=nn.Linear(HIDDEN), bn=bstd, act=nn.gelu,
+                  down=nn.Linear(EMBED))
 
 
 def augment(key: jax.Array, batch: jax.Array) -> jax.Array:
@@ -96,7 +96,7 @@ def nmse(pred: jax.Array, target: jax.Array) -> jax.Array:
     return jnp.mean(jnp.sum((p - t) ** 2, axis=-1))
 
 
-def views_def(augment: Callable) -> Node:
+def Views(augment: Callable) -> Node:
     """Two independently augmented views of each batch. Owns the
     augmentation entropy as rng-as-state, auto-advanced per step."""
     def init(rng: jax.Array) -> Struct:
@@ -111,7 +111,7 @@ def views_def(augment: Callable) -> Node:
     return node_def(apply, init=init, name='views')
 
 
-def byol_def(enc: NodeDef, pred: NodeDef, augment: Callable,
+def BYOL(enc: NodeDef, pred: NodeDef, augment: Callable,
              opt: optax.GradientTransformation,
              loss: Callable = nmse, tau: float = TAU) -> Node:
     """The BYOL step, generic over encoder, predictor, augmentation and
@@ -121,8 +121,8 @@ def byol_def(enc: NodeDef, pred: NodeDef, augment: Callable,
     params. state = Struct(train=..., ema=..., views=...)."""
     online = serial(enc=enc, pred=pred)
     trainer = train_step(online, loss, opt)
-    smooth = nn.ema(tau)
-    views = views_def(augment)
+    smooth = nn.EMA(tau)
+    views = Views(augment)
 
     def init(rng: KeyStream, ndef) -> Struct:
         # a declared rng arrives as a KeyStream; keys cross the member
@@ -171,10 +171,10 @@ def test_byol_learns_a_representation():
     (With all 1000 labels a raw-pixel probe wins on digits — self-
     supervision buys label efficiency, not magic.)"""
     X_train, y_train, X_test, y_test = data()
-    enc = enc_def()
+    enc = Encoder()
     labels = 100
 
-    byol = byol_def(enc, pred_def(), augment, optax.adam(1e-3))
+    byol = BYOL(enc, Predictor(), augment, optax.adam(1e-3))
     state = byol.with_input(jnp.zeros((1, IMAGE * IMAGE))).init(rng=jax.random.PRNGKey(0))
     random_enc_params = state.train.model.enc      # the untrained encoder
 

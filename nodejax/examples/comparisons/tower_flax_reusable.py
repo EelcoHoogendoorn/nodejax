@@ -16,6 +16,15 @@ adaptation loop's exit from the module system, and the fact that a
 combinator's output is a function, which further lifted transforms
 cannot route state through the way they route modules.
 
+The streaming norm sharpens the carry finding from both sides: the
+generic `unroll` absorbs the new state kind UNCHANGED, because an
+opaque carry declares nothing and so excludes nothing — where the
+inline file's lifted-scan annotations had no working spelling at all —
+and the price is that the carry's structure, now two kinds of state
+deep with no names, is an undeclared contract every call site must
+know. Opacity is what saved the combinator and what keeps it from
+being an abstraction.
+
 Same model, task, and budget as `tower_nodejax.py`; matched losses.
 The meta level is packaged too, and `maml_fit` is the finding at its
 sharpest: the combinator is generic and reusable, and its interior is
@@ -32,7 +41,19 @@ import optax
 from flax import nnx
 
 from nodejax.examples.comparisons.tower_common import (
-    HIDDEN, LAYERS, STEPS, META_STEPS, INNER_LR, make_data, make_tasks)
+    HIDDEN, LAYERS, STEPS, META_STEPS, INNER_LR, MOMENTUM, make_data, make_tasks)
+
+
+def norm_step(stats, x):
+    m1, var = stats
+    out = (x - m1) / jnp.sqrt(var + 1e-5)
+    new_m1 = (1 - MOMENTUM) * m1 + MOMENTUM * x
+    new_var = (1 - MOMENTUM) * var + MOMENTUM * (x - m1) ** 2
+    return (new_m1, new_var), out
+
+
+def norm_init():
+    return (jnp.zeros(HIDDEN), jnp.ones(HIDDEN))
 
 
 # --- the reusable half: written once, generic over the cell protocol.
@@ -111,14 +132,21 @@ class Net(nnx.Module):
         self.ro_w = nnx.Param(0.1 * jax.random.normal(k2, (HIDDEN,)))
         self.ro_b = nnx.Param(jnp.zeros(()))
 
-    def step_carry(self, h_layers, x):
-        signal, h_new = scan_layers(self.cells, self.up_w[...] * x, h_layers)
-        return h_new, self.ro_w[...] @ signal + self.ro_b[...]
+    def step_carry(self, carry, x):
+        # the streaming norm's stats ride the carry, which the generic
+        # unroll treats as OPAQUE — the combinator survives the new
+        # state kind unchanged, precisely because it declares nothing
+        # about what it carries
+        h_layers, stats = carry
+        stats, signal = norm_step(stats, self.up_w[...] * x)
+        signal, h_new = scan_layers(self.cells, signal, h_layers)
+        return (h_new, stats), self.ro_w[...] @ signal + self.ro_b[...]
 
     def rollout(self, xs):
-        # the initial carry's shape has no declared home: every call site
-        # must know (LAYERS, HIDDEN)
-        _, ys = unroll(self, jnp.zeros((LAYERS, HIDDEN)), xs)
+        # the initial carry's shape has no declared home, and the norm
+        # widened it: every call site now knows (LAYERS, HIDDEN) AND the
+        # stats tuple's structure
+        _, ys = unroll(self, (jnp.zeros((LAYERS, HIDDEN)), norm_init()), xs)
         return ys
 
 

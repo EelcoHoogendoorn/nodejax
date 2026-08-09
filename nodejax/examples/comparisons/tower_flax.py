@@ -15,6 +15,13 @@ inner adaptation differentiates through functional (graphdef, state)
 splits, because a mutable module cannot be the carry of a scan whose
 body takes its gradient.
 
+The streaming norm measures the cost of ONE MORE KIND of state (its
+running stats are neither params nor a hidden block): on the nodejax
+side it is one pipe term, here it could not enter the module system at
+all — see the note above `norm_step` for the three spellings tried —
+so its stats thread the carries by hand, and every function between
+the step and the time scan names them.
+
 Run directly:  python -m nodejax.examples.comparisons.tower_flax
 """
 
@@ -25,7 +32,29 @@ import optax
 from flax import nnx
 
 from nodejax.examples.comparisons.tower_common import (
-    HIDDEN, LAYERS, STEPS, META_STEPS, INNER_LR, make_data, make_tasks)
+    HIDDEN, LAYERS, STEPS, META_STEPS, INNER_LR, MOMENTUM, make_data, make_tasks)
+
+
+# The streaming norm's stats are hand-threaded values, NOT module
+# state. The module-system spellings were tried and measured (flax
+# 0.12.8): a mutating Variable inside the broadcast time scan runs and
+# SILENTLY freezes (each step reads the original stats, nothing chains,
+# nothing writes back); declaring the stats a custom Variable kind
+# carried via nnx.StateAxes({RunStats: nnx.Carry, ...: None}) fails
+# with 'cannot extract graph node from different trace level', as does
+# carrying the whole module. So the norm's state exits the module
+# system entirely and rides the scan carry by hand, equinox-style.
+def norm_step(stats, x):
+    m1, var = stats
+    out = (x - m1) / jnp.sqrt(var + 1e-5)
+    new_m1 = (1 - MOMENTUM) * m1 + MOMENTUM * x
+    new_var = (1 - MOMENTUM) * var + MOMENTUM * (x - m1) ** 2
+    return (new_m1, new_var), out
+
+
+def norm_init():
+    return (jnp.zeros(HIDDEN), jnp.ones(HIDDEN))
+
 
 class Cell(nnx.Module):
     def __init__(self, rngs: nnx.Rngs):
@@ -54,24 +83,30 @@ class Net(nnx.Module):
         self.ro_w = nnx.Param(0.1 * jax.random.normal(k2, (HIDDEN,)))
         self.ro_b = nnx.Param(jnp.zeros(()))
 
-    def step(self, h_layers, x):
+    def step(self, carry, x):
+        # the hand-threaded slot: every level of carry plumbing between
+        # here and the time scan now names the stats explicitly
+        h_layers, stats = carry
+        stats, signal = norm_step(stats, self.up_w[...] * x)
+
         # depth scan: params per-layer (axis 0), the signal is the carry
         @nnx.scan(in_axes=(0, nnx.Carry, 0), out_axes=(nnx.Carry, 0))
         def depth(cells, signal, h):
             h_new, y = cells(h, signal)
             return y, h_new
 
-        signal, h_new = depth(self.cells, self.up_w[...] * x, h_layers)
-        return h_new, self.ro_w[...] @ signal + self.ro_b[...]
+        signal, h_new = depth(self.cells, signal, h_layers)
+        return (h_new, stats), self.ro_w[...] @ signal + self.ro_b[...]
 
     def rollout(self, xs):
-        # time scan: params broadcast, the hidden block is the carry
+        # time scan: params broadcast, the (hidden block, norm stats)
+        # tuple is the carry
         @nnx.scan(in_axes=(None, nnx.Carry, 0), out_axes=(nnx.Carry, 0))
-        def over_time(net, h_layers, x):
-            h_layers, y = net.step(h_layers, x)
-            return h_layers, y
+        def over_time(net, carry, x):
+            carry, y = net.step(carry, x)
+            return carry, y
 
-        _, ys = over_time(self, jnp.zeros((LAYERS, HIDDEN)), xs)
+        _, ys = over_time(self, (jnp.zeros((LAYERS, HIDDEN)), norm_init()), xs)
         return ys
 
 

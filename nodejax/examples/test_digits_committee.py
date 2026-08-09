@@ -42,29 +42,6 @@ BATCH, EPOCHS = 125, 30
 
 # --- blocks (all shapes input-resolved; no batch size anywhere) ---
 
-def whiten_def(momentum=0.1, eps=1e-2):
-    """ZCA input whitening: running mean and COVARIANCE as cyclic state;
-    the batch is decorrelated through the inverse matrix square root of
-    the running covariance. The eigh runs on STATE, which train_step
-    never differentiates — no gradients through degenerate spectra.
-    State shapes derive from the input value; eval = freezing the state."""
-    def init(ndef):
-        features = jax.tree.map(lambda x: x[0], ndef.input)      # one element of the batch
-        return Struct(mean=jnp.zeros_like(features),
-                      cov=jnp.eye(jnp.shape(features)[0], dtype=features.dtype))
-
-    def apply(state, input):
-        centered = input - jnp.mean(input, axis=0)
-        batch_cov = centered.T @ centered / input.shape[0]
-        new = Struct(mean=(1 - momentum) * state.mean + momentum * jnp.mean(input, axis=0),
-                     cov=(1 - momentum) * state.cov + momentum * batch_cov)
-        eigvals, eigvecs = jnp.linalg.eigh(state.cov)
-        zca = (eigvecs * (1.0 / jnp.sqrt(eigvals + eps))) @ eigvecs.T
-        return new, (input - state.mean) @ zca
-
-    return node_def(apply, init=init, name='whiten')
-
-
 def _inv_sqrt(cov, iters=5):
     """Newton-Schulz inverse matrix square root — smooth, no eigh."""
     eye = jnp.eye(cov.shape[-1], dtype=cov.dtype)
@@ -76,7 +53,7 @@ def _inv_sqrt(cov, iters=5):
     return z / jnp.sqrt(scale)
 
 
-def layer_whiten_def(momentum=0.05, eps=1e-2):
+def LayerWhiten(momentum=0.05, eps=1e-2):
     """Whitening INSIDE the stack as SLOW STATE, with a two-slot design:
     every read whitens with the FROZEN slot (fixed for the whole
     episode), every step accumulates into the STATS slot. Per-timestep
@@ -103,7 +80,7 @@ def layer_whiten_def(momentum=0.05, eps=1e-2):
     return node_def(apply, init=init, name='lwhiten')
 
 
-def rows_def():
+def rows():
     """(B, 64) image batch -> (8, B, 8) row sequence (time leading)."""
     def apply(input):
         batch_size = input.shape[0]
@@ -118,20 +95,20 @@ def build(drop_rate=0.25):
     inside one scope, no threading, no generic ceremony. In-shapes
     (row width, head fan-in) derive from the resolved input."""
     with ambient(hidden=HIDDEN, rate=drop_rate):
-        layer = layer_whiten_def() >> residual(nn.rnn())   # whiten IN the stack
-        cell = nn.linear(HIDDEN) >> stack(layer, n=LAYERS)
+        layer = LayerWhiten() >> residual(nn.RNN())   # whiten IN the stack
+        cell = nn.Linear(HIDDEN) >> stack(layer, n=LAYERS)
         # persist maps write slot <- read slot at episode start: whitening
         # stats carry themselves, the frozen read-copy refreshes from the
         # carried stats, everything unmatched (rnn hidden) re-inits fresh
         encoder = scan(ensemble(cell, n=MEMBERS),
                        persist={'frozen': 'stats', 'stats': 'stats'})
         return serial(
-            whiten=whiten_def(),
-            rows=rows_def(),
+            whiten=nn.Whiten(),
+            rows=rows(),
             encoder=encoder,
             last=node_def(lambda input: input[-1], name='last'),
-            drop=nn.dropout(),
-            head=nn.linear(10),
+            drop=nn.Dropout(),
+            head=nn.Linear(10),
             mix=node_def(lambda input: jnp.mean(input, axis=0), name='mix'),
         )
 
