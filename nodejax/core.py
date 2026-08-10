@@ -19,10 +19,15 @@ loose kwargs into a bundle as the one public sugar.
 
 This module is the only layer that executes. Everything else in the package
 constructs (authoring, generic) or rewrites (transforms, compose) these
-objects — which is what makes transforms and composition closed. Specs are
-stored metadata published by the producer that built the fns; the OUT specs
-are derived by eval_shape (spec.meta), and nothing consults specs at apply
-time.
+objects. CONTRACTS OPERATE STRICTLY ON CONTRACTS: node transforms,
+composition, and tree surgery (batch, scan, map_members, tree_freeze) operate
+on NodeDefs strictly via their 3 contract functions (param_fn, init_fn,
+apply_fn), never on Python signatures, self bindings, or authoring sugar
+parameters. Relying exclusively on the 3-function contract is the core
+guarantee that enables transforms and compositions to be 100% general over
+arbitrary models. Specs are stored metadata published by the producer that
+built the fns; the OUT specs are derived by eval_shape (spec.meta), and
+nothing consults specs at apply time.
 """
 
 from __future__ import annotations
@@ -43,8 +48,7 @@ if TYPE_CHECKING:
 class _Required:
     """Marker for a required input-bundle field: a constructor parameter with
     no default, whose value the caller must supply. Its shape/dtype is the
-    caller's to choose, so unknown until binding — hence a marker, not a spec
-    leaf."""
+    spec's concern; this is the requirement marker."""
     def __repr__(self) -> str:
         return 'REQUIRED'
 
@@ -79,7 +83,7 @@ def hoist_rng(subs: dict[str, Any]) -> Struct:
     composite has an rng requirement iff any member does, recorded once at its
     top level: the caller passes one key, and the composite splits it toward
     every member that declares the need. The member slots in the composite's
-    bundle carry the per-member recipe fields the caller supplies — keys are
+    bundle carry the per-member input fields the caller supplies — keys are
     the composite's to forward, so rng is not among them. Member defs and
     their own specs are untouched; this only derives the composite's. A
     deterministic composite has no rng field at all, so a passed key fails as
@@ -567,6 +571,23 @@ class NodeDef:
         """Node.scan with the param explicit and first."""
         return Node(self, param).scan(state, inputs)
 
+    @property
+    def selectable(self) -> dict[str, NodeDef]:
+        """The members a name-based selection can address. A leaf has none."""
+        return {}
+
+    def map_leaves(self, fn: Callable[[NodeDef], Any]) -> Any:
+        """Map fn over the LEAF defs under this one, building a tree that
+        matches the state's member nesting. A leaf answers for itself; the
+        structural kinds answer by descending. A node with no state answers
+        0 at every level, so the tree never claims structure the state does
+        not have."""
+        return fn(self) if self.cyclic else 0
+
+    def map_state(self, state: Any, fn: Callable[[NodeDef, Any], Any]) -> Any:
+        """Map fn(leaf_def, leaf_state) over matching def and state trees."""
+        return fn(self, state) if self.cyclic else state
+
     def __repr__(self) -> str:
         tags = 'P' * self.parametric + 'C' * self.cyclic
         return f'NodeDef({self.name}{":" + tags if tags else ""})'
@@ -575,10 +596,11 @@ class NodeDef:
 class Composite(NodeDef):
     """A node constructed from named member nodes. Its NODE CONTRACT is identical
     to any other node (the same param_fn/init_fn/apply_fn/specs/methods); Composite
-    adds only what the REWRITE layer needs — the member defs and a rebuild recipe."""
+    adds only what the REWRITE layer needs — the member defs and a rebuild constructor."""
 
     def __init__(self, name: str, param_fn: ParamFn, init_fn: InitFn, apply_fn: ApplyFn,
                  parametric: bool, cyclic: bool, members: dict[str, NodeDef],
+                 given: dict[str, Any] = {},
                  apply_input_spec: Any | None = None, methods: dict[str, Callable] | None = None,
                  rebuild: Callable | None = None,
                  init_requires_input: bool | None = None,
@@ -597,6 +619,7 @@ class Composite(NodeDef):
                          param_input_spec=param_input_spec, state_input_spec=state_input_spec,
                          tags=tags)
         self.members = members
+        self.given = given
         self.rebuild = rebuild
 
     @property
@@ -615,8 +638,23 @@ class Composite(NodeDef):
             return self._state_input_spec
         return hoist_rng({nm: d.state_input_spec for nm, d in self.members.items()})
 
+    @property
+    def selectable(self) -> dict[str, NodeDef]:
+        return self.members
+
+    def map_leaves(self, fn: Callable[[NodeDef], Any]) -> Any:
+        if not self.cyclic:
+            return 0
+        return Struct(**{nm: m.map_leaves(fn) for nm, m in self.members.items()})
+
+    def map_state(self, state: Any, fn: Callable[[NodeDef, Any], Any]) -> Any:
+        if not self.cyclic:
+            return state
+        return Struct(**{nm: m.map_state(state[nm], fn)
+                         for nm, m in self.members.items() if nm in state})
+
     def _replace(self, **changes: Any) -> NodeDef:
-        base = dict(members=self.members, rebuild=self.rebuild)
+        base = dict(members=self.members, given=self.given, rebuild=self.rebuild)
         base.update(changes)
         return super()._replace(**base)
 
@@ -624,6 +662,56 @@ class Composite(NodeDef):
 class Serial(Composite):
     """A sequential pipeline composite where member outputs chain into subsequent inputs."""
     pass
+
+
+class Wrapper(Composite):
+    """A node produced by a TRANSFORM of one other node: a composite with
+    exactly one member, `inner`.
+
+    Being a Composite is what makes it REWRITABLE — map_members, tree_freeze
+    and tree_detach reach it through the same rebuild recipe every composite
+    carries, with no special case at those call sites. A transform supplies
+    that recipe as a closure over its own arguments, since only the call site
+    knows them: rebuild={'inner': d} -> batch(d, n, axis).
+
+    It is TRANSPARENT in both directions that would otherwise leak the extra
+    level. The contract fns are the transform's own, so param and state keep
+    the wrapped node's shape and no 'inner' key appears in any tree; the
+    walks below skip straight to the wrapped def; and member lookup answers
+    with the wrapped node's members, so selecting a member by name passes
+    through the tower rather than finding only 'inner'.
+
+    Without it a wrapper is indistinguishable from a leaf and a walk stops at
+    the transform, answering a per-leaf question (which state slots a member
+    wants batched, which member a rewrite selects) once for the whole tower.
+    """
+
+    def __init__(self, *args: Any, inner: NodeDef | None = None, **kwargs: Any):
+        # inner names the single member on construction; _replace round-trips
+        # it through `members` like every other composite
+        if inner is not None:
+            kwargs.setdefault('members', {'inner': inner})
+        super().__init__(*args, **kwargs)
+
+    @property
+    def inner(self) -> NodeDef:
+        return self.members['inner']
+
+    @property
+    def selectable(self) -> dict[str, NodeDef]:
+        """What a name-based selection sees: the wrapped node's members, not
+        this wrapper's own single slot."""
+        return self.inner.selectable
+
+    def map_leaves(self, fn: Callable[[NodeDef], Any]) -> Any:
+        if not self.cyclic:                       # scan internalizes: no state left
+            return 0
+        return self.inner.map_leaves(fn)
+
+    def map_state(self, state: Any, fn: Callable[[NodeDef, Any], Any]) -> Any:
+        if not self.cyclic:
+            return state
+        return self.inner.map_state(state, fn)
 
 
 class Node:

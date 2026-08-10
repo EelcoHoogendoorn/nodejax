@@ -1,6 +1,11 @@
 """The SUGAR layer: authored functions with human signatures transform into
 the contract-shaped functions the NodeDef stores.
 
+Authoring sugar is strictly a producer. Once lifted, NodeDefs are defined 100%
+by their 3 contract functions (param_fn, init_fn, apply_fn). All downstream
+composition, transforms, and tree rewrites lean exclusively on the 3-function
+contract, independent of authoring signatures.
+
 Public API:
   - node_def(apply, param=..., init=...): Define a NodeDef from authored functions.
   - derive(parent, ...): Functional extension/derivation of an existing NodeDef.
@@ -48,17 +53,7 @@ def node_def(apply: Callable | None = None, *, param: ParamFn | None = None,
     apply is required: one of the fixed whole-`input` signatures
     (input) | (param, input) | (state, input) | (param, state, input), or
     leading param/self and state followed by trailing INPUT FIELDS, which the
-    lift unpacks from the input Struct by name (a trailing rng arrives as a
-    KeyStream).
-
-    param is the constructor of the node's param bundle: its signature IS
-    the declaration — each parameter a bundle field (required when it has no
-    default), published as param_input_spec. A parametric apply REQUIRES a
-    param constructor; an apply reading a field no constructor declares is
-    broken by definition. init is required iff apply takes state; its
-    signature declares the seed bundle the same way (state_input_spec).
-
-    `tags`: a set/tuple of local string tags for node classification.
+    sugar packs into a Struct bundle on the way in.
     """
     if apply is None:
         # decorator-with-arguments: @node_def(name=..., apply_input_spec=...)
@@ -68,21 +63,33 @@ def node_def(apply: Callable | None = None, *, param: ParamFn | None = None,
                        apply_input_spec=apply_input_spec, methods=methods, tags=tags)
 
     sig = tuple(inspect.signature(apply).parameters)
+    _no_var_params(apply, sig)
+    if param is not None:
+        _no_var_params(param, inspect.signature(param).parameters)
+    if init is not None:
+        _no_var_params(init, inspect.signature(init).parameters)
+
     lift = _apply_lift(apply, sig)
 
-    parametric = any(n in sig for n in _OBJECT_NAMES)
+    parametric = any(n in sig for n in _OBJECT_NAMES) or param is not None
     cyclic = 'state' in sig
 
-    if param is not None and not parametric:
-        raise TypeError('a param constructor was given, but apply does not take param')
     if parametric and param is None:
-        raise TypeError(f"'{name or apply.__name__}': apply takes param but declares no "
-                        'param constructor. A parametric node declares its param bundle '
-                        'with param=; there is no default that fabricates one from kwargs.')
+        raise TypeError(f"'{name or apply.__name__}' apply takes param, but no "
+                        'param constructor was given; supply param= or drop '
+                        'param from apply')
+    if param is not None and not parametric:
+        raise TypeError(f"'{name or apply.__name__}' was given a param= "
+                        'constructor, but apply takes no param; name param/self '
+                        'in apply or drop param=')
     if cyclic and init is None:
-        raise TypeError('apply takes state; an init function is required')
+        raise TypeError(f"'{name or apply.__name__}' apply takes state, but no "
+                        'init function was given; supply init= or drop state '
+                        'from apply')
     if init is not None and not cyclic:
-        raise TypeError('an init function was given, but apply does not take state')
+        raise TypeError(f"'{name or apply.__name__}' was given an init= "
+                        'function, but apply takes no state; name state in apply '
+                        'or drop init=')
 
     ndef = NodeDef(
         name=name or apply.__name__,

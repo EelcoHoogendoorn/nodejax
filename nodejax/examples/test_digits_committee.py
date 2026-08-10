@@ -2,24 +2,29 @@
 samples), end to end.
 
 Each 8x8 image is read as a sequence of 8 pixel rows. The model: input
-WHITENING (running mean and covariance, ZCA decorrelation, frozen state
-at eval), a committee of MEMBERS deep residual RNN encoders (a stack of
-LAYERS residual cells with per-member per-layer params and hidden
-state), whitening INSIDE the stack as slow state, recurrent state
-internalized per forward pass by a mid-pipe scan over the rows, dropout
-on the final hidden features (streaming rng-as-state: a new mask every
-train step by auto-advance, no key threading), a shared linear head,
-and a member-mean vote.
+WHITENING (running mean and covariance, ZCA decorrelation), a committee
+of MEMBERS deep residual RNN encoders (a stack of LAYERS normed residual
+cells with per-member per-layer params and hidden state), recurrent
+state internalized per forward pass by a mid-pipe scan over the rows,
+dropout on the final hidden features (streaming rng-as-state: a new mask
+every train step by auto-advance, no key threading), a shared linear
+head, and a member-mean vote.
 
-    whiten >> rows >> scan(ensemble(up >> stack(residual(rnn)))) >>
+    whiten >> rows >> scan(ensemble(up >> stack(norm >> residual(rnn)))) >>
         last >> drop >> head >> mix
 
-MODE: normalizer eval = freezing the state; dropout eval = the SAME
+Every block is written PER-SAMPLE and batch() adds the axis once, at the
+top: no hand-threaded batch dimension anywhere, and the moments the
+whitening needs are collectives over the named batch axis.
+
+MODE: normalizer eval = reusing the state; dropout eval = the SAME
 architecture built with rate=0 — a static — with the trained params
 bound into it. Param structure is identical across modes, so weights
-transfer by bind(). The in-stack whitening reads from a frozen slot
-refreshed at episode start by the scan's persist mapping, so eval
-logits are per-sample independent (asserted).
+transfer by bind(). Whitening is read-then-step, so a sample's logits do
+not depend on what else is in the eval batch (asserted).
+
+State REFRESH RATES are their own subject, in
+test_update_granularity.py.
 
 The training loop is also a node: train_step(model) scanned over the
 shuffled epoch stream. One key at parameterize splits into every member
@@ -33,7 +38,8 @@ import jax.numpy as jnp
 import optax
 from sklearn.datasets import load_digits
 
-from nodejax import NodeDef, node_def, serial, ensemble, stack, scan, residual, train_step, ambient, nn
+from nodejax import (NodeDef, node_def, serial, ensemble, stack, scan, residual,
+                     batch, train_step, tree_freeze, tree_filter, ambient, nn)
 from nodejax.struct import Struct
 
 HIDDEN, MEMBERS, LAYERS = 24, 3, 2
@@ -42,66 +48,25 @@ BATCH, EPOCHS = 125, 30
 
 # --- blocks (all shapes input-resolved; no batch size anywhere) ---
 
-def _inv_sqrt(cov, iters=5):
-    """Newton-Schulz inverse matrix square root — smooth, no eigh."""
-    eye = jnp.eye(cov.shape[-1], dtype=cov.dtype)
-    scale = jnp.trace(cov)
-    y, z = cov / scale, eye
-    for _ in range(iters):
-        t = 0.5 * (3.0 * eye - z @ y)
-        y, z = y @ t, t @ z
-    return z / jnp.sqrt(scale)
-
-
-def LayerWhiten(momentum=0.05, eps=1e-2):
-    """Whitening INSIDE the stack as SLOW STATE, with a two-slot design:
-    every read whitens with the FROZEN slot (fixed for the whole
-    episode), every step accumulates into the STATS slot. Per-timestep
-    read-then-step is not enough under a time scan — step 2 would read
-    stats already touched by step 1's batch — so freezing must be
-    per-EPISODE: scan's merge refreshes frozen := carried stats at
-    episode start. Output therefore depends on persisted state alone:
-    eval is per-sample independent, which the test asserts exactly."""
-    def init(ndef):
-        features = jax.tree.map(lambda x: x[0], ndef.input)
-        stats = Struct(mean=jnp.zeros_like(features),
-                       cov=jnp.eye(jnp.shape(features)[0], dtype=features.dtype))
-        return Struct(frozen=stats, stats=stats)
-
-    def apply(state, input):
-        eye = jnp.eye(input.shape[-1], dtype=input.dtype)
-        out = (input - state.frozen.mean) @ _inv_sqrt(state.frozen.cov + eps * eye)
-        centered = input - jnp.mean(input, axis=0)
-        batch_cov = centered.T @ centered / input.shape[0]
-        stats = Struct(mean=(1 - momentum) * state.stats.mean + momentum * jnp.mean(input, axis=0),
-                       cov=(1 - momentum) * state.stats.cov + momentum * batch_cov)
-        return Struct(frozen=state.frozen, stats=stats), out
-
-    return node_def(apply, init=init, name='lwhiten')
-
-
 def rows():
-    """(B, 64) image batch -> (8, B, 8) row sequence (time leading)."""
-    def apply(input):
-        batch_size = input.shape[0]
-        return jnp.swapaxes(jnp.reshape(input, (batch_size, 8, 8)), 0, 1)
-    return node_def(apply, name='rows')
+    """One 64-pixel image -> (8, 8): eight rows, time leading."""
+    return node_def(lambda input: jnp.reshape(input, (8, 8)), name='rows')
 
 
 def build(drop_rate=0.25):
-    """The full committee classifier from stock nn blocks plus the local
-    whitening nodes. The width and the mode knob are AMBIENT: declared
-    at the factories (@ambient), supplied once here — eager construction
-    inside one scope, no threading, no generic ceremony. In-shapes
+    """The committee classifier from stock nn blocks, written PER-SAMPLE:
+    one image in, ten logits out. The caller adds the batch axis with
+    batch(), and can reach the members first — which is how eval freezes
+    the whitening. The width and the mode knob are AMBIENT: declared at
+    the factories (@ambient), supplied once here, no threading. In-shapes
     (row width, head fan-in) derive from the resolved input."""
     with ambient(hidden=HIDDEN, rate=drop_rate):
-        layer = LayerWhiten() >> residual(nn.RNN())   # whiten IN the stack
+        layer = nn.LayerNorm() >> residual(nn.RNN())
         cell = nn.Linear(HIDDEN) >> stack(layer, n=LAYERS)
-        # persist maps write slot <- read slot at episode start: whitening
-        # stats carry themselves, the frozen read-copy refreshes from the
-        # carried stats, everything unmatched (rnn hidden) re-inits fresh
-        encoder = scan(ensemble(cell, n=MEMBERS),
-                       persist={'frozen': 'stats', 'stats': 'stats'})
+        # the recurrent carry is FAST state: internalized by this scan and
+        # re-initialized per forward pass, so nothing about one image's
+        # sequence leaks into the next
+        encoder = scan(ensemble(cell, n=MEMBERS))
         return serial(
             whiten=nn.Whiten(),
             rows=rows(),
@@ -134,11 +99,12 @@ def accuracy(logits, labels):
 
 def test_assembly():
     """One key -> every member/layer draw; state census matches the story:
-    whitening stats per feature, one dropout stream, nothing else."""
-    pipe = build()
+    whitening stats per feature (batch-invariant, so one copy), a dropout
+    stream per sample, nothing else."""
+    pipe = batch(build())
     model = pipe.with_input(jnp.zeros((BATCH, 64))).parameterize(rng=jax.random.PRNGKey(0))
 
-    wh = model.param.encoder.stack_lwhiten_res_rnn.res_rnn.wh
+    wh = model.param.encoder.stack_norm_res_rnn.res_rnn.wh
     assert wh.shape == (MEMBERS, LAYERS, HIDDEN, HIDDEN)
     assert not jnp.allclose(wh[0], wh[1])          # independent members
     assert not jnp.allclose(wh[0, 0], wh[0, 1])    # independent layers
@@ -147,18 +113,17 @@ def test_assembly():
     state = pipe.bind(model.param).with_input(X_train[:BATCH]).init(rng=jax.random.PRNGKey(1))
     assert state.whiten.mean.shape == (64,)        # input-resolved, no statics
     assert state.whiten.cov.shape == (64, 64)      # full covariance, not per-feature
-    # the encoder's SLOW state (per-member per-layer whitening stats)
-    # lives outside the time loop and persists across train steps
-    lw = state.encoder.stack_lwhiten_res_rnn.lwhiten
-    assert lw.stats.cov.shape == (MEMBERS, LAYERS, HIDDEN, HIDDEN)
-    assert state.drop.rng.shape == (2,)
+    # the recurrent carry is FAST state, internalized by the mid-pipe scan:
+    # it never appears out here at all
+    assert state.encoder == ()                  # an empty slot, no carry out here
+    assert state.drop.rng.shape == (BATCH, 2)   # an independent mask stream each
 
 
 def test_trains_on_real_digits():
     """End to end: train the committee on 1000 real digits, evaluate the
     rate=0 architecture with the SAME params and the frozen state."""
     X_train, y_train, X_test, y_test = data()
-    pipe = build(drop_rate=0.25)
+    pipe = batch(build(drop_rate=0.25))
     model = pipe.with_input(jnp.zeros((BATCH, 64))).parameterize(rng=jax.random.PRNGKey(0))
 
     # the epoch stream: shuffled batches, the training loop as one scan
@@ -182,21 +147,27 @@ def test_trains_on_real_digits():
     _, logits_b = trained.apply(advanced, X_train[:BATCH])
     assert not jnp.allclose(logits_a, logits_b)
 
-    # MODE SWITCH: same params, rate=0 architecture, frozen state
-    evaluator = build(drop_rate=0.0).bind(final.model)
-    _, logits1 = evaluator.apply(final.inner, X_test)
-    _, logits2 = evaluator.apply(final.inner, X_test)
+    # MODE SWITCH: the rate=0 architecture with the whitening moments FROZEN
+    # at what training left them, the same params bound in. Nothing stochastic
+    # and nothing accumulating remains, so the evaluator is NON-CYCLIC: a plain
+    # function of the images, with no state to thread, hold or re-init.
+    evaluator = batch(tree_freeze(build(drop_rate=0.0),
+                                  tree_filter(final.inner, 'whiten'))).bind(final.model)
+    assert not evaluator.ndef.cyclic
+
+    logits1 = evaluator.apply(X_test)
+    logits2 = evaluator.apply(X_test)
     assert jnp.allclose(logits1, logits2)                    # eval is deterministic
 
     # ...and TRULY frozen: read-then-step whitening means a sample's
     # logits do not depend on what else is in the eval batch
-    _, logits_solo = evaluator.apply(final.inner, X_test[:50])
+    logits_solo = evaluator.apply(X_test[:50])
     assert jnp.allclose(logits_solo, logits1[:50], atol=1e-5)
 
     test_accuracy = accuracy(logits1, y_test)
     assert test_accuracy > 0.85, test_accuracy
 
-    train_accuracy = accuracy(evaluator.apply(final.inner, X_train)[1], y_train)
+    train_accuracy = accuracy(evaluator.apply(X_train), y_train)
     n_weights = sum(leaf.size for leaf in jax.tree.leaves(final.model))
     print(f"\n[digits committee] {n_weights} weights | "
           f"loss {losses[0]:.3f} -> {losses[-1]:.3f} over {len(losses)} steps | "

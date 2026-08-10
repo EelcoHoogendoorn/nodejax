@@ -143,18 +143,17 @@ def _step_carry(d: NodeDef, param: Any, state: Any, carry: Any, nm: str) -> Any:
     return split_aux(out)[0]
 
 
-def _member_param(nm: str, d: NodeDef, recipe: Any, key: Any, input: Any = None):
-    """Construct one member's params through the entry: the recipe
-    sub-bundle (a Struct, or None for a slot the bundle leaves open) becomes
-    the member's bundle, extended with a split of the composite key when the
-    member's bundle spec wants rng. A call-site carry resolves the member's
-    def, and a shape-reading ctor reads it there — nothing reserved rides
-    the bundle. Returns (param, key), the key advanced iff a split was
-    routed."""
+def _member_param(nm: str, d: NodeDef, sub_bundle: Any, key: Any, input: Any = None):
+    """Construct one member's params through the entry: the sub-bundle
+    (a Struct, or None for a slot the bundle leaves open) becomes the member's
+    bundle, extended with a split of the composite key when the member's
+    bundle spec wants rng. A call-site carry resolves the member's def, and a
+    shape-reading ctor reads it there — nothing reserved rides the bundle.
+    Returns (param, key), the key advanced iff a split was routed."""
     if not d.parametric:
         return (), key
-    bundle = recipe if recipe is not None else Struct()
-    if key is not None and 'rng' in d.param_input_spec and 'rng' not in bundle:
+    bundle = sub_bundle if sub_bundle is not None else Struct()
+    if key is not None and (d.param_input_spec is None or _has_rng(d.param_input_spec)) and 'rng' not in bundle:
         key, sub_ = jax.random.split(key)
         bundle = bundle.replace(rng=sub_)
     if input is not None:
@@ -172,11 +171,11 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
     given = given or {}
 
     def param_fn(ndef, param_input=Struct()):
-        """The pipe's param constructor: member slots of the bundle
-        are recipes, a boundary rng field splits toward members whose bundles
-        want one, and — when the pipe's def carries an input spec — the carry
-        is threaded member by member (each member's def resolved to its own
-        upstream shape, each probed init+apply deriving the next member's).
+        """The pipe's param constructor: member slots of the bundle are
+        member param inputs, a boundary rng field splits toward members whose
+        bundles want one, and — when the pipe's def carries an input spec — the
+        carry is threaded member by member (each member's def resolved to its
+        own upstream shape, each probed init+apply deriving the next member's).
         Stored constructions (bound members at composition) fill slots the
         bundle leaves open."""
         key = param_input.rng if 'rng' in param_input else None
@@ -184,11 +183,11 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
         parts = {}
         for nm in names:
             d = defs[nm]
-            recipe = param_input[nm] if nm in param_input else None
-            if recipe is None and nm in given:
+            sub_bundle = param_input[nm] if nm in param_input else None
+            if sub_bundle is None and nm in given:
                 parts[nm] = given[nm]         # stored construction values
             else:
-                parts[nm], key = _member_param(nm, d, recipe, key, input=carry)
+                parts[nm], key = _member_param(nm, d, sub_bundle, key, input=carry)
             if carry is not None:             # the shape walk: derive the next shape
                 s = _resolve(d, carry).build_state(parts[nm], _probe_seed(d), input=carry)
                 carry = _step_carry(d, parts[nm], s, carry, nm)
@@ -265,6 +264,7 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
         parametric=any(d.parametric for d in defs.values()),
         cyclic=any(d.cyclic for d in defs.values()),
         members=dict(defs),
+        given=given,
         rebuild=lambda new: _serial(dict(new), given),
         # a pre-bound member's slot carries its stored param as the slot
         # DEFAULT: the spec states the optionality that binding created
@@ -423,7 +423,7 @@ def composite(apply: Callable, *, members: dict[str, GenericDef | NodeDef | Node
 
     def param_fn(ndef, param_input=Struct()):
         """The composite's param constructor: member slots are
-        recipes, a boundary rng splits toward members whose bundles want one.
+        sub-bundles, a boundary rng splits toward members whose bundles want one.
         When the def carries an input spec and the wiring is self-form, the
         carry threads through apply itself — each member's param built from
         the shape it receives at its own call site (the param-side twin of
@@ -480,6 +480,7 @@ def composite(apply: Callable, *, members: dict[str, GenericDef | NodeDef | Node
         parametric=parametric,
         cyclic=any(d.cyclic for d in defs.values()) or init is not None,
         members=dict(defs),
+        given=given,
         rebuild=_rebuild,
         apply_input_spec=(_hoist_apply_rng(declared)
                           if any(d.apply_takes_rng for d in defs.values())

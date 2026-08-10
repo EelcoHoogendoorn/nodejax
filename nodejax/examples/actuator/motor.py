@@ -128,11 +128,11 @@ def Electrical(dt, substeps=4):
     def init():
         return DQ(0.0, 0.0)
 
-    def apply(self, state, mechanical, v):
+    def apply(self, state, mechanical, voltage: DQ):
         h = dt / substeps
 
         def substep(_, i):
-            di_dt = current_feedforward(self, v, i, mechanical.velocity)
+            di_dt = current_feedforward(self, voltage, i, mechanical.velocity)
             return i + di_dt * h
 
         current = jax.lax.fori_loop(0, substeps, substep, state)
@@ -179,8 +179,8 @@ def BenchMotor(dt):
     mechanical state out."""
     members = dict(electrical=Electrical(dt), mechanical=Mechanical(dt))
 
-    def apply(self, v, load=0.0):
-        out = self.electrical(mechanical=self.state.mechanical, v=v)
+    def apply(self, voltage, load=0.0):
+        out = self.electrical(mechanical=self.state.mechanical, voltage=voltage)
         return self.mechanical(torque=out.torque, load=load)
 
     return composite(apply, members=members, name='bench_motor')

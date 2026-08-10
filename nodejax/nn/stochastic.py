@@ -15,13 +15,20 @@ def Dropout(rate: float):
     """Dropout as a streaming stochastic node: rate is a STATIC (mode =
     which architecture you built; eval is the rate=0 build with the same
     params bound), the mask stream is rng STATE — a new mask every train
-    step by auto-advance, no key threading."""
+    step by auto-advance, no key threading.
+
+    At rate=0 the node is the identity and declares NO state: the eval
+    build owes no key, and a model whose only stochastic member is
+    dropout comes out non-cyclic. A rate=0 node that still carried a key
+    would make the state shape depend on the batch it was built for,
+    which is a training concern leaking into evaluation."""
+    if rate == 0.0:
+        return node_def(lambda input: input, name='drop')
+
     def init(rng) -> Struct:
         return Struct(rng=rng)
 
     def apply(state: Struct, input: jax.Array) -> tuple[Struct, jax.Array]:
-        if rate == 0.0:
-            return state, input
         keep = jax.random.bernoulli(state.rng, 1.0 - rate, jnp.shape(input))
         return state, jnp.where(keep, input / (1.0 - rate), 0.0)
 

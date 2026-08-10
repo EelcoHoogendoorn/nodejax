@@ -158,8 +158,9 @@ def test_domain_randomized_tuning():
     fit = evaluate(pop)
     bounds = (start - 3.0, start + 3.0)
 
-    for _ in range(GENS):
-        key, ka, kb, kc, km, kj = jax.random.split(key, 6)
+    def de_step(carry, gen_key):
+        pop, fit = carry
+        ka, kb, kc, km, kj = jax.random.split(gen_key, 5)
         a, b, c = (jax.random.randint(kk, (P,), 0, P) for kk in (ka, kb, kc))
         mutant = pop[a] + F * (pop[b] - pop[c])
         cross = jax.random.uniform(km, (P, D)) < CR
@@ -167,8 +168,12 @@ def test_domain_randomized_tuning():
         trial = jnp.clip(jnp.where(cross, mutant, pop), *bounds)
         tfit = evaluate(trial)
         won = tfit < fit
-        pop = jnp.where(won[:, None], trial, pop)
-        fit = jnp.where(won, tfit, fit)
+        new_pop = jnp.where(won[:, None], trial, pop)
+        new_fit = jnp.where(won, tfit, fit)
+        return (new_pop, new_fit), None
+
+    gen_keys = jax.random.split(key, GENS)
+    (pop, fit), _ = jax.lax.scan(de_step, (pop, fit), gen_keys)
 
     best_vector = pop[jnp.argmin(fit)]
     best = jnp.min(fit)

@@ -1,7 +1,7 @@
 """Generic walks over the node and state trees.
 
 map_members rewrites a node tree bottom-up, rebuilding each composite
-from its recipe so flags recompute at every level — the reusable
+from its member defs so flags recompute at every level — the reusable
 structural-rewrite primitive. tree_filter prunes a state tree to the subtrees
 under matching member names, producing the sparse Struct that
 tree_freeze (and kin) consume.
@@ -19,11 +19,11 @@ from nodejax.transforms.common import _over_bound
 @_over_bound
 def map_members(nd: NodeDef, fn: Callable[[NodeDef], NodeDef]) -> NodeDef:
     """Rewrite a node tree bottom-up: apply fn to every node, members
-    first, rebuilding each composite from its recipe so cyclic/parametric
+    first, rebuilding each composite from its member defs so cyclic/parametric
     recompute at each level. fn: NodeDef -> NodeDef."""
     if isinstance(nd, Composite):
         if nd.rebuild is None:
-            raise TypeError(f"cannot rewrite '{nd.name}': no rebuild recipe")
+            raise TypeError(f"cannot rewrite '{nd.name}': no rebuild constructor")
         nd = nd.rebuild({k: map_members(m, fn) for k, m in nd.members.items()})
     return fn(nd)
 
@@ -59,9 +59,7 @@ def map_node_leaves(nd: NodeDef, fn: Callable[[NodeDef], Any]) -> Any:
     a matching Struct tree over composite member structures."""
     if not nd.cyclic:
         return 0
-    if isinstance(nd, Composite):
-        return Struct(**{nm: map_node_leaves(m, fn) for nm, m in nd.members.items()})
-    return fn(nd)
+    return nd.map_leaves(fn)
 
 
 def map_state_leaves(nd: NodeDef, state: Any, fn: Callable[[NodeDef, Any], Any]) -> Any:
@@ -69,7 +67,4 @@ def map_state_leaves(nd: NodeDef, state: Any, fn: Callable[[NodeDef, Any], Any])
     state tree hierarchies."""
     if not nd.cyclic or (isinstance(state, tuple) and len(state) == 0):
         return state
-    if isinstance(nd, Composite):
-        return Struct(**{nm: map_state_leaves(m, state[nm], fn)
-                         for nm, m in nd.members.items() if nm in state})
-    return fn(nd, state)
+    return nd.map_state(state, fn)

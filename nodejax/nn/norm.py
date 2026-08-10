@@ -57,26 +57,30 @@ def BatchNorm(momentum: float, eps: float = 1e-5, axis: str = 'batch'):
 
 
 @ambient
-def Whiten(momentum: float = 0.1, eps: float = 1e-2):
-    """ZCA input whitening: running mean and COVARIANCE as cyclic state;
-    the batch is decorrelated through the inverse matrix square root of
-    the running covariance."""
-    def init(ndef):
+def Whiten(momentum: float = 0.1, eps: float = 1e-2, axis: str = 'batch'):
+    """ZCA input whitening written per-sample, nn's own convention: the
+    moments are collectives over the NAMED batch axis (lax.pmean over
+    `axis`, 'batch' by the reserved convention), so an enclosing batch()
+    binds the name. Decorrelates by the RUNNING moments carried as state,
+    through the inverse matrix square root of the running covariance, then
+    folds the axis moments in; every element computes the same pooled
+    moments, so the per-element state copies agree (replicated, never
+    divergent). Eval is freezing the state, as ever."""
+    def init(ndef) -> Struct:
         features = ndef.input
-        if features.ndim > 1:
-            features = features[0]
         return Struct(mean=jnp.zeros_like(features),
                       cov=jnp.eye(features.shape[-1], dtype=features.dtype))
 
-    def apply(state, input):
+    def apply(state: Struct, input: jax.Array) -> tuple[Struct, jax.Array]:
         eigvals, eigvecs = jnp.linalg.eigh(state.cov)
         inv_sqrt = (eigvecs * (1.0 / jnp.sqrt(jnp.maximum(eigvals, 0.0) + eps))) @ eigvecs.T
         whitened = (input - state.mean) @ inv_sqrt
 
-        centered = input - jnp.mean(input, axis=0)
-        batch_cov = centered.T @ centered / input.shape[0]
-        new = Struct(mean=(1 - momentum) * state.mean + momentum * jnp.mean(input, axis=0),
-                     cov=(1 - momentum) * state.cov + momentum * batch_cov)
+        m = jax.lax.pmean(input, axis)
+        centered = input - m
+        cov = jax.lax.pmean(jnp.outer(centered, centered), axis)
+        new = Struct(mean=(1 - momentum) * state.mean + momentum * m,
+                     cov=(1 - momentum) * state.cov + momentum * cov)
         return new, whitened
 
     return node_def(apply, init=init, name='whiten', tags={'single_batch_state'})

@@ -36,7 +36,7 @@ init  : (params, state_input)   -> state
 apply : (params, state, input)  -> (state, output)
 ```
 
-The three slots are binding times, and that is the organizing idea: statics bind at construction, params bind at `parameterize` and then hold still across calls, state evolves across steps within a run, input arrives fresh per call. A component is defined by which slots it uses, and the degenerate forms are first-class: a plant with no params, a layer with no state, a pure function with neither. Every node still has all three slots conceptually, which is what keeps every code path uniform.
+The three contract slots are binding times, and that is the organizing idea: statics bind at construction, params bind at `parameterize` and then hold still across calls, state evolves across steps within a run, input arrives fresh per call. A component is defined by which slots it uses, and the degenerate forms are first-class: a plant with no params, a layer with no state, a pure function with neither. Every node still has all three slots conceptually, which is what keeps every code path uniform.
 
 Nodes compose into nodes (`>>`, `serial`, `composite`), and node transforms (`batch`, `ensemble`, `scan`, `train_step`) apply to any node and compose with each other. The rest of this handbook elaborates the four quadrants of that picture.
 
@@ -55,11 +55,34 @@ The point of composition is closure: putting nodes together yields a node, with 
 
 **The HAS-A Rule**: Every sub-component relationship in NodeJax MUST be registered via `members=dict(...)` (in `composite`, `serial`, or `parallel`). Privately closing over sub-nodes in Python variables is an anti-pattern that bypasses NodeJax's core mechanisms—disabling static specialization (`GenericDef`), nested parameter/state `Struct` composition, RNG key splitting, shape inference, and structural reflection/surgery (`map_members`, `freeze_by_path`).
 
-The section covers: wires as bundles; member naming, automatic suffixes included; `parallel` for side-by-side strands; the aux channel, a second output riding alongside the wire for losses and diagnostics, with `split_aux` and `taps`; and what flattens across `>>` versus what stays atomic.
+### The Leaf vs. Composite Contract
+
+NodeJax enforces a strict, rigid distinction between **Leaf** nodes and **Composite** nodes:
+
+- **Leaf Nodes (`NodeDef` via `node_def`)**:
+  - Own raw leaf array math (`apply`), parameter initializers (`param`), and state seeding (`init`).
+  - Authored functions receive the `self` binding (`_LeafStep`) exposing `self.param`, `self.state`, `self.rng` (`KeyStream`), `self.aux(...)`, and bound methods.
+  - Contain no child members of their own.
+
+- **Composite Nodes (`Composite`, `Serial`, `parallel`, etc.)**:
+  - Contain **no raw math or user computation functions of their own**.
+  - Behavior is 100% structural composition over registered `self.members`.
+  - The member hierarchy recurs across **all 4 structural spaces**:
+    1. **`param`**: Member parameter pytrees (`param.member_a`, `param.member_b`).
+    2. **`state`**: Member state pytrees (`state.member_a`, `state.member_b`).
+    3. **`aux`**: Member auxiliary outputs (`aux.member_a`, `aux.member_b`).
+    4. **`statics` & `specs`**: Member static configuration trees in generics (`statics.member_a...`) and bundle specs (`param_input_spec.member_a...`, `state_input_spec.member_a...`), with boundary `rng` hoisted to the top level.
+  - **Tree Reconstruction (`rebuild`)**: Every `Composite` carries a `rebuild` constructor closure (`Callable[[dict[str, NodeDef]], NodeDef]`) that preserves pre-bound `given` parameters. Generic tree transforms (`map_members`, `tree_freeze`) call `nd.rebuild(new_members)` to reconstruct modified composites bottom-up, keeping derived specs, statefulness, and RNG routing sound without altering authoring syntax or core contracts.
+
+By forbidding "hybrid" nodes (nodes that attempt to perform custom array calculations while simultaneously holding child sub-nodes), NodeJax ensures parameter hierarchies, RNG routing, and state transformations remain 100% deterministic and predictable at any depth.
+
+The section covers: wires as bundles; member naming, automatic suffixes included; `parallel` for side-by-side strands; the `aux` channel (imperative `self.sow(...)` and explicit `Aux` returns, collected into an `Aux` tree matching the member hierarchy and transformed by `batch`/`stack`/`scan` with leading axes); `taps`; and what flattens across `>>` versus what stays atomic.
 
 ## 4. Node transforms
 
-A node transform is a function from node to node: it consumes the three contract functions plus stored metadata and produces a new triple. Because every node declares which tree is params and which is state, a transform acts on ROLES rather than on any particular model: `batch` shares params and maps state per element because the roles say so, `ensemble` maps params per member, `scan` carries state over an axis. The deep transforms go further and move data BETWEEN roles: `train_step` demotes params to state (training is what that means), `ttt` does it per step, a feedback loop moves output into input. Each transform is written once, in a few dozen lines against the contract alone, is generic over every node, and returns a node, so transforms compose with each other and with everything else.
+A node transform is a function from node to node: it consumes the three contract functions plus stored metadata and produces a new triple. **Contracts operate strictly on contracts**: transforms (`batch`, `scan`, `tree_freeze`, `map_members`) operate on `NodeDef`s via their 3 contract functions (`param_fn`, `init_fn`, `apply_fn`), never on Python signatures, `self` bindings, or authoring sugar parameters. Leaning exclusively on the 3-function contract is the fundamental guarantee that enables transforms and compositions to be 100% general over arbitrary models.
+
+Because every node declares which tree is params and which is state, a transform acts on ROLES rather than on any particular model: `batch` shares params and maps state per element because the roles say so, `ensemble` maps params per member, `scan` carries state over an axis. The deep transforms go further and move data BETWEEN roles: `train_step` demotes params to state (training is what that means), `ttt` does it per step, a feedback loop moves output into input. Each transform is written once, in a few dozen lines against the contract alone, is generic over every node, and returns a node, so transforms compose with each other and with everything else.
 
 The section covers, one paragraph each: the axis family (batch, ensemble, stack, repeat), scan with persist and rng diversion, train_step, finetune, metasgd, ttt with reconstruction and the data-assembly doctrine, tie, freeze and detach, externalize, at, taps, residual.
 
@@ -109,7 +132,7 @@ The section covers: the three input bundles (param_input, state_input, apply inp
 
 ## 12. Authoring sugar and reserved names
 
-The sugar has one job: turn the natural Python function you want to write into the contract-form function the def stores. It works by reading your signature, and a handful of reserved names act as delivery channels rather than bundle fields: `param`, `state`, `input`, `ndef`, `rng`, each delivering its thing in each of the three function kinds. Every free name is a bundle field, defaults make fields optional, and `*args`/`**kwargs` are definition-time errors, because the signature is the source of truth and an unreadable signature declares nothing. `self` is reserved too but is no data channel: it is the composite sugar's object view, covered in its own section. Everything the sugar produces you could write by hand against the raw contract; sugar is strictly a producer, never a requirement.
+The sugar has one job: turn the natural Python function you want to write into the contract-form function the def stores. It works by reading your signature, and a handful of reserved names act as delivery channels rather than bundle fields: `param`, `state`, `input`, `ndef`, `rng`, each delivering its thing in each of the three function kinds. Every free name is a bundle field, defaults make fields optional, and `*args`/`**kwargs` are definition-time errors, because the signature is the source of truth and an unreadable signature declares nothing. `self` is reserved too: it delivers the node step context (`_LeafStep` in leaves, `_Wired` in composites), exposing member calls, parameters/state, and `self.sow(**kwargs)` for emitting auxiliary metrics and losses. Everything the sugar produces you could write by hand against the raw contract; sugar is strictly a producer, never a requirement.
 
 ## 13. ndef: the def, delivered
 
@@ -214,13 +237,13 @@ The deferred-construction stage: composing factories before their statics are kn
 
 ## 18. Writing your own wrapper
 
-The escape hatch is the public surface: every transform in the library consumes the three functions plus stored metadata and produces the same, so when you outgrow the provided combinators you write the same kind of function the library's own transforms are. The recurring pattern in ambitious wrappers is channel crossing: a trainer carries params as state, ttt does it per step, byol binds weights from a sibling's state. The recipe that keeps a wrapper well-behaved: seeds nested under slots mirroring your state fields, boundary rng via `hoist_rng`, and computed specs declared to `derive` or `node_def` rather than guessed from a signature.
+The escape hatch is the public surface: every transform in the library consumes the three functions plus stored metadata and produces the same, so when you outgrow the provided combinators you write the same kind of function the library's own transforms are. The recurring pattern in ambitious wrappers is channel crossing: a trainer carries params as state, ttt does it per step, byol binds weights from a sibling's state. The pattern that keeps a wrapper well-behaved: seeds nested under slots mirroring your state fields, boundary rng via `hoist_rng`, and computed specs declared to `derive` or `node_def` rather than guessed from a signature.
 
 The section covers: when to be a Composite (member-keyed trees, channels intact) and when to be a leaf, with worked wrappers from the examples.
 
 ## 19. Structural rewriting
 
-Beyond transforming behavior, you can rewrite structure: the def tree is data too. `map_members` rebuilds a composition bottom-up through each composite's rebuild recipe; `tree_freeze`, `tree_detach`, and `tree_filter` select members by name or spec, and a selector that matches nothing raises, never a silent identity. Composites are transparent to these walks; transform-produced defs and hand-wired leaves are opaque, and opacity is sometimes the right answer, since a batched pipe's trees genuinely are not member-keyed. (unsettled: pass-through rebuild for the axis transforms.)
+Beyond transforming behavior, you can rewrite structure: the def tree is data too. `map_members` rebuilds a composition bottom-up through each composite's rebuild constructor; `tree_freeze`, `tree_detach`, and `tree_filter` select members by name or spec, and a selector that matches nothing raises, never a silent identity. Composites are transparent to these walks; transform-produced defs and hand-wired leaves are opaque, and opacity is sometimes the right answer, since a batched pipe's trees genuinely are not member-keyed. (unsettled: pass-through rebuild for the axis transforms.)
 
 ## 20. Errors and the loudness doctrine
 

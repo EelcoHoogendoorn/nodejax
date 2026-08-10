@@ -51,13 +51,13 @@ def test_pid_core_is_signal_polymorphic():
 def test_stiction_holds_the_rotor():
     """Bench fidelity: below the mechanism's static-torque threshold the
     rotor sticks; zero the threshold and the same drive spins it."""
-    drive = Struct(v=DQ(jnp.zeros(400), jnp.full(400, 0.1)), load=jnp.zeros(400))
+    drive = Struct(voltage=DQ(jnp.zeros(400), jnp.full(400, 0.1)), load=jnp.zeros(400))
 
     def bench(torque_static):
         # the electrical slot is absent: it constructs from its defaults
         return scan(BenchMotor(DT)).parameterize(
             mechanical=Struct(inertia=0.1, friction=1e-3,
-                              torque_static=torque_static))
+                               torque_static=torque_static))
 
     assert jnp.all(bench(2.0).apply(drive).velocity == 0.0)
     assert bench(0.0).apply(drive).velocity[-1] > 0.0
@@ -68,7 +68,7 @@ def test_recorded_rollout():
     Simulation.run convention as a stock transform (keyless plants)."""
     seq = scan(BenchMotor(DT), record=True).parameterize(
         mechanical=Struct(inertia=0.1, friction=1e-3))
-    drive = Struct(v=DQ(jnp.zeros(300), jnp.full(300, 1.0)), load=jnp.zeros(300))
+    drive = Struct(voltage=DQ(jnp.zeros(300), jnp.full(300, 1.0)), load=jnp.zeros(300))
     ys = seq.apply(drive)
 
     assert ys.state.mechanical.velocity.shape == (300,)

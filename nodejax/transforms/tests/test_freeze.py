@@ -1,8 +1,8 @@
 """freeze / tree_freeze / map_members — structural rewrites over the def
-tree, resting on the reconstructable-def recipe.
+tree, resting on composite member defs.
 
 The models are stock nn blocks: Linear for the param-carrying members,
-Whiten for a member whose state is all it owns, RNN for a live cyclic
+EMA for a member whose state is all it owns, RNN for a live cyclic
 member that must survive a partial freeze.
 """
 import jax
@@ -17,7 +17,7 @@ X = jax.random.normal(jax.random.PRNGKey(1), (8, 4))
 
 
 def _pipe():
-    snet = nn.Linear(4) >> nn.Whiten(0.1) >> nn.Linear(4)
+    snet = nn.Linear(4) >> nn.EMA(0.1) >> nn.Linear(4)
     model = snet.with_input(X).parameterize(rng=jax.random.PRNGKey(0))
     state = model.init()
     _, ref = model.apply(state, X)
@@ -35,7 +35,7 @@ def test_freeze_whole_node_is_noncyclic_and_faithful():
 
 def test_tree_freeze_propagates_cyclicity():
     snet, model, state, ref = _pipe()
-    tf = tree_freeze(model, tree_filter(state, 'whiten'))
+    tf = tree_freeze(model, tree_filter(state, 'ema'))
     # the only stateful member froze, so the pipe recomputes to non-cyclic
     assert not tf.ndef.cyclic
     assert jnp.allclose(tf.apply(X), ref)
@@ -51,10 +51,10 @@ def test_tree_freeze_full_state_equals_freeze():
 
 def test_tree_freeze_partial_stays_cyclic():
     # two stateful members; freeze one, the pipe must stay cyclic
-    snet = nn.Linear(4) >> nn.Whiten(0.1) >> nn.Whiten(0.05)
+    snet = nn.Linear(4) >> nn.EMA(0.1) >> nn.EMA(0.05)
     model = snet.with_input(X).parameterize(rng=jax.random.PRNGKey(0))
     state = model.init()
-    frozen_all = tree_freeze(model, tree_filter(state, 'whiten'))
+    frozen_all = tree_freeze(model, tree_filter(state, 'ema'))
     assert not frozen_all.ndef.cyclic             # both froze -> non-cyclic
     # a filter matching nothing is a loud miss, never an empty spec
     import pytest
@@ -63,44 +63,40 @@ def test_tree_freeze_partial_stays_cyclic():
 
 
 def test_freeze_removes_state_slots():
-    snet, model, state, ref = _pipe()             # Linear >> Whiten >> Linear
-    assert len(jax.tree.leaves(state)) > 0        # the whitening mean/cov
+    snet, model, state, ref = _pipe()             # Linear >> EMA >> Linear
+    assert len(jax.tree.leaves(state)) > 0        # the ema's smoothed copy
 
     # whole freeze: no state slot survives at all
     fz = freeze(model, state)
     assert jax.tree.leaves(fz.init()) == []
 
     # tree_freeze the only stateful member: its slots vanish, pipe non-cyclic
-    tf = tree_freeze(model, tree_filter(state, 'whiten'))
+    tf = tree_freeze(model, tree_filter(state, 'ema'))
     assert not tf.ndef.cyclic
     assert jax.tree.leaves(tf.with_input(X).init()) == []
 
 
 def test_tree_freeze_partial_drops_only_frozen_slots():
-    # Whiten (frozen) + RNN (live): the whitening slots go, the RNN state
+    # EMA (frozen) + RNN (live): the smoothing slots go, the RNN state
     # stays, and the model stays cyclic
-    snet = nn.Linear(4) >> nn.Whiten(0.1) >> nn.RNN(4)
+    snet = nn.Linear(4) >> nn.EMA(0.1) >> nn.RNN(4)
     model = snet.with_input(X).parameterize(rng=jax.random.PRNGKey(0))
     state = model.init()
     n_before = len(jax.tree.leaves(state))
 
-    tf = tree_freeze(model, tree_filter(state, 'whiten'))
+    tf = tree_freeze(model, tree_filter(state, 'ema'))
     assert tf.ndef.cyclic                         # the RNN is still live
     after = tf.with_input(X).init()
     n_after = len(jax.tree.leaves(after))
-    assert 0 < n_after < n_before                 # whitening slots dropped, RNN kept
-    # concretely: no mean/cov left, but the RNN hidden state is there
-    names = {p[-1].name if hasattr(p[-1], 'name') else p[-1]
-             for p, _ in jax.tree_util.tree_flatten_with_path(after)[0]}
-    assert 'mean' not in names and 'cov' not in names
+    assert 0 < n_after < n_before                 # ema slots dropped, RNN kept
 
 
 def test_tree_freeze_hand_built_sparse_spec():
     # freeze one node by hand: just the key you want — no mirror, no filter
-    snet = nn.Linear(4) >> nn.Whiten(0.1) >> nn.RNN(4)
+    snet = nn.Linear(4) >> nn.EMA(0.1) >> nn.RNN(4)
     model = snet.with_input(X).parameterize(rng=jax.random.PRNGKey(0))
     state = model.init()
-    tf = tree_freeze(model, Struct(whiten=state.whiten))
+    tf = tree_freeze(model, Struct(ema=state.ema))
     assert tf.ndef.cyclic                          # the RNN is still live
     after = tf.with_input(X).init()
     assert 0 < len(jax.tree.leaves(after)) < len(jax.tree.leaves(state))

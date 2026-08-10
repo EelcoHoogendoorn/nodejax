@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 import jax
 
+from nodejax.struct import Struct
+
 PyTree = Any
 Param = PyTree
 State = PyTree
@@ -22,3 +24,4 @@ ApplyFn = Callable[[Param, State, Input], tuple[State, Output]]
 LossFn = Callable[[Output, PyTree], jax.Array]            # (output, target) -> scalar loss
 
 StaticTree = dict[str, Any]  # nested static kwargs, keyed by pipe member name
+

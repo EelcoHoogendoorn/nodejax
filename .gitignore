@@ -8,6 +8,8 @@ dist/
 *.egg-info/
 build/
 .idea/
+.vscode/
+CLAUDE.md
 
 # local only, never published
 scratch/

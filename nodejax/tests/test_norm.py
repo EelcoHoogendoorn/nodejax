@@ -141,7 +141,9 @@ def test_train_linear_norm():
 
 
 def test_nn_whiten():
-    """Verify nn.Whiten computes running covariance as single_batch_state."""
+    """Whiten is per-sample under the named axis, exactly as BatchNorm is:
+    batch() binds the name, the moments are collectives over it, and the
+    single_batch_state tag keeps one unbatched copy of the running stats."""
     x = jnp.array([[1.0, 2.0], [3.0, 4.0]])
     node = batch(nn.Whiten(momentum=0.1)).with_input(jnp.zeros_like(x))
     state = node.init(input=x)

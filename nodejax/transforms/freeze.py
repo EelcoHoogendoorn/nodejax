@@ -23,44 +23,44 @@ import jax
 
 from nodejax.struct import Struct
 from nodejax.core import Node, NodeDef, Composite, _trivial_init_fn
-from nodejax.transforms.common import _over_bound
+from nodejax.transforms.common import _over_bound, _transform_def
 
 
-def _Freeze(nd: NodeDef, state) -> NodeDef:
+def _Freeze(node_def: NodeDef, state) -> NodeDef:
     def apply(p, _, input):
-        _, out = nd.apply_fn(p, state, input)
+        _, out = node_def.apply_fn(p, state, input)
         return (), out
 
-    return NodeDef(f'freeze({nd.name})', nd._param_impl, _trivial_init_fn, apply,
-                   nd.parametric, cyclic=False,
-                   param_input_spec=nd.param_input_spec if nd.parametric else None,
-                   tags=nd.tags)
+    return _transform_def(
+        node_def,
+        name=f'freeze({node_def.name})',
+        init_fn=_trivial_init_fn,
+        apply_fn=apply,
+        cyclic=False,
+    )
 
 
 @_over_bound
-def freeze(nd: NodeDef, state) -> NodeDef:
+def freeze(node_def: NodeDef, state) -> NodeDef:
     """Hold a node's whole state fixed: the result applies with `state`,
     discards the returned update, and is non-cyclic. Params unchanged."""
-    return _Freeze(nd, state)
+    return _Freeze(node_def, state)
 
 
 @_over_bound
-def detach(nd: NodeDef) -> NodeDef:
+def detach(node_def: NodeDef) -> NodeDef:
     """Stop gradient through a node's params: training leaves its weights
     fixed (they receive zero gradient), state and behaviour otherwise
     unchanged."""
 
     def apply(p, s, i):
-        return nd.apply_fn(jax.lax.stop_gradient(p), s, i)
+        return node_def.apply_fn(jax.lax.stop_gradient(p), s, i)
 
-    detached = NodeDef(f'detach({nd.name})', nd._param_impl, nd._init_impl, apply,
-                       nd.parametric, nd.cyclic,
-                       init_requires_input=nd.init_requires_input,
-                       init_reads_shape=nd.init_reads_shape,
-                       param_input_spec=nd.param_input_spec if nd.parametric else None,
-                       state_input_spec=nd.state_input_spec if nd.cyclic else None,
-                       tags=nd.tags)
-    return detached
+    return _transform_def(
+        node_def,
+        name=f'detach({node_def.name})',
+        apply_fn=apply,
+    )
 
 
 @_over_bound

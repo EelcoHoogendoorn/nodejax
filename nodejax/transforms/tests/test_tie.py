@@ -81,7 +81,7 @@ def test_gradients_accumulate_across_uses():
     w = jnp.array([0.5, -1.0, 2.0])
     x = jnp.array([1.0, 2.0, 3.0])
 
-    # ready-made param pytrees enter via bind; bundles carry recipes
+    # ready-made param pytrees enter via bind; bundles carry param inputs
     tied = tied_autoencoder().bind(Struct(enc=Struct(weight=w), dec=()))
     untied = (Encoder(K) >> Decoder(K)).bind(
         Struct(enc=Struct(weight=w), dec=Struct(weight=w)))

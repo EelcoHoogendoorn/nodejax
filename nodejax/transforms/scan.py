@@ -6,12 +6,12 @@ from nodejax.struct import Struct
 from nodejax.core import Node, NodeDef, _trivial_init_fn, _input_or_none, _resolve, _has_rng
 from nodejax.generic import _over_generic
 from nodejax.spec import materialize
-from nodejax.transforms.common import _over_bound
+from nodejax.transforms.common import _over_bound, _transform_def
 
 
 @_over_generic
 @_over_bound
-def scan(nd: NodeDef, record: bool = False,
+def scan(node_def: NodeDef, record: bool = False,
          persist: tuple[str, ...] | None = None) -> NodeDef | Node:
     """Internalize the state loop: a step-level cyclic node becomes a
     sequence-level non-cyclic one (CN -> N, PCN -> PN in lattice terms).
@@ -47,15 +47,15 @@ def scan(nd: NodeDef, record: bool = False,
     init, so batch-shaped fast state tolerates shape changes between
     applies). A callable merge(fresh, outer) -> episode-start state
     remains the general escape hatch."""
-    if not nd.cyclic:
-        raise TypeError(f'scan requires a cyclic node, got {nd!r}')
+    if not node_def.cyclic:
+        raise TypeError(f'scan requires a cyclic node, got {node_def!r}')
 
     # scan's input contract is a stream, the inner node's is a step: the
     # inner def resolves against ONE element of the bound stream
     def param_fn(ndef, param_input=Struct()):
         stream = _input_or_none(ndef)
-        d = (nd if stream is None
-             else _resolve(nd, jax.tree.map(lambda x: x[0], stream)))
+        d = (node_def if stream is None
+             else _resolve(node_def, jax.tree.map(lambda x: x[0], stream)))
         return d.build_param(param_input)
 
     def _divert_rng(inputs):
@@ -67,10 +67,10 @@ def scan(nd: NodeDef, record: bool = False,
     def _loop(p, s0, inputs):
         if record:
             def step(s_, i_):
-                s2, out = nd.apply_fn(p, s_, i_)
+                s2, out = node_def.apply_fn(p, s_, i_)
                 return s2, Struct(state=s2, output=out)
             return jax.lax.scan(step, s0, inputs)
-        return jax.lax.scan(lambda s_, i_: nd.apply_fn(p, s_, i_), s0, inputs)
+        return jax.lax.scan(lambda s_, i_: node_def.apply_fn(p, s_, i_), s0, inputs)
 
     if persist is None:
         def apply_fn(p, s, inputs):
@@ -79,15 +79,19 @@ def scan(nd: NodeDef, record: bool = False,
             # input-shaped state (previous-error registers, feedback seeds)
             # derives from the sequence itself — no shape statics
             element = jax.tree.map(lambda x: x[0], inputs)
-            s0 = _resolve(nd, element).build_state(p, seed, input=element)
+            s0 = _resolve(node_def, element).build_state(p, seed, input=element)
             _, ys = _loop(p, s0, inputs)
             return (), ys
 
-        out = NodeDef(f'scan({nd.name})', param_fn, _trivial_init_fn, apply_fn,
-                      nd.parametric, cyclic=False,
-                      param_input_spec=nd.param_input_spec if nd.parametric else None,
-                      tags=nd.tags)
-        return out
+        return _transform_def(
+            node_def,
+            name=f'scan({node_def.name})',
+            param_fn=param_fn,
+            init_fn=_trivial_init_fn,
+            apply_fn=apply_fn,
+            cyclic=False,
+            apply_input_spec=None,
+        )
 
     if callable(persist):
         merge = persist
@@ -126,22 +130,23 @@ def scan(nd: NodeDef, record: bool = False,
     def init_fn(ndef, p, state_input=Struct(), input=None):
         seq = input if input is not None else _input_or_none(ndef)
         if seq is None:
-            return nd.build_state(p, state_input)
+            return node_def.build_state(p, state_input)
         element = jax.tree.map(lambda x: x[0], seq)
-        return _resolve(nd, element).build_state(p, state_input, input=element)
+        return _resolve(node_def, element).build_state(p, state_input, input=element)
 
     def apply_fn(p, s_outer, inputs):
         seed, inputs = _divert_rng(inputs)
         element = jax.tree.map(lambda x: x[0], inputs)
-        fresh = _resolve(nd, element).build_state(p, seed, input=element)
+        fresh = _resolve(node_def, element).build_state(p, seed, input=element)
         final, ys = _loop(p, merge(fresh, s_outer), inputs)
         return final, ys
 
-    out = NodeDef(f'scan({nd.name})', param_fn, init_fn, apply_fn,
-                  nd.parametric, cyclic=True,
-                  init_requires_input=nd.init_requires_input,
-                  init_reads_shape=nd.init_reads_shape,
-                  param_input_spec=nd.param_input_spec if nd.parametric else None,
-                  state_input_spec=nd.state_input_spec if nd.cyclic else None,
-                  tags=nd.tags)
-    return out
+    return _transform_def(
+        node_def,
+        name=f'scan({node_def.name})',
+        param_fn=param_fn,
+        init_fn=init_fn,
+        apply_fn=apply_fn,
+        cyclic=True,
+        apply_input_spec=None,
+    )

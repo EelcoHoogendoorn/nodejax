@@ -7,7 +7,7 @@ bind vmap axes directly ('batch' / 'ensemble' by convention).
 import jax
 import jax.numpy as jnp
 
-from nodejax import node_def, batch, ensemble, residual, composite, nn
+from nodejax import node_def, batch, ensemble, stack, residual, composite, nn
 from nodejax.struct import Struct
 
 
@@ -72,3 +72,53 @@ def test_batch_norm_is_one_term_in_a_batch_agnostic_pipe():
     _, out2 = model.apply(state, x)
     assert jnp.allclose(jnp.mean(out2, axis=0), 0.0, atol=1e-5)
     assert jnp.allclose(jnp.std(out2, axis=0), 1.0, atol=1e-2)
+
+
+def test_single_batch_state_descends_through_a_transform_wrapper():
+    """A tagged member inside a TRANSFORM keeps one state copy, not one per
+    sample. The tag is a per-leaf property, so the walk that reads it has to
+    descend a transform exactly as it descends a pipe. A transform that
+    answered for its whole subtree would hand the tagged member a batch axis
+    and then read only element 0, discarding the rest of the batch.
+
+    stack() and ensemble() are the two spellings of depth and population, and
+    both are how a real model gets its batchnorm: `stack(Linear >> BatchNorm)`
+    is the ordinary deep net, not an exotic construction."""
+    x = jnp.arange(6.0).reshape(3, 2)                 # batch of 3, width 2
+
+    for label, tower in [
+        ('stack', batch(stack(nn.BatchNorm(0.1) >> nn.RNN(2), n=2))),
+        ('ensemble', batch(ensemble(nn.BatchNorm(0.1) >> nn.RNN(2), n=2))),
+    ]:
+        model = tower.with_input(x).parameterize(rng=jax.random.PRNGKey(0))
+        state = model.init()
+        assert state.bn.mean.shape == (2, 2), (label, state.bn.mean.shape)
+        assert state.rnn.shape == (3, 2, 2), (label, state.rnn.shape)
+
+        # and it holds THROUGH an apply, not only at init: out_axes mirrors
+        # the in_axes, so the shared slot comes back shared
+        new_state, out = model.apply(state, x)
+        assert new_state.bn.mean.shape == (2, 2), label
+        assert new_state.rnn.shape == (3, 2, 2), label
+        assert out.shape == (3, 2, 2) or out.shape == (3, 2), (label, out.shape)
+
+
+def test_a_shared_slot_that_is_not_really_shared_is_loud():
+    """The tag asserts the member's state is the same for every element.
+    jax enforces it: a node that declares a shared state but computes a
+    per-element one fails at the vmap, rather than silently keeping one
+    element's copy."""
+    def liar():
+        def init(ndef):
+            return jnp.zeros_like(ndef.input)
+
+        def apply(state, input):
+            return input, input                # per-element, despite the tag
+
+        return node_def(apply, init=init, name='liar', tags={'single_batch_state'})
+
+    x = jnp.arange(6.0).reshape(3, 2)
+    model = batch(liar()).with_input(x).parameterize()
+    import pytest
+    with pytest.raises(ValueError, match='out_axes is None'):
+        model.apply(model.init(), x)

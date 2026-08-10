@@ -4,12 +4,12 @@ from nodejax.core import Node, NodeDef, _input_or_none, _resolve
 from nodejax.struct import Struct
 from nodejax.generic import _over_generic
 from nodejax.spec import materialize
-from nodejax.transforms.common import _over_bound
+from nodejax.transforms.common import _over_bound, _transform_def
 
 
 @_over_generic
 @_over_bound
-def at(nd: NodeDef, field: str) -> NodeDef:
+def at(node_def: NodeDef, field: str) -> NodeDef:
     """Route a node onto one field of a Struct input: the output is the
     input Struct with `field` replaced by the node's output, every
     other field passed through untouched. Pipes chain whole signals;
@@ -24,19 +24,18 @@ def at(nd: NodeDef, field: str) -> NodeDef:
     def init_fn(ndef, p, state_input=Struct(), input=None):
         carry = input if input is not None else _input_or_none(ndef)
         if carry is None:
-            return nd.build_state(p, state_input)
+            return node_def.build_state(p, state_input)
         fld = materialize(carry)[field]
-        return _resolve(nd, fld).build_state(p, state_input,
+        return _resolve(node_def, fld).build_state(p, state_input,
                                              input=fld)
 
     def apply_fn(p, s, i):
-        s2, out = nd.apply_fn(p, s, i[field])
+        s2, out = node_def.apply_fn(p, s, i[field])
         return s2, i.replace(**{field: out})
 
-    out = NodeDef(nd.name, nd._param_impl, init_fn, apply_fn, nd.parametric, nd.cyclic,
-                  init_requires_input=nd.init_requires_input,
-                  init_reads_shape=nd.init_reads_shape,
-                  param_input_spec=nd.param_input_spec if nd.parametric else None,
-                  state_input_spec=nd.state_input_spec if nd.cyclic else None,
-                  tags=nd.tags)
-    return out
+    return _transform_def(
+        node_def,
+        name=node_def.name,
+        init_fn=init_fn,
+        apply_fn=apply_fn,
+    )
