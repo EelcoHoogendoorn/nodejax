@@ -463,7 +463,16 @@ def composite(apply: Callable, *, members: dict[str, GenericDef | NodeDef | Node
         rng = state_input.rng if 'rng' in state_input else None
         return _member_init(defs, apply, param, carry, rng, seeds)
 
-    parametric = any(d.parametric for d in defs.values()) or param is not None
+    # a composite holds no params outside its members: its param tree IS the
+    # member union, and an own ctor only chooses how that tree is filled (one
+    # value seeding two slots, say). With no parametric member there is no
+    # tree for a ctor to fill, so asking for one is an error rather than a
+    # composite that quietly grows free params.
+    parametric = any(d.parametric for d in defs.values())
+    if param is not None and not parametric:
+        raise TypeError(
+            f"{name or 'composite'}: a param constructor was given, but no member is "
+            'parametric; a composite has no params outside its members')
 
     def _rebuild(new_members):
         # reconstruct from (possibly rewritten) members: apply refers to
