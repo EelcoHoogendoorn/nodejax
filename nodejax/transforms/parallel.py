@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 
 from nodejax.struct import Struct
-from nodejax.core import Node, NodeDef, Composite, _input_or_none
+from nodejax.core import Node, NodeDef, Composite
 from nodejax.spec import materialize
 
 
@@ -80,7 +80,7 @@ def _Parallel(defs: dict[str, NodeDef]) -> NodeDef:
         return () if param == () else param[nm]
 
     def init_fn(ndef, param, state_input=Struct(), input=None):
-        src = input if input is not None else _input_or_none(ndef)
+        src = input if input is not None else (ndef.input if ndef.resolved else None)
         carry = materialize(src) if src is not None else None
         key = state_input.rng if 'rng' in state_input else None
         states = {}

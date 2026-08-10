@@ -20,7 +20,7 @@ import jax.numpy as jnp
 
 from nodejax.struct import Struct, Aux
 from nodejax.core import (NodeDef, split_aux, _as_bundle, _bind_method,
-                          _input_or_none, _resolve, _has_rng)
+                          _resolve, _has_rng)
 from nodejax.authoring import KeyStream
 
 _NO_INPUT = object()   # a read, distinct from a feed of any value (None included)

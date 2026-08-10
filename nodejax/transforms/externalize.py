@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nodejax.core import Node, NodeDef, _input_or_none, _resolve
+from nodejax.core import Node, NodeDef, _resolve
 from nodejax.struct import Struct
 from nodejax.generic import _over_generic
 from nodejax.paths import set_by_path
@@ -55,7 +55,7 @@ def externalize(node_def: NodeDef, member: str,
     def init_fn(outer, param, state_input=Struct(), input=None):
         if at_init is not None:
             param = set_by_path(param, {member: at_init})
-        carry = input if input is not None else _input_or_none(outer)
+        carry = input if input is not None else (outer.input if outer.resolved else None)
         if carry is None:
             return node_def.build_state(param, state_input)
         # the inner runs on the .input field; the externalized member rides

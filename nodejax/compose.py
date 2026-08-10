@@ -17,8 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct, Aux
-from nodejax.core import (Node, NodeDef, Composite, Serial, split_aux, _input_or_none,
-                                _resolve, _bundle_spec_from_sig, REQUIRED,
+from nodejax.core import (Node, NodeDef, Composite, Serial, split_aux, _resolve, _bundle_spec_from_sig, REQUIRED,
                                 _hoist_apply_rng, hoist_rng, _has_rng)
 from nodejax.authoring import (KeyStream, _lift_param, _lift_init,
                                      _state_spec_from_sig, _init_requires_input)
@@ -179,7 +178,8 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
         Stored constructions (bound members at composition) fill slots the
         bundle leaves open."""
         key = param_input.rng if 'rng' in param_input else None
-        carry = _input_or_none(ndef)
+        shaped = ndef.resolved
+        carry = ndef.input if shaped else None
         parts = {}
         for nm in names:
             d = defs[nm]
@@ -199,7 +199,7 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
         bundles want one, and the input value (or the def's bound spec)
         threads member by member — each member's def resolved to its own
         upstream shape, each apply deriving the next member's carry."""
-        carry = input if input is not None else _input_or_none(ndef)
+        carry = input if input is not None else (ndef.input if ndef.resolved else None)
         key = state_input.rng if 'rng' in state_input else None
         states = {}
         for nm in names:
@@ -438,7 +438,7 @@ def composite(apply: Callable, *, members: dict[str, GenericDef | NodeDef | Node
         the shape it receives at its own call site (the param-side twin of
         init discovery)."""
         key = param_input.rng if 'rng' in param_input else None
-        carry = _input_or_none(ndef)
+        carry = ndef.input if ndef.resolved else None
         slots = {nm: param_input[nm] for nm in defs if nm in param_input}
         if carry is not None and self_form and any(d.param_reads_shape
                                                    for d in defs.values()):
@@ -463,7 +463,7 @@ def composite(apply: Callable, *, members: dict[str, GenericDef | NodeDef | Node
 
     def init_fn(ndef, param, state_input=Struct(), input=None):
         walk = any(d.init_reads_shape or d.init_requires_input for d in defs.values())
-        carry = input if input is not None else (_input_or_none(ndef) if walk else None)
+        carry = input if input is not None else (ndef.input if walk and ndef.resolved else None)
         seeds = {nm: state_input[nm] for nm in defs if nm in state_input}
         rng = state_input.rng if 'rng' in state_input else None
         return _member_init(defs, apply, param, carry, rng, seeds)

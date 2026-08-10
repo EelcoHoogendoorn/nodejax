@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 
 from nodejax.struct import Struct
-from nodejax.core import Node, NodeDef, _trivial_init_fn, _input_or_none, _resolve, _has_rng
+from nodejax.core import Node, NodeDef, _trivial_init_fn, _resolve, _has_rng
 from nodejax.generic import _over_generic
 from nodejax.spec import materialize
 from nodejax.transforms.common import _over_bound, _transform_def
@@ -53,9 +53,8 @@ def scan(node_def: NodeDef, record: bool = False,
     # scan's input contract is a stream, the inner node's is a step: the
     # inner def resolves against ONE element of the bound stream
     def param_fn(ndef, param_input=Struct()):
-        stream = _input_or_none(ndef)
-        d = (node_def if stream is None
-             else _resolve(node_def, jax.tree.map(lambda x: x[0], stream)))
+        d = (_resolve(node_def, jax.tree.map(lambda x: x[0], ndef.input))
+             if ndef.resolved else node_def)
         return d.build_param(param_input)
 
     def _divert_rng(inputs):
@@ -129,7 +128,7 @@ def scan(node_def: NodeDef, record: bool = False,
             return jax.tree_util.tree_unflatten(treedef, leaves)
 
     def init_fn(ndef, p, state_input=Struct(), input=None):
-        seq = input if input is not None else _input_or_none(ndef)
+        seq = input if input is not None else (ndef.input if ndef.resolved else None)
         if seq is None:
             return node_def.build_state(p, state_input)
         element = jax.tree.map(lambda x: x[0], seq)

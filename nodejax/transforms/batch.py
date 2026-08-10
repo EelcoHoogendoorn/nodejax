@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from nodejax.core import (Node, NodeDef, _input_or_none, _resolve,
+from nodejax.core import (Node, NodeDef, _resolve,
                                 _split_rng, _with_rng, _spec_resolved)
 from nodejax.struct import Struct
 from nodejax.generic import _over_generic
@@ -44,7 +44,7 @@ def batch(node_def: NodeDef, n: int | None = None,
             # per-element shape and batch size are STATIC: the shape from the
             # bound (batched) def, the count from its leading axis (or the
             # construction n= for a shape-free node) — never a runtime value
-            batched = input if input is not None else _input_or_none(ndef)
+            batched = input if input is not None else (ndef.input if ndef.resolved else None)
             if batched is not None:
                 rows = jax.tree.leaves(batched)[0].shape[0]
                 if n is not None and n != rows:
@@ -68,9 +68,9 @@ def batch(node_def: NodeDef, n: int | None = None,
 
     if node_def.parametric:
         def param_fn(ndef, param_input):
-            batched = _input_or_none(ndef)
-            if batched is not None:
-                inner_spec = _input_or_none(node_def)
+            if ndef.resolved:
+                batched = ndef.input
+                inner_spec = node_def.input if node_def.resolved else None
                 leaf_b = jax.tree.leaves(batched)[0]
                 if inner_spec is not None and leaf_b.ndim == jax.tree.leaves(inner_spec)[0].ndim:
                     element = batched

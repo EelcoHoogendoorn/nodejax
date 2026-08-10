@@ -5,7 +5,7 @@ import jax.numpy as jnp
 
 from nodejax.struct import Struct
 from nodejax.types import LossFn
-from nodejax.core import Node, NodeDef, _input_or_none, hoist_rng
+from nodejax.core import Node, NodeDef, hoist_rng
 from nodejax.authoring import node_def
 from nodejax.generic import _over_generic
 from nodejax.transforms.common import _transform_def
@@ -64,8 +64,7 @@ def ttt(node: NodeDef, loss_fn: LossFn, lr0: float) -> NodeDef:
         seed = state.inner if 'inner' in state else Struct()
         if 'rng' in state:
             seed = seed.replace(rng=state.rng)
-        carry = _input_or_none(ndef)
-        inner_in = carry['input'] if carry is not None else None
+        inner_in = ndef.input['input'] if ndef.resolved else None
         return Struct(w=param.init,
                       inner=node.build_state(param.init, seed, input=inner_in))
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nodejax.core import Node, NodeDef, _input_or_none, _resolve
+from nodejax.core import Node, NodeDef, _resolve
 from nodejax.struct import Struct
 from nodejax.generic import _over_generic
 from nodejax.spec import materialize
@@ -22,7 +22,7 @@ def at(node_def: NodeDef, field: str) -> NodeDef:
     state paths read as if the node were placed directly."""
 
     def init_fn(ndef, p, state_input=Struct(), input=None):
-        carry = input if input is not None else _input_or_none(ndef)
+        carry = input if input is not None else (ndef.input if ndef.resolved else None)
         if carry is None:
             return node_def.build_state(p, state_input)
         fld = materialize(carry)[field]

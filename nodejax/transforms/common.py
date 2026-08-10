@@ -20,7 +20,7 @@ import jax.numpy as jnp
 
 from nodejax.struct import Struct
 from nodejax.types import Param
-from nodejax.core import (Node, NodeDef, Wrapper, _input_or_none, _resolve,
+from nodejax.core import (Node, NodeDef, Wrapper, _resolve,
                             _trivial_param_fn, _split_rng, _with_rng)
 
 
@@ -208,7 +208,7 @@ def _mapped_init_fn(inner: NodeDef, n: int | None = None, *,
         stacked = inner.parametric
 
     def init_fn(ndef, p, state_input=Struct(), input=None):
-        carry = input if input is not None else _input_or_none(ndef)
+        carry = input if input is not None else (ndef.input if ndef.resolved else None)
         d = inner if carry is None else _resolve(inner, carry)
         if not inner.cyclic:
             p0 = jax.tree.map(lambda x: x[0], p) if (stacked and inner.parametric and p != ()) else p
@@ -242,7 +242,7 @@ def _mapped_param_fn(inner: NodeDef, n: int | None) -> Callable:
         return inner._param_impl
 
     def param_fn(ndef, param_input=Struct()):
-        carry = _input_or_none(ndef)
+        carry = ndef.input if ndef.resolved else None
         d = inner if carry is None else _resolve(inner, carry)
         if 'rng' not in param_input:
             return d.build_param(param_input)

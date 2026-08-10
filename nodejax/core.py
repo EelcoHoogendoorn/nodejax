@@ -191,18 +191,6 @@ def _resolve(nd: 'NodeDef', value: Any) -> 'NodeDef':
     return nd
 
 
-def _input_or_none(nd: 'NodeDef | None') -> Any:
-    """The materialized zero input spec of a def, or None when the def (or its spec) is absent.
-
-    Used during composite shape walks where an unresolved shape means 'nothing to thread'.
-    Returns `materialize(apply_input_spec)` (zero arrays) when resolved, or `None` if unresolved.
-    """
-    if nd is None or not _spec_resolved(nd.apply_input_spec):
-        return None
-    from nodejax.spec import materialize
-    return materialize(nd.apply_input_spec)
-
-
 def split_aux(output: Output) -> tuple[Output, Any]:
     """The aux channel: clean output and auxiliary data separation.
 
@@ -396,6 +384,13 @@ class NodeDef:
         """Whether this is a bound node (a def carries no param): the
         binding-stage question, answered by the type."""
         return False
+
+    @property
+    def resolved(self) -> bool:
+        """Whether this def's input SHAPE is known — declared, bound by
+        with_input, or filled by a wiring. The question the walks ask before
+        reading `input`; asking it is not the same as having a value."""
+        return _spec_resolved(self.apply_input_spec)
 
     @property
     def input(self) -> Any:
