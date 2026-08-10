@@ -10,6 +10,7 @@ from nodejax.types import LossFn
 from nodejax.core import Node, NodeDef
 from nodejax.authoring import node_def
 from nodejax.generic import _over_generic
+from nodejax.transforms.common import _transform_def
 from nodejax.transforms.train_step import train_step
 
 
@@ -61,5 +62,19 @@ def metasgd(node: NodeDef, loss_fn: LossFn, lr0: float) -> NodeDef:
         _, output = node.apply_fn(tuned.model, tuned.inner, input.query)
         return output
 
-    lifted = node_def(apply, param=param, name=f'metasgd({node.name})')
-    return lifted._replace(param_input_spec=node.param_input_spec)
+    lifted = node_def(apply, param=param, name=f'metasgd({node.name})')._replace(param_input_spec=node.param_input_spec)
+    return _transform_def(
+        node,
+        name=lifted.name,
+        param_fn=lifted._param_impl,
+        init_fn=lifted._init_impl,
+        apply_fn=lifted._apply_impl,
+        parametric=lifted.parametric,
+        cyclic=lifted.cyclic,
+        apply_input_spec=lifted.apply_input_spec,
+        init_requires_input=False,
+        init_reads_shape=False,
+        state_input_spec=lifted.state_input_spec,
+        tags=lifted.tags,
+        rebuild=lambda d: metasgd(d, loss_fn, lr0),
+    )

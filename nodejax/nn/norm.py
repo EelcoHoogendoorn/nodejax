@@ -84,4 +84,3 @@ def Whiten(momentum: float = 0.1, eps: float = 1e-2, axis: str = 'batch'):
         return new, whitened
 
     return node_def(apply, init=init, name='whiten', tags={'single_batch_state'})
-

@@ -713,11 +713,19 @@ class Wrapper(Composite):
                  rebuild: Callable[[NodeDef], NodeDef] | None = None, **kwargs: Any):
         # inner names the single member on construction; _replace round-trips
         # it through `members` like every other composite
+        if inner is None and 'members' in kwargs and 'inner' in kwargs['members']:
+            inner = kwargs['members']['inner']
+        self._user_rebuild = rebuild
         if inner is not None:
             kwargs.setdefault('members', {'inner': inner})
             if rebuild is not None:
                 kwargs['rebuild'] = lambda new_m: rebuild(new_m['inner'])
         super().__init__(*args, **kwargs)
+
+    def _replace(self, **changes: Any) -> NodeDef:
+        base = dict(rebuild=self._user_rebuild)
+        base.update(changes)
+        return super()._replace(**base)
 
     @property
     def inner(self) -> NodeDef:

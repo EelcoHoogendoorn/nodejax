@@ -8,7 +8,7 @@ from nodejax.types import LossFn
 from nodejax.core import Node, NodeDef, _input_or_none, hoist_rng
 from nodejax.authoring import node_def
 from nodejax.generic import _over_generic
-from nodejax.spec import materialize
+from nodejax.transforms.common import _transform_def
 
 
 # The standard self-supervision assembly: shapes a wire into the
@@ -81,5 +81,20 @@ def ttt(node: NodeDef, loss_fn: LossFn, lr0: float) -> NodeDef:
     # the seed spec is the boundary hoist over the one wrapped slot,
     # mirroring the cell's state field
     seed_spec = hoist_rng(dict(inner=node.state_input_spec if node.cyclic else Struct()))
-    return lifted._replace(param_input_spec=node.param_input_spec,
-                           state_input_spec=seed_spec)
+    lifted = lifted._replace(param_input_spec=node.param_input_spec,
+                             state_input_spec=seed_spec)
+    return _transform_def(
+        node,
+        name=lifted.name,
+        param_fn=lifted._param_impl,
+        init_fn=lifted._init_impl,
+        apply_fn=lifted._apply_impl,
+        parametric=lifted.parametric,
+        cyclic=lifted.cyclic,
+        apply_input_spec=lifted.apply_input_spec,
+        init_requires_input=False,
+        init_reads_shape=False,
+        state_input_spec=lifted.state_input_spec,
+        tags=lifted.tags,
+        rebuild=lambda d: ttt(d, loss_fn, lr0),
+    )

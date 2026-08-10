@@ -21,14 +21,14 @@ from typing import Callable
 
 import jax
 
-from nodejax.struct import Struct
-from nodejax.core import Node, NodeDef, Composite, _trivial_init_fn
+from nodejax.core import Node, NodeDef, Composite, Wrapper, _trivial_init_fn
 from nodejax.transforms.common import _over_bound, _transform_def
+from nodejax.compose import _probe_apply
 
 
 def _Freeze(node_def: NodeDef, state) -> NodeDef:
     def apply(nd, p, _, input):
-        _, out = node_def.apply_fn(p, state, input)
+        _, out = _probe_apply(node_def.apply_fn, p, state, input)
         return (), out
 
     return _transform_def(
@@ -84,6 +84,9 @@ def tree_detach(nd: NodeDef, name: str | Callable[[str], bool]) -> NodeDef:
 
 
 def _detach_walk(nd: Composite, match: Callable[[str], bool]) -> tuple[NodeDef, int]:
+    if isinstance(nd, Wrapper):
+        res, hits = _detach_walk(nd.inner, match)
+        return nd.rebuild({'inner': res}), hits
     new, hits = {}, 0
     for k, m in nd.members.items():
         if match(k):
@@ -105,6 +108,8 @@ def tree_freeze(nd: NodeDef, frozen: Struct) -> NodeDef:
     propagates. Every spec field must land on a member — a field naming
     nothing is an error, so a spec aimed at structure a def does not
     expose fails at the call, never later inside an apply."""
+    if isinstance(nd, Wrapper):
+        return nd.rebuild({'inner': tree_freeze(nd.inner, frozen)})
     if not isinstance(nd, Composite):
         raise TypeError(f"tree_freeze selects members and '{nd.name}' has none; "
                         'freeze(node, state) pins a leaf whole')

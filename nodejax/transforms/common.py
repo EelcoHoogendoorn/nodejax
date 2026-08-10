@@ -41,12 +41,12 @@ def _mapped_apply_fn(inner: NodeDef, param: Any, state: Any, input: Any, *,
     state but computes a per-element one fails at the vmap rather than
     silently keeping one element's copy."""
     if inner.apply_takes_rng:
+        clean_input = input.without('rng') if (input_axis == 0 and type(input) is Struct and 'rng' in input) else input
         N = count if count is not None else (
-            jax.tree.leaves(input)[0].shape[0] if input_axis == 0 else
+            jax.tree.leaves(clean_input)[0].shape[0] if input_axis == 0 else
             jax.tree.leaves(param)[0].shape[0]
         )
         keys, data = _split_rng(input if input_axis == 0 else Struct(rng=input.rng), N)
-        clean_input = input.without('rng') if input_axis == 0 else input
         if input_axis == 0:
             return jax.vmap(
                 lambda p_, s_, i_, k_: inner.apply_fn(p_, s_, _with_rng(i_, k_)),

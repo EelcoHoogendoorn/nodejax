@@ -22,6 +22,8 @@ from nodejax.transforms import metasgd as meta_sgd
 from nodejax.util import mse, tile
 
 
+from nodejax import serial, nn, map_members, tree_detach, ttt, metasgd
+
 def test_finetune_single_task():
     """finetune() alone: k inner steps from the given param, then query."""
     tuned = finetune(Gain(), mse, optax.sgd(0.1))
@@ -35,6 +37,26 @@ def test_finetune_single_task():
     pred = node.apply(task)
     # scale: 1 -> 5 - 0.8^3 * (5 - 1) = 2.952
     assert jnp.allclose(pred, 2.952, atol=1e-5)
+
+
+def test_finetune_metasgd_ttt_wrapper_rebuild():
+    """Verify finetune, metasgd, and ttt are Wrappers and rebuild properly."""
+    l1 = nn.Linear(4)
+    l2 = nn.Linear(4)
+    pipe = serial(l1=l1, l2=l2)
+
+    fn_node = finetune(pipe, mse, optax.sgd(0.01))
+    msgd_node = metasgd(pipe, mse, 0.01)
+    ttt_node = ttt(pipe, mse, 0.01)
+
+    new_l2 = nn.Linear(4)
+    for transform_node in (fn_node, msgd_node, ttt_node):
+        rebuilt = map_members(transform_node, lambda m: new_l2 if m is l2 else m)
+        assert rebuilt.inner.members['l2'] is new_l2
+
+        detached = tree_detach(transform_node, 'l2')
+        assert detached.inner.members['l2'].name == 'detach(linear)'
+
 
 
 def test_maml_convergence():

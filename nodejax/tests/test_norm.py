@@ -16,6 +16,21 @@ from nodejax.struct import Struct
 from nodejax.util import mse, tile
 
 
+from nodejax.transforms import freeze
+
+def test_batchnorm_unbatched_single_sample_eval():
+    """Verify single-sample evaluation on unbatched BatchNorm (without batch transform) works when frozen."""
+    bn = nn.BatchNorm(momentum=0.1)
+    pipe = (nn.Linear(4) >> bn).with_input(jnp.zeros(4))
+    bound_pipe = pipe.parameterize(rng=jax.random.PRNGKey(0))
+    st = bound_pipe.init()
+
+    # Freeze running stats
+    frozen = freeze(bound_pipe, st)
+    sample_out = frozen.apply(jnp.ones(4))
+    assert sample_out.shape == (4,)
+
+
 def test_nn_batch_norm():
     """Verify nn.BatchNorm in nn module has single_batch_state tag and updates running stats."""
     bn = nn.BatchNorm(momentum=0.1)

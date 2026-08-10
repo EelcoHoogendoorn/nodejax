@@ -9,6 +9,7 @@ from nodejax.types import LossFn
 from nodejax.core import (Node, NodeDef, _trivial_param_fn, hoist_rng,
                                 REQUIRED)
 from nodejax.generic import _over_generic
+from nodejax.transforms.common import _transform_def
 
 if TYPE_CHECKING:
     import optax
@@ -72,8 +73,19 @@ def train_step(node: NodeDef | Node, loss_fn: LossFn,
     # Struct(rng=..., inner=...) — plus the trainer's own model field
     state_input_spec = hoist_rng(dict(
         inner=node.ndef.state_input_spec if node.ndef.cyclic else Struct()))
-    out = NodeDef(f'train({node.ndef.name})', _trivial_param_fn, init_fn, apply_fn,
-                  parametric=False, cyclic=True, apply_input_spec=apply_input_spec,
-                  state_input_spec=state_input_spec.replace(model=REQUIRED),
-                  tags=node.ndef.tags)
+    out = _transform_def(
+        node.ndef,
+        name=f'train({node.ndef.name})',
+        param_fn=_trivial_param_fn,
+        init_fn=init_fn,
+        apply_fn=apply_fn,
+        parametric=False,
+        cyclic=True,
+        apply_input_spec=apply_input_spec,
+        init_requires_input=False,
+        init_reads_shape=False,
+        state_input_spec=state_input_spec.replace(model=REQUIRED),
+        tags=node.ndef.tags,
+        rebuild=lambda d: train_step(d, loss_fn, optimizer).ndef,
+    )
     return Node(out, ())

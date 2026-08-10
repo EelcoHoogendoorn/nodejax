@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from nodejax.core import Node, NodeDef
-from nodejax.authoring import node_def, derive
+from nodejax.authoring import derive
 from nodejax.types import LossFn
 from nodejax.generic import _over_generic
-from nodejax.transforms.common import _over_bound
+from nodejax.transforms.common import _over_bound, _transform_def
 from nodejax.transforms.train_step import train_step
 
 if TYPE_CHECKING:
@@ -44,7 +44,19 @@ def finetune(nd: NodeDef, loss_fn: LossFn,
         _, output = nd.apply_fn(tuned.model, tuned.inner, input.query)
         return output
 
-    # a derivation of the inner: same params (constructor, spec, axis
-    # metadata inherited), the step machinery replaced by the
-    # adapt-then-answer apply
-    return derive(nd, apply=apply, name=f'finetune({nd.name})')
+    out = derive(nd, apply=apply, name=f'finetune({nd.name})')
+    return _transform_def(
+        nd,
+        name=out.name,
+        param_fn=out._param_impl,
+        init_fn=out._init_impl,
+        apply_fn=out._apply_impl,
+        parametric=out.parametric,
+        cyclic=out.cyclic,
+        apply_input_spec=out.apply_input_spec,
+        init_requires_input=False,
+        init_reads_shape=False,
+        state_input_spec=out.state_input_spec,
+        tags=out.tags,
+        rebuild=lambda d: finetune(d, loss_fn, optimizer),
+    )
