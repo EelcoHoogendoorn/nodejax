@@ -5,8 +5,8 @@ import jax
 from nodejax.core import Node, NodeDef, _split_rng, _with_rng
 from nodejax.struct import Struct
 from nodejax.generic import _over_generic
-from nodejax.transforms.common import (_over_bound, _mapped_init,
-                                       _scan_apply, _transform_def)
+from nodejax.transforms.common import (_over_bound, _mapped_init_fn,
+                                       _scanned_apply_fn, _transform_def)
 
 
 @_over_generic
@@ -24,12 +24,13 @@ def repeat(node_def: NodeDef, n: int) -> NodeDef:
     count = n
 
     def apply_fn(nd, param, state, input):
-        return _scan_apply(node_def, param, state, input,
+        return _scanned_apply_fn(node_def, param, state, input,
                            stacked_param=False, length=count)
 
     return _transform_def(
         node_def,
         name=f'repeat({node_def.name})',
-        init_fn=_mapped_init(node_def, count, stacked=False),
+        init_fn=_mapped_init_fn(node_def, count, stacked=False),
         apply_fn=apply_fn,
+        rebuild=lambda d: repeat(d, n=count),
     )

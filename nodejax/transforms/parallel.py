@@ -4,7 +4,6 @@ import jax
 
 from nodejax.struct import Struct
 from nodejax.core import Node, NodeDef, Composite, _input_or_none
-from nodejax.authoring import KeyStream
 from nodejax.spec import materialize
 
 

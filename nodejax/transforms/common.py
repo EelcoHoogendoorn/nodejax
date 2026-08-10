@@ -22,14 +22,13 @@ from nodejax.struct import Struct
 from nodejax.types import Param
 from nodejax.core import (Node, NodeDef, Wrapper, _input_or_none, _resolve,
                             _trivial_param_fn, _split_rng, _with_rng)
-from nodejax.authoring import KeyStream
 
 
 _UNBOUND: Any = object()  # sentinel: _split saw a NodeDef, not a bound Node
 _KEEP: Any = object()     # sentinel: _transform_def preserves default field value
 
 
-def _vmap_apply(inner: NodeDef, param: Any, state: Any, input: Any, *,
+def _mapped_apply_fn(inner: NodeDef, param: Any, state: Any, input: Any, *,
                      param_axis: Any, state_axis: Any, input_axis: Any,
                      axis_name: str, count: int | None = None) -> tuple[Any, Any]:
     """Uniform vmap execution over param, state, and input axes, automatically
@@ -74,8 +73,8 @@ def _vmap_apply(inner: NodeDef, param: Any, state: Any, input: Any, *,
     )(param, state, input)
 
 
-def _scan_apply(inner: NodeDef, param: Any, state: Any, input: Any, *,
-                stacked_param: bool, length: int | None = None) -> tuple[Any, Any]:
+def _scanned_apply_fn(inner: NodeDef, param: Any, state: Any, input: Any, *,
+                   stacked_param: bool, length: int | None = None) -> tuple[Any, Any]:
     """Uniform lax.scan execution over a sequential axis: position k's output
     is position k+1's input, and the per-position states stack.
 
@@ -125,7 +124,8 @@ def _transform_def(node_def: NodeDef, *,
                    param_reads_shape: bool | None = None,
                    param_input_spec: Any = _KEEP,
                    state_input_spec: Any = _KEEP,
-                   tags: frozenset[str] | None = None) -> NodeDef:
+                   tags: frozenset[str] | None = None,
+                   rebuild: Callable[[NodeDef], NodeDef] | None = None) -> NodeDef:
     """Construct a transformed NodeDef from an existing one, preserving
     contract metadata while avoiding Composite/Serial subclass leakage."""
     p_fn = node_def._param_impl if param_fn is None else param_fn
@@ -153,6 +153,7 @@ def _transform_def(node_def: NodeDef, *,
         param_input_spec=p_spec,
         state_input_spec=s_spec,
         tags=node_def.tags if tags is None else tags,
+        rebuild=rebuild,
     )
 
 
@@ -193,7 +194,7 @@ def _tile_state(state: Any, n: int) -> Any:
     return jax.tree.map(lambda leaf: jnp.broadcast_to(jnp.asarray(leaf), (n,) + jnp.shape(leaf)), state)
 
 
-def _mapped_init(inner: NodeDef, n: int | None = None, *,
+def _mapped_init_fn(inner: NodeDef, n: int | None = None, *,
                     stacked: bool | None = None) -> Callable:
     """init for transforms whose STATE gains a leading member axis: one state
     per member. `stacked` says whether the params carry that axis too —

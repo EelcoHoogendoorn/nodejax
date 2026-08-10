@@ -91,6 +91,7 @@ def scan(node_def: NodeDef, record: bool = False,
             apply_fn=apply_fn,
             cyclic=False,
             apply_input_spec=None,
+            rebuild=lambda d: scan(d, record=record, persist=persist),
         )
 
     if callable(persist):
@@ -149,4 +150,5 @@ def scan(node_def: NodeDef, record: bool = False,
         apply_fn=apply_fn,
         cyclic=True,
         apply_input_spec=None,
+        rebuild=lambda d: scan(d, record=record, persist=persist),
     )

@@ -33,4 +33,5 @@ def taps(node_def: NodeDef) -> NodeDef:
         node_def,
         name=f'taps({node_def.name})',
         apply_fn=apply_fn,
+        rebuild=lambda d: taps(d),
     )

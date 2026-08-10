@@ -584,15 +584,24 @@ class NodeDef:
         return {}
 
     def map_leaves(self, fn: Callable[[NodeDef], Any]) -> Any:
-        """Map fn over the LEAF defs under this one, building a tree that
-        matches the state's member nesting. A leaf answers for itself; the
-        structural kinds answer by descending. A node with no state answers
-        0 at every level, so the tree never claims structure the state does
-        not have."""
+        """Map fn(leaf) over leaf defs under this node, constructing a Struct tree that
+        mirrors the state pytree hierarchy for JAX transformation primitives (e.g. jax.vmap).
+
+        Example:
+        >>> state_in = map_node_leaves(net, lambda m: None if 'single_batch_state' in m.tags else 0)
+        >>> # state_in is Struct(linear=0, norm=0), passed directly to jax.vmap in_axes/out_axes:
+        >>> jax.vmap(apply_fn, in_axes=(None, state_in, 0), out_axes=(state_in, 0))(param, state, input)
+        """
         return fn(self) if self.cyclic else 0
 
     def map_state(self, state: Any, fn: Callable[[NodeDef, Any], Any]) -> Any:
-        """Map fn(leaf_def, leaf_state) over matching def and state trees."""
+        """Map fn(leaf_def, leaf_state) -> new_leaf_state over matching def and state trees.
+
+        Example:
+        >>> # Transform or inspect state leaves based on matching node properties:
+        >>> clean_state = map_state_leaves(net, state, lambda d, s: jax.tree.map(jnp.zeros_like, s))
+        >>> # Returns a Struct tree matching state's layout with transformed leaf values
+        """
         return fn(self, state) if self.cyclic else state
 
     def __repr__(self) -> str:
@@ -650,11 +659,18 @@ class Composite(NodeDef):
         return self.members
 
     def map_leaves(self, fn: Callable[[NodeDef], Any]) -> Any:
+        """Map fn(leaf_node) -> value over member leaves, constructing a Struct
+        tree of state metadata (e.g. vmap axes) matching member state hierarchy.
+
+        Returns 0 if the composite has no state (cyclic=False). Non-cyclic member
+        subtrees (e.g. frozen state slots) return 0 as the vmap axis spec for `()`."""
         if not self.cyclic:
             return 0
         return Struct(**{nm: m.map_leaves(fn) for nm, m in self.members.items()})
 
     def map_state(self, state: Any, fn: Callable[[NodeDef, Any], Any]) -> Any:
+        """Map fn(leaf_def, leaf_state) -> new_leaf_state over matching member and
+        state subtrees, returning a Struct tree of transformed state values."""
         if not self.cyclic:
             return state
         return Struct(**{nm: m.map_state(state[nm], fn)
@@ -693,11 +709,14 @@ class Wrapper(Composite):
     wants batched, which member a rewrite selects) once for the whole tower.
     """
 
-    def __init__(self, *args: Any, inner: NodeDef | None = None, **kwargs: Any):
+    def __init__(self, *args: Any, inner: NodeDef | None = None,
+                 rebuild: Callable[[NodeDef], NodeDef] | None = None, **kwargs: Any):
         # inner names the single member on construction; _replace round-trips
         # it through `members` like every other composite
         if inner is not None:
             kwargs.setdefault('members', {'inner': inner})
+            if rebuild is not None:
+                kwargs['rebuild'] = lambda new_m: rebuild(new_m['inner'])
         super().__init__(*args, **kwargs)
 
     @property
@@ -711,11 +730,15 @@ class Wrapper(Composite):
         return self.inner.selectable
 
     def map_leaves(self, fn: Callable[[NodeDef], Any]) -> Any:
+        """Transparent pass-through: descend to inner leaf defs, skipping the
+        wrapper layer so no 'inner' key pollutes the state metadata tree.
+        Non-cyclic wrappers (e.g. scan internalizing state) return 0."""
         if not self.cyclic:                       # scan internalizes: no state left
             return 0
         return self.inner.map_leaves(fn)
 
     def map_state(self, state: Any, fn: Callable[[NodeDef, Any], Any]) -> Any:
+        """Transparent pass-through: map fn over inner def and state subtrees."""
         if not self.cyclic:
             return state
         return self.inner.map_state(state, fn)

@@ -7,7 +7,7 @@ from nodejax.core import (Node, NodeDef, _input_or_none, _resolve,
                                 _split_rng, _with_rng, _spec_resolved)
 from nodejax.struct import Struct
 from nodejax.generic import _over_generic
-from nodejax.transforms.common import _over_bound, _tile_state, _transform_def, _vmap_apply
+from nodejax.transforms.common import _over_bound, _tile_state, _transform_def, _mapped_apply_fn
 
 
 from nodejax.transforms.tree_utils import map_node_leaves, map_state_leaves
@@ -33,7 +33,7 @@ def batch(node_def: NodeDef, n: int | None = None,
     def apply_fn(nd, param, state, input):
         # state_in is both in_axes and out_axes: a 'single_batch_state' member
         # is broadcast in and comes back unmapped, no slicing after the fact
-        return _vmap_apply(
+        return _mapped_apply_fn(
             node_def, param, state, input,
             param_axis=None, state_axis=state_in, input_axis=0,
             axis_name=axis,
@@ -91,5 +91,6 @@ def batch(node_def: NodeDef, n: int | None = None,
         apply_fn=apply_fn,
         apply_input_spec=node_def.apply_input_spec if not _spec_resolved(node_def.apply_input_spec) else None,
         init_reads_shape=node_def.cyclic,
+        rebuild=lambda d: batch(d, n=n, axis=axis),
     )
 

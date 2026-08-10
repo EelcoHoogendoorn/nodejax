@@ -5,8 +5,8 @@ import jax
 from nodejax.struct import Struct
 from nodejax.core import Node, NodeDef, _split_rng, _with_rng, REQUIRED
 from nodejax.generic import _over_generic
-from nodejax.transforms.common import (_mapped_init, _mapped_param_fn,
-                                       _scan_apply, _transform_def)
+from nodejax.transforms.common import (_mapped_init_fn, _mapped_param_fn,
+                                       _scanned_apply_fn, _transform_def)
 
 
 @_over_generic
@@ -25,12 +25,13 @@ def stack(node_def: NodeDef, n: int | None = None) -> NodeDef:
         raise TypeError(f'stack requires a parametric or cyclic node, got {node_def!r}')
 
     def apply_fn(nd, param, state, input):
-        return _scan_apply(node_def, param, state, input, stacked_param=True)
+        return _scanned_apply_fn(node_def, param, state, input, stacked_param=True)
 
     return _transform_def(
         node_def,
         name=f'stack({node_def.name})',
         param_fn=_mapped_param_fn(node_def, n),
-        init_fn=_mapped_init(node_def, n),
+        init_fn=_mapped_init_fn(node_def, n),
         apply_fn=apply_fn,
+        rebuild=lambda d: stack(d, n=n),
     )

@@ -38,4 +38,5 @@ def at(node_def: NodeDef, field: str) -> NodeDef:
         name=node_def.name,
         init_fn=init_fn,
         apply_fn=apply_fn,
+        rebuild=lambda d: at(d, field=field),
     )

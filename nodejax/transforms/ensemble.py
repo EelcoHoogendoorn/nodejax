@@ -5,7 +5,7 @@ import jax
 from nodejax.struct import Struct
 from nodejax.core import Node, NodeDef, _split_rng, _with_rng
 from nodejax.generic import _over_generic
-from nodejax.transforms.common import _mapped_init, _mapped_param_fn, _transform_def, _vmap_apply
+from nodejax.transforms.common import _mapped_init_fn, _mapped_param_fn, _transform_def, _mapped_apply_fn
 
 
 @_over_generic
@@ -40,7 +40,7 @@ def ensemble(node_def: NodeDef, n: int | None = None,
     def apply_fn(nd, param, state, input):
         param_axis = 0 if node_def.parametric else None
         count = jax.tree.leaves(param)[0].shape[0] if node_def.parametric else num_members
-        return _vmap_apply(
+        return _mapped_apply_fn(
             node_def, param, state, input,
             param_axis=param_axis, state_axis=0, input_axis=None,
             axis_name=axis, count=count,
@@ -50,6 +50,7 @@ def ensemble(node_def: NodeDef, n: int | None = None,
         node_def,
         name=f'ensemble({node_def.name})',
         param_fn=_mapped_param_fn(node_def, n),
-        init_fn=_mapped_init(node_def, num_members),
+        init_fn=_mapped_init_fn(node_def, num_members),
         apply_fn=apply_fn,
+        rebuild=lambda d: ensemble(d, n=n, axis=axis),
     )

@@ -37,6 +37,7 @@ def _Freeze(node_def: NodeDef, state) -> NodeDef:
         init_fn=_trivial_init_fn,
         apply_fn=apply,
         cyclic=False,
+        rebuild=lambda d: _Freeze(d, state),
     )
 
 
@@ -60,6 +61,7 @@ def detach(node_def: NodeDef) -> NodeDef:
         node_def,
         name=f'detach({node_def.name})',
         apply_fn=apply,
+        rebuild=lambda d: detach(d),
     )
 
 
