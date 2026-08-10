@@ -73,7 +73,7 @@ def scan(node_def: NodeDef, record: bool = False,
         return jax.lax.scan(lambda s_, i_: node_def.apply_fn(p, s_, i_), s0, inputs)
 
     if persist is None:
-        def apply_fn(p, s, inputs):
+        def apply_fn(nd, p, s, inputs):
             seed, inputs = _divert_rng(inputs)
             # the first sequence element seeds the internalized init, so
             # input-shaped state (previous-error registers, feedback seeds)
@@ -134,7 +134,7 @@ def scan(node_def: NodeDef, record: bool = False,
         element = jax.tree.map(lambda x: x[0], seq)
         return _resolve(node_def, element).build_state(p, state_input, input=element)
 
-    def apply_fn(p, s_outer, inputs):
+    def apply_fn(nd, p, s_outer, inputs):
         seed, inputs = _divert_rng(inputs)
         element = jax.tree.map(lambda x: x[0], inputs)
         fresh = _resolve(node_def, element).build_state(p, seed, input=element)

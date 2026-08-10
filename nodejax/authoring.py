@@ -152,7 +152,7 @@ def derive(parent: NodeDef | Node, *, apply: Callable | None = None,
         apply_fn = _advance_rng(lift(apply)) if cyclic else lift(apply)
     else:
         parametric, cyclic = pd.parametric, pd.cyclic
-        apply_fn = pd.apply_fn
+        apply_fn = pd._apply_impl      # the unbound impl, not the bound accessor
 
     if param is not None and not parametric:
         raise TypeError('a param constructor was given, but the derived apply does not take param')

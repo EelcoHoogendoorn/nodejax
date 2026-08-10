@@ -21,7 +21,7 @@ def taps(node_def: NodeDef) -> NodeDef:
     members = node_def.members
     names = list(members)
 
-    def apply_fn(p, s, i):
+    def apply_fn(nd, p, s, i):
         carry, states, aux = i, {}, {}
         for nm in names:
             states[nm], out = members[nm].apply_fn(p[nm], s[nm], carry)

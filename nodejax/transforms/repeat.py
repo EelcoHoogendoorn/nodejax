@@ -23,7 +23,7 @@ def repeat(node_def: NodeDef, n: int) -> NodeDef:
     """
     count = n
 
-    def apply_fn(param, state, input):
+    def apply_fn(nd, param, state, input):
         return _scan_apply(node_def, param, state, input,
                            stacked_param=False, length=count)
 

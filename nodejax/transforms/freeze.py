@@ -27,7 +27,7 @@ from nodejax.transforms.common import _over_bound, _transform_def
 
 
 def _Freeze(node_def: NodeDef, state) -> NodeDef:
-    def apply(p, _, input):
+    def apply(nd, p, _, input):
         _, out = node_def.apply_fn(p, state, input)
         return (), out
 
@@ -53,7 +53,7 @@ def detach(node_def: NodeDef) -> NodeDef:
     fixed (they receive zero gradient), state and behaviour otherwise
     unchanged."""
 
-    def apply(p, s, i):
+    def apply(nd, p, s, i):
         return node_def.apply_fn(jax.lax.stop_gradient(p), s, i)
 
     return _transform_def(

@@ -51,7 +51,7 @@ def tie(pipe: NodeDef, source: str, *aliases: str) -> NodeDef:
         d = pipe if ndef.apply_input_spec is None else pipe.with_input(ndef.apply_input_spec)
         return d.init_fn(expand(param), state_input, input)
 
-    def apply_fn(param, state, input):
+    def apply_fn(nd, param, state, input):
         return pipe.apply_fn(expand(param), state, input)
 
     # members ride along for introspection; serial stays False: flattening a

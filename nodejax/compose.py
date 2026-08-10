@@ -225,7 +225,7 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
     rng_members = {nm: defs[nm].apply_takes_rng for nm in names}
     boundary_rng = any(rng_members.values())
 
-    def apply_fn(param, state, input):
+    def apply_fn(nd, param, state, input):
         """Members chain on the carry; a member returning (output, aux)
         has the aux diverted into the pipe's own collection, keyed by
         member name, while the clean signal flows on. If any aux was
@@ -302,7 +302,11 @@ def _member_init(defs, apply, param, input, rng, seeds):
         w = _InitWired(defs, param, rng, seeds)
         call(w, materialize(input))
         states = w.collect()
-        _check_state_stable(states, lambda p, s, i: _probe_apply(_wrap_apply(apply, defs), p, s, i), param, input)
+        impl = _wrap_apply(apply, defs)
+        _check_state_stable(
+            states,
+            lambda p, s, i: _probe_apply(lambda p_, s_, i_: impl(None, p_, s_, i_), p, s, i),
+            param, input)
         return states
 
     key = rng
@@ -520,8 +524,8 @@ def wrapper(apply: Callable, inner: GenericDef | NodeDef | Node, *, name: str | 
     if len(sig) != 2 or sig[1] != 'input' or sig[0] in ('param', 'state', 'input'):
         raise TypeError(f'wrapper apply is (<inner>, input) -> output; got {sig}')
 
-    def apply_fn(param, state, input):
-        solo = _Solo(nd, param, state)
+    def apply_fn(_own, param, state, input):
+        solo = _Solo(nd, param, state)      # the WRAPPED def, captured
         raw_out = apply(solo, input)
         clean_out, direct_aux = split_aux(raw_out)
         aux_fields = {}

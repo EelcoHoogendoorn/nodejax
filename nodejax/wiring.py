@@ -398,12 +398,13 @@ def _wrap_apply(apply: Callable, defs: dict[str, NodeDef]) -> Callable:
     the raw (param, state, input) passes through."""
     authored = _author_call(apply)
     if authored is None:
-        return apply              # the raw triple, author-threaded
+        # the raw triple, author-threaded; stored def-first like every impl
+        return lambda nd, p, s, i: apply(p, s, i)
     call, fields = authored
     author_rng = fields is not None and 'rng' in fields
     boundary = author_rng or any(d.ndef.apply_takes_rng for d in defs.values())
 
-    def apply_fn(p, s, input):
+    def apply_fn(nd, p, s, input):
         key = None
         if boundary:
             key = input.rng                  # missing key fails here, loudly

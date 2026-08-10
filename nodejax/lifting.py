@@ -114,8 +114,7 @@ class _LeafStep:
 
 def _with_leaf_step(fn: Callable) -> ApplyFn:
     """Lift an apply function declaring `self` on a leaf node."""
-    def wrapped(p: Any, s: Any, i: Any) -> Any:
-        nd = getattr(p, 'ndef', None)
+    def wrapped(nd: Any, p: Any, s: Any, i: Any) -> Any:
         step_self = _LeafStep(nd, p, s)
         res = fn(step_self, s, i)
         if step_self._aux:
@@ -134,17 +133,21 @@ def _with_leaf_step(fn: Callable) -> ApplyFn:
     return wrapped
 
 
+# authored signature -> the stored impl, which is ALWAYS def-first:
+# (ndef, param, state, input). Most authored forms ignore the def; the
+# ndef channel receives it from the seam rather than digging it out of
+# whatever happened to be passed as param.
 _APPLY_LIFTS: dict[tuple[str, ...], Callable[[Callable], ApplyFn]] = {
-    ('input',):                          lambda f: lambda p, s, i: (s, f(i)),
-    ('param', 'input'):                  lambda f: lambda p, s, i: (s, f(p, i)),
+    ('input',):                          lambda f: lambda nd, p, s, i: (s, f(i)),
+    ('param', 'input'):                  lambda f: lambda nd, p, s, i: (s, f(p, i)),
     ('self', 'input'):                   lambda f: _with_leaf_step(lambda self_obj, s, i: (s, f(self_obj, i))),
-    ('state', 'input'):                  lambda f: lambda p, s, i: f(s, i),
-    ('param', 'state', 'input'):         lambda f: f,
+    ('state', 'input'):                  lambda f: lambda nd, p, s, i: f(s, i),
+    ('param', 'state', 'input'):         lambda f: lambda nd, p, s, i: f(p, s, i),
     ('self', 'state', 'input'):          lambda f: _with_leaf_step(lambda self_obj, s, i: f(self_obj, s, i)),
-    ('ndef', 'input'):                  lambda f: lambda p, s, i: (s, f(getattr(p, 'ndef', p), i)),
-    ('ndef', 'param', 'input'):         lambda f: lambda p, s, i: (s, f(getattr(p, 'ndef', p), p, i)),
-    ('ndef', 'state', 'input'):         lambda f: lambda p, s, i: f(getattr(p, 'ndef', p), s, i),
-    ('ndef', 'param', 'state', 'input'): lambda f: lambda p, s, i: f(getattr(p, 'ndef', p), p, s, i),
+    ('ndef', 'input'):                   lambda f: lambda nd, p, s, i: (s, f(nd, i)),
+    ('ndef', 'param', 'input'):          lambda f: lambda nd, p, s, i: (s, f(nd, p, i)),
+    ('ndef', 'state', 'input'):          lambda f: lambda nd, p, s, i: f(nd, s, i),
+    ('ndef', 'param', 'state', 'input'): lambda f: lambda nd, p, s, i: f(nd, p, s, i),
 }
 
 _OBJECT_NAMES = ('param', 'self')
@@ -159,11 +162,11 @@ def _lift_apply_general(apply: Callable) -> ApplyFn:
     has_ndef = 'ndef' in params
     fields = [p for p in params if p not in _APPLY_RESERVED]
 
-    def apply_fn(param: Any, state: Any, input: Any) -> Any:
+    def apply_fn(ndef: Any, param: Any, state: Any, input: Any) -> Any:
         kw: dict = {}
-        step_self = _LeafStep(getattr(param, 'ndef', None), param, state) if obj == 'self' else None
+        step_self = _LeafStep(ndef, param, state) if obj == 'self' else None
         if has_ndef:
-            kw['ndef'] = getattr(param, 'ndef', None)
+            kw['ndef'] = ndef
         if obj == 'self':
             kw['self'] = step_self
         elif obj is not None:
@@ -205,12 +208,12 @@ def _apply_lift(apply: Callable, sig: tuple) -> ApplyFn:
 
 def _advance_rng(apply_fn: ApplyFn) -> ApplyFn:
     """Auto-advance the reserved 'rng' state field."""
-    def wrapped(p, s, i):
+    def wrapped(nd, p, s, i):
         if _has_rng(s):
             next_key, use_key = jax.random.split(s.rng)
-            new_s, out = apply_fn(p, s.replace(rng=use_key), i)
+            new_s, out = apply_fn(nd, p, s.replace(rng=use_key), i)
             return new_s.replace(rng=next_key), out
-        return apply_fn(p, s, i)
+        return apply_fn(nd, p, s, i)
     return wrapped
 
 

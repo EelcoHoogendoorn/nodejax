@@ -48,7 +48,7 @@ def externalize(node_def: NodeDef, member: str,
     def param_fn(outer, param_input=Struct()):
         return set_by_path(node_def.build_param(param_input), {member: ()})
 
-    def apply_fn(param, state, input):
+    def apply_fn(nd, param, state, input):
         full = set_by_path(param, {member: input[member]})
         return node_def.apply_fn(full, state, input.input)
 

@@ -104,7 +104,7 @@ def _Parallel(defs: dict[str, NodeDef]) -> NodeDef:
     rng_strands = {nm: defs[nm].apply_takes_rng for nm in names}
     boundary_rng = any(rng_strands.values())
 
-    def apply_fn(param, state, input):
+    def apply_fn(nd, param, state, input):
         key = None
         if boundary_rng:
             key = input.rng                  # missing key fails here, loudly

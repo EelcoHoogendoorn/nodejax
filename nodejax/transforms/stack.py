@@ -24,7 +24,7 @@ def stack(node_def: NodeDef, n: int | None = None) -> NodeDef:
     if not (node_def.parametric or node_def.cyclic):
         raise TypeError(f'stack requires a parametric or cyclic node, got {node_def!r}')
 
-    def apply_fn(param, state, input):
+    def apply_fn(nd, param, state, input):
         return _scan_apply(node_def, param, state, input, stacked_param=True)
 
     return _transform_def(

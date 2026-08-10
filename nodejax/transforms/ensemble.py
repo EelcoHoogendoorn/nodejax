@@ -37,7 +37,7 @@ def ensemble(node_def: NodeDef, n: int | None = None,
                         'params, nothing else determines the ensemble size')
 
     num_members = n
-    def apply_fn(param, state, input):
+    def apply_fn(nd, param, state, input):
         param_axis = 0 if node_def.parametric else None
         count = jax.tree.leaves(param)[0].shape[0] if node_def.parametric else num_members
         return _vmap_apply(

@@ -30,7 +30,7 @@ def batch(node_def: NodeDef, n: int | None = None,
     """
     state_in = map_node_leaves(node_def, lambda member: None if 'single_batch_state' in member.tags else 0)
 
-    def apply_fn(param, state, input):
+    def apply_fn(nd, param, state, input):
         # state_in is both in_axes and out_axes: a 'single_batch_state' member
         # is broadcast in and comes back unmapped, no slicing after the fact
         return _vmap_apply(

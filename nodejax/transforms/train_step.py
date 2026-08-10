@@ -54,7 +54,7 @@ def train_step(node: NodeDef | Node, loss_fn: LossFn,
                       opt=optimizer.init(state_input.model),
                       inner=node.ndef.build_state(state_input.model, seed))
 
-    def apply_fn(_, ts, inp):
+    def apply_fn(nd, _, ts, inp):
         def loss_wrapper(model_param):
             new_inner, output = node.ndef.apply_fn(model_param, ts.inner, inp.input)
             return loss_fn(output, inp.target), new_inner

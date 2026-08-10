@@ -29,7 +29,7 @@ def at(node_def: NodeDef, field: str) -> NodeDef:
         return _resolve(node_def, fld).build_state(p, state_input,
                                              input=fld)
 
-    def apply_fn(p, s, i):
+    def apply_fn(nd, p, s, i):
         s2, out = node_def.apply_fn(p, s, i[field])
         return s2, i.replace(**{field: out})
 

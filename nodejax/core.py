@@ -373,10 +373,17 @@ class NodeDef:
 
     @property
     def apply_fn(self) -> Callable:
-        """apply_fn(param, state, input) -> (state, output) — the stored
-        impl verbatim; the same binding seam serves it the day an apply
-        reads its def."""
-        return self._apply_impl
+        """apply_fn(param, state, input) -> (state, output) — the contract
+        fn, bound JIT from the unbound impl exactly like param_fn and
+        init_fn. The stored impl is (ndef, param, state, input): a
+        composite resolves its members from the def it is handed, so
+        swapping a member needs no re-lift and the canonical form is
+        closed under member substitution."""
+        impl, this = self._apply_impl, self
+
+        def apply_fn(param: Param, state: State, input: Input) -> tuple[State, Output]:
+            return impl(this, param, state, input)
+        return apply_fn
 
     @property
     def ndef(self) -> NodeDef:
