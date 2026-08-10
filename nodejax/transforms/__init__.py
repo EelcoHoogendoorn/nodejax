@@ -10,7 +10,7 @@ specialization.
 One file per transform; shared lifting helpers in common.py.
 """
 
-from nodejax.transforms.batch import batch
+from nodejax.transforms.batch import batch, unbatched
 from nodejax.transforms.ensemble import ensemble
 from nodejax.transforms.stack import stack
 from nodejax.transforms.repeat import repeat
@@ -28,7 +28,7 @@ from nodejax.transforms.ttt import ttt, reconstruction
 from nodejax.transforms.freeze import freeze, tree_freeze, detach, tree_detach
 from nodejax.transforms.tree_utils import map_members, tree_filter
 
-__all__ = ['batch', 'ensemble', 'stack', 'repeat', 'scan', 'residual',
+__all__ = ['batch', 'unbatched', 'ensemble', 'stack', 'repeat', 'scan', 'residual',
            'train_step', 'finetune', 'metasgd', 'tie', 'taps', 'externalize',
            'parallel', 'at', 'ttt', 'freeze', 'tree_freeze', 'detach',
            'tree_detach', 'tree_filter', 'map_members']

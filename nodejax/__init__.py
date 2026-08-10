@@ -63,7 +63,7 @@ from nodejax.authoring import node_def, derive, KeyStream
 from nodejax.generic import GenericDef, generic
 from nodejax.ambient import ambient
 from nodejax.paths import replace_by_path, set_by_path
-from nodejax.transforms import batch, ensemble, stack, repeat, scan, residual, train_step, finetune, metasgd, taps, tie, externalize, parallel, at, ttt, reconstruction, freeze, tree_freeze, detach, tree_detach, tree_filter, map_members
+from nodejax.transforms import batch, unbatched, ensemble, stack, repeat, scan, residual, train_step, finetune, metasgd, taps, tie, externalize, parallel, at, ttt, reconstruction, freeze, tree_freeze, detach, tree_detach, tree_filter, map_members
 from nodejax.compose import serial, serial_generic, composite, composite_init, wrapper
 from nodejax import control
 from nodejax.control import closed_loop, observed_loop
@@ -85,7 +85,7 @@ __all__ = [
     # submodules
     'control',
     # transforms
-    'batch', 'ensemble', 'stack', 'repeat', 'scan', 'residual', 'train_step',
+    'batch', 'unbatched', 'ensemble', 'stack', 'repeat', 'scan', 'residual', 'train_step',
     'finetune', 'metasgd', 'taps', 'externalize', 'parallel', 'at', 'ttt', 'reconstruction',
     'freeze', 'tree_freeze', 'detach', 'tree_detach', 'tree_filter', 'map_members', 'set_by_path', 'closed_loop', 'observed_loop',
     # composition

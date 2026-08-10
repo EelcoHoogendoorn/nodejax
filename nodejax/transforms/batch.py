@@ -94,3 +94,36 @@ def batch(node_def: NodeDef, n: int | None = None,
         rebuild=lambda d: batch(d, n=n, axis=axis),
     )
 
+
+@_over_generic
+@_over_bound
+def unbatched(node_def: NodeDef, axis: str = 'batch') -> NodeDef:
+    """Satisfy a named-axis need with a batch of ONE, keeping the axis out of
+    the interface: one sample in, one sample out.
+
+    A per-sample block whose moments are collectives declares an axis need,
+    and batch() binds it. At inference there may be no batch to bind, but the
+    need is structural rather than a mode, so the answer is a different BUILD
+    of the same params — never a flag the node tests for the axis. This binds
+    the name over a size-one axis, added and stripped inside, so the caller's
+    signature is the unbatched one.
+
+    The OUTPUT is the batched path's for that sample: a normalizer divides by
+    its RUNNING moments, which do not depend on who else is in the batch. The
+    state UPDATE is another matter — a batch of one has zero variance — so
+    this belongs with a frozen state, which is what inference wants anyway.
+    """
+    def apply_fn(nd, param, state, input):
+        lead = lambda t: jax.tree.map(lambda a: jnp.asarray(a)[None], t)
+        new_state, out = jax.vmap(
+            lambda s_, i_: node_def.apply_fn(param, s_, i_), axis_name=axis,
+        )(lead(state), lead(input))
+        strip = lambda t: jax.tree.map(lambda a: a[0], t)
+        return strip(new_state), strip(out)
+
+    return _transform_def(
+        node_def,
+        name=f'unbatched({node_def.name})',
+        apply_fn=apply_fn,
+        rebuild=lambda d: unbatched(d, axis=axis),
+    )

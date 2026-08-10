@@ -7,7 +7,7 @@ bind vmap axes directly ('batch' / 'ensemble' by convention).
 import jax
 import jax.numpy as jnp
 
-from nodejax import node_def, batch, ensemble, stack, residual, composite, nn
+from nodejax import node_def, batch, unbatched, ensemble, stack, residual, composite, nn
 from nodejax.struct import Struct
 
 
@@ -122,3 +122,41 @@ def test_a_shared_slot_that_is_not_really_shared_is_loud():
     import pytest
     with pytest.raises(ValueError, match='out_axes is None'):
         model.apply(model.init(), x)
+
+
+def test_unbatched_runs_an_axis_needing_model_on_one_sample():
+    """A per-sample block whose moments are collectives cannot run with no
+    axis bound — and should not paper over it by testing for one, since the
+    need is structural. unbatched() binds the name over a batch of ONE and
+    keeps the axis out of the interface, so the same params serve inference
+    on a single sample.
+
+    The output matches the batched path's for that sample exactly: the
+    normalizer divides by its RUNNING moments, which are state and do not
+    depend on who else is in the batch."""
+    x = jnp.array([[1., 2., 3., 4.], [5., 6., 7., 8.], [9., 10., 11., 12.]])
+    pipe = nn.Linear(4) >> nn.BatchNorm(0.1)
+
+    trained = batch(pipe).with_input(jnp.zeros_like(x)).parameterize(rng=jax.random.PRNGKey(0))
+    state = trained.init()
+    for _ in range(50):                       # converge the running moments
+        state, _ = trained.apply(state, x)
+    _, batched_out = trained.apply(state, x)
+
+    # the same params, one sample, no batch axis in sight
+    solo = unbatched(pipe).bind(trained.param)
+    _, solo_out = solo.apply(state, x[0])
+    assert solo_out.shape == (4,)
+    assert jnp.allclose(solo_out, batched_out[0], atol=1e-5)
+
+
+def test_an_unbound_axis_is_an_error_not_a_fallback():
+    """The need is not silently waived: applying an axis-needing node with
+    nothing bound fails, rather than quietly reducing over nothing."""
+    import pytest
+    x = jnp.array([[1., 2.], [3., 4.]])
+    pipe = nn.Linear(2) >> nn.BatchNorm(0.1)
+    model = batch(pipe).with_input(x).parameterize(rng=jax.random.PRNGKey(0))
+
+    with pytest.raises(NameError, match='unbound axis name'):
+        pipe.apply_fn(model.param, model.init(), x[0])
