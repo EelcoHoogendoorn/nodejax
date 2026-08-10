@@ -52,11 +52,11 @@ def build_env(command_ctrl=None, capacity=jnp.inf, model_tau=0.0,
         cc = CurrentController(
             motor=motor,                           # the controller's model: the same motor def
             estimator=ModelEstimator(
-                filter=CurrentSensor(noise_std=0.1) >> EMA()(tau=2e-4),
+                filter=CurrentSensor(noise_std=0.1) >> EMA(warm=True)(tau=2e-4),
                 model_fn=foc_current_model()).parameterize(mix=Struct(tau=model_tau)),
             controller=PID().parameterize(kp=0.5, ki=200.0, integral_limit=48.0),
             fets=FET().parameterize(r_th=2.0, c_th=0.5, limit=fet_limit),
-            bus_est=Noisy(0.2) >> EMA()(tau=1e-3),
+            bus_est=Noisy(0.2) >> EMA(warm=True)(tau=1e-3),
         ).parameterize(ff=Struct(r=0.5, bemf=0.5, l=0.0), limit=Struct(limit=50.0))
         command = command_ctrl if command_ctrl is not None else \
             VelocityCommand(PID().parameterize(kp=1.0, ki=10.0,

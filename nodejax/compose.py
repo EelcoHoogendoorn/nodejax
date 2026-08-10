@@ -199,7 +199,11 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
         bundles want one, and the input value (or the def's bound spec)
         threads member by member — each member's def resolved to its own
         upstream shape, each apply deriving the next member's carry."""
-        carry = input if input is not None else (ndef.input if ndef.resolved else None)
+        # a REAL value threads as a value; a bound shape only resolves each
+        # member's def. A member that PRIMES from its input refuses when all
+        # we have is a shape, rather than warm-starting from zeros.
+        real = input is not None
+        carry = input if real else (ndef.input if ndef.resolved else None)
         key = state_input.rng if 'rng' in state_input else None
         states = {}
         for nm in names:
@@ -210,7 +214,7 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
                 seed = seed.replace(rng=sub_)
             d2 = d if carry is None else _resolve(d, carry)
             try:
-                states[nm] = d2.build_state(param[nm], seed, input=carry)
+                states[nm] = d2.build_state(param[nm], seed, input=carry if real else None)
             except TypeError as e:
                 raise TypeError(f"pipe member '{nm}': {e}") from e
             if carry is not None:

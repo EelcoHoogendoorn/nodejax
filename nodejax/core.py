@@ -497,14 +497,6 @@ class NodeDef:
         missing = [k for k in spec.__keys__ if spec[k] is REQUIRED and k not in given]
         if missing:
             raise TypeError(f'{self.name}.build_state: missing required bundle fields {missing}')
-        # an input-priming init is satisfiable two ways: a real value
-        # passed here (or threaded by a wiring), or a RESOLVED spec the
-        # init lift materializes as the fallback; only a def with
-        # neither must refuse
-        if (input is None and self.init_requires_input
-                and not _spec_resolved(self.apply_input_spec)):
-            raise TypeError(f'{self.name} primes its state from a real input value; '
-                            'pass input=<value> or declare an input spec')
         # a given input value resolves the def on the way in (fill or
         # validate), so a shape-reading init sees a resolved ndef
         nd = self if input is None else _resolve(self, input)

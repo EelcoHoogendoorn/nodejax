@@ -121,7 +121,7 @@ def BYOL(enc: NodeDef, pred: NodeDef, augment: Callable,
     params. state = Struct(train=..., ema=..., views=...)."""
     online = serial(enc=enc, pred=pred)
     trainer = train_step(online, loss, opt)
-    smooth = nn.EMA(tau)
+    smooth = nn.EMA(tau, warm=True)   # the target starts AT the online weights
     views = Views(augment)
 
     def init(rng: KeyStream, ndef) -> Struct:

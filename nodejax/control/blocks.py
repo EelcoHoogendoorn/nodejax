@@ -77,20 +77,27 @@ def Diff(dt):
 
 
 @ambient
-def EMA(dt):
-    """First-order low-pass, tau in seconds; signal-polymorphic."""
+def EMA(dt, warm: bool = False):
+    """First-order low-pass, tau in seconds; signal-polymorphic.
+
+    `warm` starts the filter AT the first real input rather than at zeros
+    — a sensor that samples before it is switched on — and the node then
+    requires a real value at init. Cold needs only a shape."""
     def param(tau):
         return Struct(tau=tau)
 
     def init(input):
         return input
 
+    def init_cold(ndef):
+        return jax.tree.map(jnp.zeros_like, ndef.input)
+
     def apply(self, state, input):
         alpha = 1.0 / (self.tau / dt + 1.0)
         new = jax.tree.map(lambda s, x: s * (1.0 - alpha) + x * alpha, state, input)
         return new, new
 
-    return node_def(apply, init=init, param=param, name='ema')
+    return node_def(apply, init=init if warm else init_cold, param=param, name='ema')
 
 
 def Blend(dt):

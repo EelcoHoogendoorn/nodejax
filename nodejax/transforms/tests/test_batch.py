@@ -29,7 +29,7 @@ def test_batch_single_batch_state():
         new_state = Struct(count=state.count + total)
         return new_state, input * param.scale
 
-    def pop_init(ndef, param, state_input=Struct(), input=None):
+    def pop_init(param):                      # a constant seed: no shape, no value
         return Struct(count=jnp.array(0.0))
 
     pop_node = node_def(pop_apply, init=pop_init, param=lambda: Struct(scale=2.0), tags={'single_batch_state'})

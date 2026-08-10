@@ -34,11 +34,11 @@ def stock_stack():
             motor=Electrical(DT)(),
             estimator=ModelEstimator(
                 DT,
-                filter=CurrentSensor() >> EMA(DT)(tau=2e-3),
+                filter=CurrentSensor() >> EMA(DT, warm=True)(tau=2e-3),
                 model_fn=foc_current_model(DT)),
             controller=PID(DT)(kp=0.5, ki=500.0),
             fets=FET(DT)(r_th=2.0, c_th=5.0),
-            bus_est=Noisy(0.2) >> EMA(DT)(tau=0.01)),
+            bus_est=Noisy(0.2) >> EMA(DT, warm=True)(tau=0.01)),
         motor=Electrical(DT)(),
         motor_thermal=DeratingThermal(DT)(r_th=1.5, c_th=40.0, limit=100.0))
 

@@ -24,7 +24,7 @@ def StatefulLinearNode(D: int = 4):
     def param(ndef, rng: KeyStream):
         return Struct(w=jax.random.normal(rng.next(), (D, D)))
 
-    def init(param, input=None):
+    def init(param):
         return Struct(count=jnp.array(0))
 
     def apply(param, state, input):
@@ -38,7 +38,7 @@ def StochasticNode():
     def param(ndef, rng: KeyStream):
         return Struct(scale=jnp.array(1.0, dtype=jnp.float32))
 
-    def init(param, input=None):
+    def init(param):
         return Struct(count=jnp.array(0))
 
     def apply(param, state, x, rng):

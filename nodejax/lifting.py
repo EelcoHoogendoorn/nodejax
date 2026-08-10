@@ -245,7 +245,17 @@ def _lift_param(ctor: Callable) -> Callable:
 def _lift_init(init: Callable[..., State]) -> Callable[..., State]:
     """Lift an authored init function into init_fn(ndef, param, state_input, input=None)."""
     params = _no_var_params(init, 'an init')
+    if 'input' in params and params['input'].default is not inspect.Parameter.empty:
+        raise TypeError(
+            f'{init.__name__}: `input` at init means the state is PRIMED from the '
+            'value, so it is required; an init that does not need it omits it. A '
+            'default says neither.')
     names = list(params)
+    # `input` with no default is a DEMAND for the value, the same REQUIRED
+    # convention the bundle specs use; with a default the init tolerates
+    # its absence and the default fills.
+    primes = ('input' in params
+              and params['input'].default is inspect.Parameter.empty)
 
     def init_fn(ndef, param: Param, state_input: Struct = Struct(),
                 input: Any = None) -> State:
@@ -256,6 +266,15 @@ def _lift_init(init: Callable[..., State]) -> Callable[..., State]:
             elif nm == 'ndef':
                 kw[nm] = ndef
             elif nm == 'input':
+                # declaring `input` at init means PRIMING from the value:
+                # a shape cannot stand in, since a state primed from zeros
+                # is not the state the first real input would have produced.
+                # An init wanting only the shape declares `ndef` instead.
+                if input is None and primes:
+                    raise TypeError(
+                        f'{ndef.name} primes its state from a real input value; pass '
+                        'input=<value>, or read the shape via ndef if that is '
+                        'all the init needs')
                 kw[nm] = input
             elif nm == 'rng':
                 if 'rng' in state_input:
