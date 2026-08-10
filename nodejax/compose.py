@@ -23,7 +23,7 @@ from nodejax.core import (Node, NodeDef, Composite, Serial, split_aux, _input_or
 from nodejax.authoring import (KeyStream, _lift_param, _lift_init,
                                      _state_spec_from_sig, _init_requires_input)
 from nodejax.generic import GenericDef
-from nodejax.wiring import (_author_call, _wrap_apply, _Wired, _InitWired, _BuildingWired,
+from nodejax.wiring import (_authored, _wrap_apply, _Wired, _InitWired, _BuildingWired,
                                   _Solo, _NO_INPUT)
 from nodejax.spec import materialize
 
@@ -303,11 +303,10 @@ def _member_init(defs, apply, param, input, rng, seeds):
     if unknown:
         raise TypeError(f'unknown composite init members: {sorted(unknown)}')
 
-    authored = _author_call(apply)
-    if input is not None and authored is not None:
-        call, _ = authored
+    authored = _authored(apply)
+    if input is not None and authored.wired:
         w = _InitWired(defs, param, rng, seeds)
-        call(w, materialize(input))
+        authored.run(w, materialize(input))
         states = w.collect()
         impl = _wrap_apply(apply, defs)
         _check_state_stable(
@@ -422,15 +421,14 @@ def composite(apply: Callable, *, members: dict[str, GenericDef | NodeDef | Node
     if reserved:
         raise TypeError(f'member names shadow self attributes: {sorted(reserved)}')
 
-    authored = _author_call(apply)
-    author_fields = authored[1] if authored is not None else None
+    authored = _authored(apply)
     declared = apply_input_spec   # apply_input_spec= declares the spec, and
-    if declared is None and author_fields is not None:
+    if declared is None and authored.fields:
         # the leaf sugar's rule, shared: a field-style signature IS the
         # spec declaration — fields REQUIRED or carrying their defaults
         declared = _bundle_spec_from_sig(apply, drop=('self',))
     apply_fn = _wrap_apply(apply, defs)   # doubles as init's default input offer
-    self_form = authored is not None
+    self_form = authored.wired
 
     def param_fn(ndef, param_input=Struct()):
         """The composite's param constructor: member slots are
@@ -445,7 +443,7 @@ def composite(apply: Callable, *, members: dict[str, GenericDef | NodeDef | Node
         if carry is not None and self_form and any(d.param_reads_shape
                                                    for d in defs.values()):
             w = _BuildingWired(defs, given, key, slots)
-            _author_call(apply)[0](w, carry)
+            authored.run(w, carry)
             for nm, d in defs.items():
                 if nm not in w._built:            # members the wiring never called
                     g = slots.get(nm)

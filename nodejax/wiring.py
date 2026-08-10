@@ -361,74 +361,123 @@ class _Solo:
         raise AttributeError(f"def {self._nd.name!r} has no method {name!r}")
 
 
-def _author_call(apply: Callable):
-    """Canonicalize an authored composite apply to call(self, input).
-    Two authored forms exist, mirroring the leaf sugar: (self, input)
-    receives the whole input channel, and (self, field, ...) receives
-    the input bundle unpacked by name, with a declared rng field
-    delivered as the boundary key stream (the SAME stream member
-    injection draws from, so author draws and injections never share a
-    key). Returns (call, field names or None), or None when the apply
-    is the raw contract triple."""
+class _RawApply:
+    """An apply authored as the contract triple itself: (param, state, input).
+
+    There is no wiring object and nothing to discover — the author threads
+    member states by hand. It declares no input fields, so it declares no
+    spec, and the construction walks have no wiring to run."""
+    __slots__ = ('_apply',)
+    fields: tuple[str, ...] = ()
+    author_rng = False
+    wired = False
+
+    def __init__(self, apply: Callable):
+        self._apply = apply
+
+    def run(self, wired, input):
+        raise TypeError('the raw contract triple has no wiring to run')
+
+    def lift(self, defs: dict[str, NodeDef]) -> Callable:
+        apply = self._apply
+        return lambda nd, p, s, i: apply(p, s, i)
+
+
+class _WiredApply:
+    """An apply authored against `self`: the wiring builds the transient step
+    object, and the same call drives the param- and init-time discovery runs.
+
+    Subclasses differ only in how the input channel reaches the author."""
+    __slots__ = ('_apply',)
+    fields: tuple[str, ...] = ()
+    wired = True
+
+    def __init__(self, apply: Callable):
+        self._apply = apply
+
+    @property
+    def author_rng(self) -> bool:
+        return 'rng' in self.fields
+
+    def run(self, wired, input):
+        raise NotImplementedError
+
+    def lift(self, defs: dict[str, NodeDef]) -> Callable:
+        author_rng = self.author_rng
+        run = self.run
+
+        def apply_fn(nd, p, s, input):
+            members = defs if nd is None else nd.members
+            boundary = author_rng or any(d.ndef.apply_takes_rng for d in members.values())
+            key = None
+            if boundary:
+                key = input.rng              # missing key fails here, loudly
+                input = input.without('rng')
+            self = _Wired(p, s, members, boundary_key=key)
+            out = run(self, input)
+            clean_out, direct_aux = split_aux(out)
+            if direct_aux is not None:
+                if isinstance(direct_aux, Struct):
+                    for k in direct_aux.__keys__:
+                        self._aux[k] = direct_aux[k]
+                elif isinstance(direct_aux, dict):
+                    for k, v in direct_aux.items():
+                        self._aux[k] = v
+            new_state = self.collect()
+            if self._aux:
+                # member aux & self.sow(...) re-emitted as the (output, collection) pair
+                return new_state, (clean_out, Aux(**self._aux))
+            return new_state, clean_out
+
+        return apply_fn
+
+
+class _SelfApply(_WiredApply):
+    """(self, input): the author receives the whole input channel."""
+    __slots__ = ()
+
+    def run(self, wired, input):
+        return self._apply(wired, input)
+
+
+class _FieldApply(_WiredApply):
+    """(self, <fields...>): the input bundle unpacked by name, so the
+    signature IS the input spec declaration. A declared rng field is
+    delivered as the boundary key stream — the SAME stream member injection
+    draws from, so author draws and injections never share a key."""
+    __slots__ = ('fields',)
+
+    def __init__(self, apply: Callable, fields: tuple[str, ...]):
+        super().__init__(apply)
+        self.fields = fields
+
+    def run(self, wired, input):
+        kw = {}
+        for f in self.fields:
+            if f == 'rng':
+                kw[f] = wired._boundary
+            elif f in input:
+                kw[f] = input[f]             # absent optional: the sig default fills
+        return self._apply(wired, **kw)
+
+
+def _authored(apply: Callable) -> _RawApply | _WiredApply:
+    """Which of the three authored apply forms this is, as an object that
+    answers for itself: how to run the wiring, what fields it declares, and
+    how to lift it into the contract impl."""
     sig = tuple(inspect.signature(apply).parameters)
     if sig == ('param', 'state', 'input'):
-        return None
+        return _RawApply(apply)
     if sig == ('self', 'input'):
-        return (lambda self, input: apply(self, input)), None
+        return _SelfApply(apply)
     if sig[:1] == ('self',) and len(sig) > 1 and 'input' not in sig:
-        fields = sig[1:]
-
-        def call(self, input):
-            kw = {}
-            for f in fields:
-                if f == 'rng':
-                    kw[f] = self._boundary
-                elif f in input:
-                    kw[f] = input[f]        # absent optional: the sig default fills
-            return apply(self, **kw)
-
-        return call, fields
+        return _FieldApply(apply, sig[1:])
     raise TypeError('composite apply is (self, input), (self, <fields...>), or '
                     f'the raw (param, state, input) -> (state, output); got {sig}')
 
 
 def _wrap_apply(apply: Callable, defs: dict[str, NodeDef]) -> Callable:
-    """Transform a composite apply into contract shape, by signature:
-    authored forms build the transient step object and auto-collect;
-    the raw (param, state, input) passes through.
-
-    The members come from the DEF the seam hands over, not from `defs`
-    captured here, so substituting a member needs no re-lift: a rewritten
-    composite is the same impl over a new member table. `defs` remains the
-    fallback for the construction walks, which run before a def exists."""
-    authored = _author_call(apply)
-    if authored is None:
-        # the raw triple, author-threaded; stored def-first like every impl
-        return lambda nd, p, s, i: apply(p, s, i)
-    call, fields = authored
-    author_rng = fields is not None and 'rng' in fields
-
-    def apply_fn(nd, p, s, input):
-        members = defs if nd is None else nd.members
-        boundary = author_rng or any(d.ndef.apply_takes_rng for d in members.values())
-        key = None
-        if boundary:
-            key = input.rng                  # missing key fails here, loudly
-            input = input.without('rng')
-        self = _Wired(p, s, members, boundary_key=key)
-        out = call(self, input)
-        clean_out, direct_aux = split_aux(out)
-        if direct_aux is not None:
-            if isinstance(direct_aux, Struct):
-                for k in direct_aux.__keys__:
-                    self._aux[k] = direct_aux[k]
-            elif isinstance(direct_aux, dict):
-                for k, v in direct_aux.items():
-                    self._aux[k] = v
-        new_state = self.collect()
-        if self._aux:
-            # member aux & self.sow(...) re-emitted as the (output, collection) pair
-            return new_state, (clean_out, Aux(**self._aux))
-        return new_state, clean_out
-    return apply_fn
-
+    """Transform a composite apply into contract shape: the authored form
+    knows how to lift itself. `defs` is the member table the construction
+    walks use, before a def exists to carry one."""
+    return _authored(apply).lift(defs)
