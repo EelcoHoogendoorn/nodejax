@@ -395,21 +395,27 @@ def _author_call(apply: Callable):
 def _wrap_apply(apply: Callable, defs: dict[str, NodeDef]) -> Callable:
     """Transform a composite apply into contract shape, by signature:
     authored forms build the transient step object and auto-collect;
-    the raw (param, state, input) passes through."""
+    the raw (param, state, input) passes through.
+
+    The members come from the DEF the seam hands over, not from `defs`
+    captured here, so substituting a member needs no re-lift: a rewritten
+    composite is the same impl over a new member table. `defs` remains the
+    fallback for the construction walks, which run before a def exists."""
     authored = _author_call(apply)
     if authored is None:
         # the raw triple, author-threaded; stored def-first like every impl
         return lambda nd, p, s, i: apply(p, s, i)
     call, fields = authored
     author_rng = fields is not None and 'rng' in fields
-    boundary = author_rng or any(d.ndef.apply_takes_rng for d in defs.values())
 
     def apply_fn(nd, p, s, input):
+        members = defs if nd is None else nd.members
+        boundary = author_rng or any(d.ndef.apply_takes_rng for d in members.values())
         key = None
         if boundary:
             key = input.rng                  # missing key fails here, loudly
             input = input.without('rng')
-        self = _Wired(p, s, defs, boundary_key=key)
+        self = _Wired(p, s, members, boundary_key=key)
         out = call(self, input)
         clean_out, direct_aux = split_aux(out)
         if direct_aux is not None:

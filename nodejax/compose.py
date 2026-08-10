@@ -231,7 +231,14 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
         member name, while the clean signal flows on. If any aux was
         collected the pipe re-emits (carry, collection) — the same pair
         shape, so the channel nests through enclosing composites
-        (see core.split_aux for the output doctrine)."""
+        (see core.split_aux for the output doctrine).
+
+        Members come from the DEF the seam hands over, so a rewritten pipe
+        is this same impl over a new member table, with no re-lift."""
+        members = defs if nd is None else nd.members
+        names = list(members)
+        rng_members = {nm: members[nm].apply_takes_rng for nm in names}
+        boundary_rng = any(rng_members.values())
         key = None
         carry = input
         if boundary_rng:
@@ -247,7 +254,7 @@ def _serial(defs: dict[str, NodeDef], given: dict[str, Any] | None = None) -> No
                                     'the signal into it must be a named Struct to '
                                     'carry the key alongside the data')
                 member_in = Struct(**dict(member_in.__items__), rng=sub)
-            new_states[nm], out = defs[nm].apply_fn(param[nm], state[nm], member_in)
+            new_states[nm], out = members[nm].apply_fn(param[nm], state[nm], member_in)
             carry, member_aux = split_aux(out)
             if member_aux is not None:
                 aux[nm] = member_aux
