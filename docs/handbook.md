@@ -1,6 +1,9 @@
 # NodeJAX Handbook
 
-A technical reference guide to NodeJAX's core concepts, authoring system, transforms, and composition mechanics. For the overarching architectural design principles and comparison with standard Python OOP, see [`docs/philosophy.md`](philosophy.md).
+A public technical reference to NodeJAX's concepts, authoring system,
+transforms, and composition. For the implementation architecture and authoring
+interfaces, see the [design](design.md). For the argument behind the
+model, see the [philosophy](philosophy.md).
 
 ---
 
@@ -8,7 +11,9 @@ A technical reference guide to NodeJAX's core concepts, authoring system, transf
 
 ## 1. The Core Contract
 
-In NodeJAX, every node is defined by up to three pure functions adhering to a uniform contract:
+An authored Node uses up to three role functions: `param`, `init`, and
+`apply`. The canonical `Contract` presents those roles through four uniform
+entry points:
 
 ```
 node.contract.param(param_input, rng)               -> param
@@ -17,15 +22,15 @@ node.contract.prime(param, state_input, input, rng) -> state
 node.contract.apply(param, state, input, rng)       -> (state, output)
 ```
 
-At this compiled boundary, `rng` is a `MaybeKeyStream`: keyed when the call
+At this canonical boundary, `rng` is a `MaybeKeyStream`: keyed when the call
 requires randomness and empty when it does not. This keeps the contract
 signature uniform without exposing the transform-oriented type to authored
 leaf functions.
 
-`init` and `prime` are the two initialization calls: a definition that
-builds its state from a real runtime value has `prime` and no `init`, and
-every other definition has `init` and no `prime`. Which one applies is a
-fact about the definition, never about whether an argument was passed.
+`init` and `prime` are two entry points to the single state-initialization
+role. A definition records one initializer and whether it requires a real
+runtime value. `init` handles the no-input form. `prime` resolves the
+definition from a real input and supplies that value when required.
 
 ### The Three Contract Slots
 * **`param`**: Static weights and learnable variables created at parameterization.
@@ -58,7 +63,8 @@ are not runtime subclasses.
   * Contain no child sub-nodes.
 
 * **Composite construction (`Composite`, `serial`, `parallel`, `>>`)**:
-  * Contain **no raw math of their own**; behavior is 100% structural composition over registered `self.members`.
+  * Build behavior from registered members. An authored `Composite` may
+    perform arbitrary JAX operations around its member calls.
   * Compose member hierarchies across all structural spaces:
     1. **`param`**: Member parameter PyTrees (`param.member_a`, `param.member_b`).
     2. **`state`**: Member state PyTrees (`state.member_a`, `state.member_b`).
@@ -95,7 +101,7 @@ maml = train_step(batch(finetune(train_step(model, mse, optax.sgd(0.1)))), mse, 
 
 ---
 
-## 5. The Binding Ladder
+## 5. Binding Stages
 
 NodeJAX models system instantiation across five explicit stages:
 

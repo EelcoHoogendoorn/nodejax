@@ -105,6 +105,8 @@ The complete gallery lives in [`nodejax/examples/`](nodejax/examples/).
   composition, transforms, and training.
 - The [handbook](docs/handbook.md) is the technical reference for the contract,
   binding stages, authoring system, and transforms.
+- The [design](docs/design.md) describes the implementation architecture and
+  its Node-authoring and transform-authoring interfaces.
 - The [design philosophy](docs/philosophy.md) explains why components, explicit
   lifetimes, value semantics, and transform closure belong together.
 - The [framework comparison](docs/comparison.md) examines ecosystem tradeoffs

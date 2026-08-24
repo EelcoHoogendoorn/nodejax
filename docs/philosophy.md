@@ -160,9 +160,9 @@ NodeJAX organizes its state model around that same reality:
 apply(param, state, input) -> (next_state, output)
 ```
 
-Any different state-like framework astraction eventually has to transpile into
-such form to participate in a scan. NodeJAX sticks with the functional model,
-and seeks to provide the syntactic sugar and utilities to facilitate it.
+Any other framework representation of state must eventually take this form to
+participate in a scan. NodeJAX uses it directly and provides the syntax and
+utilities to work with it.
 
 An RNN hidden value, BatchNorm statistics, optimizer moments, a simulator's
 velocity and temperature, and an autoregressive KV cache are the same kind of
@@ -300,5 +300,6 @@ the extent that meaningful Nodes combine directly and the plumbing needed
 to preserve their meaning disappears from ordinary code.
 
 NodeJAX is under active development. The [cookbook](cookbook.md) teaches the
-API, the [handbook](handbook.md) describes its mechanics, and the
+API, the [handbook](handbook.md) is the public technical reference, the
+[design](design.md) describes the implementation architecture, and the
 [comparison](comparison.md) considers related framework choices.

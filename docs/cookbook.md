@@ -66,7 +66,7 @@ assert trajectory[-1] == 15.0
 ```
 
 Adding `init` makes a node **cyclic**:
-* `initialize()` constructs and binds initial state (a **state-full** or S-Node).
+* `initialize()` constructs and binds initial state, producing a `PSNode`.
 * Bound nodes are immutable. Calling a stateful node returns a **successor** `(new_model, output)` binding the updated state, without mutating the original object.
 * `model.scan(...)` compiles with `jax.lax.scan` to run the model over a sequence.
 
