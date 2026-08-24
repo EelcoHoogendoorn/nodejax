@@ -22,19 +22,20 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax import ambient, node_def
+from nodejax import Node, node, ambient, Leaf
 
 from nodejax.examples.actuator.dq import DQ
 from nodejax.examples.actuator.utils import wrap as angle_wrap
 
 
-def wrap():
+@node
+def wrap() -> Node:
     """Optional pipeline stage: angle-wrap the incoming error (rotary)."""
-    return node_def(lambda input: angle_wrap(input), name='wrap')
+    return Leaf(lambda input: angle_wrap(input))
 
 
-@ambient
-def Observer(dt):
+@node
+def Observer(dt: float) -> Node:
     """Predict-correct EMA observer for position and velocity, with
     angle wrapping; time constants are params (per-step alpha =
     1/(1+tau))."""
@@ -57,10 +58,11 @@ def Observer(dt):
         new = Struct(position=position, velocity=velocity)
         return new, new
 
-    return node_def(apply, init=init, param=param, name='observer')
+    return Leaf(apply, init=init, param=param)
 
 
-def Encoder(resolution=2000, noise_std=0.1, phase_offset=0.0):
+@node
+def Encoder(resolution: int=2000, noise_std: float=0.1, phase_offset: float=0.0) -> Node:
     """Absolute encoder: quantization + count noise; rng as state."""
     rad_to_counts = resolution / (2.0 * jnp.pi)
 
@@ -73,22 +75,24 @@ def Encoder(resolution=2000, noise_std=0.1, phase_offset=0.0):
         measured = jnp.round(counts) / rad_to_counts - phase_offset
         return state, measured
 
-    return node_def(apply, init=init, name='encoder')
+    return Leaf(apply, init=init)
 
 
-def CurrentSensor(noise_std=0.1):
+@node
+def CurrentSensor(noise_std: float=0.1) -> Node:
     """DQ current sensor with gaussian noise; rng as state."""
     def init(rng):
         return Struct(rng=rng)
 
     def apply(state, input):
-        nd, nq = jax.random.normal(state.rng, shape=(2,)) * noise_std
-        return state, input + DQ(nd, nq)
+        node, nq = jax.random.normal(state.rng, shape=(2,)) * noise_std
+        return state, input + DQ(node, nq)
 
-    return node_def(apply, init=init, name='current_sensor')
+    return Leaf(apply, init=init)
 
 
-def Noisy(noise_std=0.1):
+@node
+def Noisy(noise_std: float=0.1) -> Node:
     """Additive gaussian measurement noise on a scalar; rng as state.
     Compose sensors as pipelines: voltage_est = Noisy() >> EMA(dt)."""
     def init(rng):
@@ -97,10 +101,11 @@ def Noisy(noise_std=0.1):
     def apply(state, input):
         return state, input + jax.random.normal(state.rng) * noise_std
 
-    return node_def(apply, init=init, name='noisy')
+    return Leaf(apply, init=init)
 
 
-def Bag(**fields):
+@node
+def Bag(**fields) -> Node:
     """A leaf holding raw params whose behavior is DIFFUSE.
 
     The one right home for params that are not themselves nodes is a
@@ -122,4 +127,4 @@ def Bag(**fields):
     def apply(param, input):
         return param
 
-    return node_def(apply, param=param, name='bag')
+    return Leaf(apply, param=param)

@@ -5,7 +5,7 @@ and the electrical dynamics. The same def serves every role — the plant
 in the assembled stack, half of BenchMotor (its composition with
 the mechanism), and the controller's internal model, where it is held
 as a member and consulted through its methods and params. The model
-equations are module-level functions on the param bundle; the def
+equations are module-level functions on the param bundle; the node
 attaches them as methods.
 
 The cogging harmonic amplitude is the motor param `cogging`, so
@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax import ambient, node_def, composite
+from nodejax import Node, node, ambient, Leaf, Composite
 
 from nodejax.examples.actuator.dq import DQ
 
@@ -106,8 +106,8 @@ MOTOR_METHODS = dict(voltage_feedforward=voltage_feedforward,
 
 # --- the electrical motor: mechanics live outside ---
 
-@ambient
-def Electrical(dt, substeps=4):
+@node
+def Electrical(dt: float, substeps: int=4) -> Node:
     """The electrical motor: mechanics live outside (the mechanism's
     inertia and loads are integrated by Mechanical, at the bench or
     the environment), so position and velocity arrive as INPUT and
@@ -140,12 +140,12 @@ def Electrical(dt, substeps=4):
               - self.hysteresis * jnp.sign(mechanical.velocity))
         return current, Struct(torque=tq, current=current)
 
-    return node_def(apply, param=param, init=init, name='electrical',
+    return Leaf(apply, param=param, init=init,
                     methods=MOTOR_METHODS)
 
 
-@ambient
-def Mechanical(dt):
+@node
+def Mechanical(dt: float) -> Node:
     """The mechanism: torque + load -> position/velocity. Owns what a
     mechanism owns: inertia, bearing friction, and stiction (stick to
     zero below the static torque threshold)."""
@@ -156,7 +156,7 @@ def Mechanical(dt):
     def init(position=0.0):
         return Struct(position=position, velocity=0.0)
 
-    def apply(self, state, torque, load=0.0):
+    def apply(self, state, torque, load):
         total = torque - self.friction * state.velocity - load
         velocity = state.velocity + (total / self.inertia) * dt
         is_dynamic = jnp.abs(velocity) * self.inertia > self.torque_static * dt
@@ -165,22 +165,22 @@ def Mechanical(dt):
         new = Struct(position=position, velocity=velocity)
         return new, new
 
-    return node_def(apply, init=init, param=param, name='mechanical')
+    return Leaf(apply, init=init, param=param)
 
 
 # --- the motor on a bench: composition, the same parts the system uses ---
 
-@ambient
-def BenchMotor(dt):
+@node
+def BenchMotor(dt: float) -> Node:
     """The whole motor on a bench, composed from the SAME parts the
     assembled system uses: the electrical motor plus the mechanism,
     in a feedback loop (previous mechanical state feeds the motor,
     the motor's torque steps the mechanism). Voltage + load in,
     mechanical state out."""
-    members = dict(electrical=Electrical(dt), mechanical=Mechanical(dt))
+    members = Composite(electrical=Electrical(dt), mechanical=Mechanical(dt))
 
-    def apply(self, voltage, load=0.0):
+    def apply(self, voltage, load):
         out = self.electrical(mechanical=self.state.mechanical, voltage=voltage)
         return self.mechanical(torque=out.torque, load=load)
 
-    return composite(apply, members=members, name='bench_motor')
+    return members(apply)

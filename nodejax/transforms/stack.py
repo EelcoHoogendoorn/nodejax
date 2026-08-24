@@ -1,37 +1,65 @@
 from __future__ import annotations
 
-import jax
-
-from nodejax.struct import Struct
-from nodejax.core import Node, NodeDef, _split_rng, _with_rng, REQUIRED
-from nodejax.generic import _over_generic
-from nodejax.transforms.common import (_mapped_init_fn, _mapped_param_fn,
-                                       _scanned_apply_fn, _transform_def)
+from nodejax.node import Node
+from nodejax.transform import transform, vmap_init, vmap_param
+from nodejax.transforms.common import scanned_apply, scanned_initialize
+from nodejax.wrapper import Wrapper
 
 
-@_over_generic
-def stack(node_def: NodeDef, n: int | None = None) -> NodeDef:
-    """scan over the layer axis: layer k's output feeds layer k+1's input.
+@transform
+def stack(layer: Node, n: int) -> Node:
+    """Compose ``n`` independently parameterized copies of ``layer``.
 
-    param (and state) gain a leading layer axis; input/output shapes
-    unchanged. parameterize with per-layer stacked leaves — or declare the
-    depth n and parameterize(rng=key) to draw n layers from the inner def's
-    declared initializers.
+    Each layer receives the previous layer's output. Parameters and state, when
+    present, gain a leading axis of length ``n``; the external input and output
+    retain the original layer's shape. A node with neither is still valid and
+    simply has no per-layer values to store.
+
+    Arguments passed to ``parameterize`` are shared across the layers, while
+    each randomized parameter initialization receives its own key. To use an
+    existing set of per-layer parameters instead, bind the stacked parameter
+    tree directly with ``stack(layer, n).bind(param)``.
     """
-    if node_def.bound:
-        raise TypeError('stack changes the meaning of param; apply it to the '
-                        'NodeDef and parameterize with per-layer stacked params')
-    if not (node_def.parametric or node_def.cyclic):
-        raise TypeError(f'stack requires a parametric or cyclic node, got {node_def!r}')
+    if type(n) is not int or n < 1:
+        raise TypeError(f'stack depth must be a positive int, got {n!r}')
+    def apply_fn(contract, param, state, input, rng):
+        return scanned_apply(
+            contract.members.layer,
+            param, state, input, rng,
+            scanned_params=True, length=n)
 
-    def apply_fn(nd, param, state, input):
-        return _scanned_apply_fn(node_def, param, state, input, stacked_param=True)
+    def param_fn(contract, param_input, rng):
+        return vmap_param(
+            contract.members.layer, contract,
+            rng, param_input, count=n)
 
-    return _transform_def(
-        node_def,
-        name=f'stack({node_def.name})',
-        param_fn=_mapped_param_fn(node_def, n),
-        init_fn=_mapped_init_fn(node_def, n),
-        apply_fn=apply_fn,
-        rebuild=lambda d: stack(d, n=n),
+    def init_fn(contract, param, state_input, rng):
+        inner = contract.members.layer
+        return vmap_init(
+            inner,
+            contract,
+            rng,
+            param,
+            state_input,
+            count=n,
+            param_axis=0 if inner.parametric else None,
+        )
+
+    def prime_fn(contract, param, state_input, input, rng):
+        inner = contract.members.layer
+        return scanned_initialize(
+            inner, param, state_input, input, rng,
+            count=n, scanned_params=inner.parametric)
+
+    return Wrapper(layer=layer).roles(
+        destructurable=False,
+        name=f'stack({layer.name})',
+        param=param_fn,
+        init=init_fn,
+        prime=prime_fn,
+        apply=apply_fn,
+        init_takes_rng=(True if (
+            layer.contract.init_requires_input
+            and n > 1 and layer.contract.apply_takes_rng
+        ) else None),
     )

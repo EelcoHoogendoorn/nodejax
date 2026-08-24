@@ -7,7 +7,7 @@ matrix ONCE; the unembed slot is literally empty, and gradients from
 both uses accumulate through the expansion.
 
 AUX LOSS — the mixture-of-experts layer emits its load-balance statistic
-on the aux channel: (output, aux) from the block, diverted under the
+on the aux stream: (output, aux) from the block, diverted under the
 member's name by the pipe, stacked over time by scan, split by the LOSS
 function and fed to the optimizer.
 
@@ -23,7 +23,9 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import NodeDef, derive, serial, stack, scan, residual, train_step, tie, split_aux, ambient, nn
+from nodejax import (node, trained, Node, Leaf, Composite, serial, stack, scan, scanned, residual,
+                     train_step, tie, split_aux, ambient, nn)
+from nodejax.control import Delay
 from nodejax.types import Param
 from nodejax.struct import Struct
 
@@ -41,7 +43,7 @@ def corpus() -> tuple[jax.Array, list[str]]:
     return ids, chars
 
 
-def build(vocab: int) -> NodeDef:
+def build(vocab: int) -> Node:
     """embed >> residual rnn stack >> MoE >> unembed, embeddings TIED.
     Every block is stock nn; the shared design arguments flow through
     ambient scope, so the members stay plain reusable factories."""
@@ -58,30 +60,35 @@ def build(vocab: int) -> NodeDef:
 # --- loss: cross-entropy + the aux load-balance term ---
 
 def lm_loss(pred: tuple, target: jax.Array) -> jax.Array:
-    logits, aux = split_aux(pred)          # the aux channel arrives IN the loss
+    logits, aux = split_aux(pred)          # the aux stream arrives IN the loss
     ce = jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits, target))
     return ce + 0.01 * jnp.mean(aux.moe.balance)
 
 
 # --- generation: sampling as the feedback loop ---
 
-def Sampler(lm: NodeDef, temperature: float = 0.8) -> NodeDef:
-    """Autoregressive sampling as a feedback loop: state carries
-    (model state, last char, rng); each step feeds the model its own
-    previous sample; the rng auto-advances. A DERIVATION of the model:
-    the sampler keeps the model's params (same constructor, same spec)
-    and overrides the step machinery."""
-    def init(param: Param, rng: jax.Array) -> Struct:
-        start = jnp.zeros((1,), dtype=jnp.int32)
-        return Struct(inner=lm.build_state(param, input=start), last=start, rng=rng)
+@node
+def Sampler(lm: Node, temperature: float = 0.8) -> Node:
+    """Autoregressive sampling, spelled as what it is: the model and the
+    register it feeds itself through.
 
-    def apply(param: Param, state: Struct, input: jax.Array) -> tuple[Struct, jax.Array]:
-        new_inner, out = lm.apply_fn(param, state.inner, state.last)
-        logits, _ = split_aux(out)
-        char = jax.random.categorical(state.rng, logits / temperature, axis=-1)
-        return Struct(inner=new_inner, last=char, rng=state.rng), char
+    Each step reads the character emitted last, runs the model on it, and
+    draws the next. The register is the stock one-tick Delay, because that
+    is exactly what it is. The draw itself is arithmetic on logits and a
+    key, so it stays a function: a node owning neither params nor state
+    would add a member slot for nothing.
 
-    return derive(lm, apply=apply, init=init, name=f'sample({lm.name})')
+    Nothing here unwraps an aux stream or threads a key. The wiring
+    diverts the model's sown losses and hands this apply clean logits, and
+    the boundary key arrives per STEP — scan splits it across time exactly
+    as a composite splits it across members."""
+    def apply(self, tick: jax.Array, rng) -> jax.Array:
+        logits = self.lm(self.state.last)
+        char = jax.random.categorical(rng.next(), logits / temperature, axis=-1)
+        self.last(char)                        # store it for the next step
+        return char
+
+    return Composite(lm=lm, last=Delay().with_input(jnp.zeros((1,), dtype=jnp.int32)))(apply, name=f'sample({lm.name})')
 
 
 # --- tests ---
@@ -91,13 +98,13 @@ def test_tied_assembly():
     empty, and the model works end to end through both uses."""
     ids, chars = corpus()
     lm = build(len(chars))
-    model = lm.parameterize(rng=jax.random.PRNGKey(0))
+    model = lm.with_input(ids[:BATCH]).parameterize(
+        rng=jax.random.PRNGKey(0))
 
     assert model.param.embed.weight.shape == (len(chars), HIDDEN)
-    assert len(jax.tree.leaves(model.param.unembed)) == 0        # tied away
+    assert 'unembed' not in model.param                          # tied away
 
-    state = model.with_input(ids[:BATCH]).init()
-    new_state, out = model.apply(state, ids[:BATCH])
+    _, out = model.initialize()(ids[:BATCH])
     logits, aux = split_aux(out)
     assert logits.shape == (BATCH, len(chars))
     assert aux.moe.usage.shape == (EXPERTS,)
@@ -110,43 +117,51 @@ def test_trains_generates():
     ids, chars = corpus()
     vocab = len(chars)
     lm = build(vocab)
-    model = lm.parameterize(rng=jax.random.PRNGKey(0))
-    rollout = scan(lm)                       # (T, B) ids -> per-step outputs
 
     # windows of the corpus: input chars and next-char targets
     rs = np.random.RandomState(0)
     starts = rs.randint(0, len(ids) - T - 1, size=(STEPS, BATCH))
     offsets = np.arange(T)[None, :, None]                       # (1, T, 1)
     windows = starts[:, None, :] + offsets                      # (S, T, B)
-    stream = Struct(input=ids[windows], target=ids[windows + 1])
 
-    trainer = train_step(rollout.bind(model.param), lm_loss, optax.adam(3e-3))
-    final, losses = trainer.scan(trainer.init(model=model.param), stream)
+    # the rollout eats (T, B) ids and emits per-step outputs
+    trainer = train_step(
+        scanned(lm).with_input(ids[windows[0]]).parameterize(
+            rng=jax.random.PRNGKey(0)).initialize(),
+        lm_loss, optax.adam(3e-3))
+    final, aux = trained(trainer).apply(input=ids[windows], target=ids[windows + 1])
 
     uniform = jnp.log(vocab)
     # untrained logits carry the init scale, so CE starts at or above the
     # uniform floor; training must fall far below that floor
-    assert losses[0] > 0.9 * uniform
-    assert losses[-1] < 0.7 * uniform, losses[-1]               # learned real structure
+    assert aux.loss[0] > 0.9 * uniform
+    assert aux.loss[-1] < 0.7 * uniform, aux.loss[-1]               # learned real structure
 
-    # the aux loss did its job: no expert collapsed
-    _, out = lm.apply(final.model, lm.init(final.model, input=ids[:BATCH]), ids[:BATCH])
-    _, aux = split_aux(out)
-    assert jnp.max(aux.moe.usage) < 0.7, aux.moe.usage
+    # the aux loss did its job: no expert collapsed. `final` is the
+    # trained ROLLOUT, which eats a (T, B) sequence; this check wants one
+    # batch through the lm itself, and a wrapper's param IS the lm's, so
+    # binding the lm to it is exact rather than lucky
+    fitted = lm.bind(final.param)
+    _, (_, report) = fitted.initialize(input=ids[:BATCH])(ids[:BATCH])
+    assert jnp.max(report.moe.usage) < 0.7, report.moe.usage
 
-    # generation: the feedback loop, keyed through the reserved rng input
-    sampler = Sampler(lm)
-    gen = scan(sampler).bind(final.model)
+    # generation: the feedback loop, keyed through the explicit RNG channel.
+    # The TRAINED lm composes in as a bound member (the transport
+    # container), and the bare parameterize fills every slot from that
+    # storage, owing no key. The rollout emits (characters, aux); the
+    # MoE's load-balance term is a training concern, destructured away
+    # at the call
+    gen = scanned(Sampler(fitted)).parameterize()
     ticks = jnp.zeros(160)
-    sample_a = gen.apply(rng=jax.random.PRNGKey(7), tick=ticks)
-    sample_b = gen.apply(rng=jax.random.PRNGKey(7), tick=ticks)
-    sample_c = gen.apply(rng=jax.random.PRNGKey(8), tick=ticks)
+    sample_a, _ = gen.apply(rng=jax.random.PRNGKey(7), tick=ticks)
+    sample_b, _ = gen.apply(rng=jax.random.PRNGKey(7), tick=ticks)
+    sample_c, _ = gen.apply(rng=jax.random.PRNGKey(8), tick=ticks)
 
     assert jnp.all(sample_a == sample_b)                        # keyed determinism
     assert not jnp.all(sample_a == sample_c)
     assert jnp.all((sample_a >= 0) & (sample_a < vocab))
 
     text = ''.join(chars[int(c)] for c in sample_a[:, 0])
-    print(f"\n[char-lm] vocab {vocab} | loss {losses[0]:.2f} -> {losses[-1]:.2f} "
-          f"(uniform {uniform:.2f}) | expert usage {np.round(np.asarray(aux.moe.usage), 2)}"
+    print(f"\n[char-lm] vocab {vocab} | loss {aux.loss[0]:.2f} -> {aux.loss[-1]:.2f} "
+          f"(uniform {uniform:.2f}) | expert usage {np.round(np.asarray(report.moe.usage), 2)}"
           f"\n[sample] {text!r}")

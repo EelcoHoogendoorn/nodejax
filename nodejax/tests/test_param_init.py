@@ -10,12 +10,12 @@ import jax
 import pytest
 import jax.numpy as jnp
 
-from nodejax import node_def, ensemble, stack, KeyStream
+from nodejax import Node, Leaf, ensemble, stack, KeyStream
 from nodejax.struct import Struct
 from nodejax.control import Gain
 
 
-def Linear(n_in, n_out):
+def Linear(n_in: int, n_out: int) -> Node:
     def param(rng, weight=None, bias=None):
         if weight is None:
             weight = jax.random.normal(rng.next(), (n_in, n_out))
@@ -25,7 +25,7 @@ def Linear(n_in, n_out):
     def apply(param, input):
         return input @ param.weight + param.bias
 
-    return node_def(apply, param=param, name='linear')
+    return Leaf(apply, param=param, name='linear')
 
 
 def test_keystream_yields_distinct_replayable_keys():
@@ -54,7 +54,7 @@ def test_explicit_values_need_no_rng():
     so parameterize without one is loud."""
     node = Linear(2, 3).bind(Struct(weight=jnp.ones((2, 3)), bias=jnp.ones(3)))
     assert jnp.allclose(node.apply(jnp.ones(2)), 3.0)
-    with pytest.raises(TypeError, match='missing required'):
+    with pytest.raises(TypeError, match='parameterize requires rng'):
         Linear(2, 3).parameterize(weight=jnp.ones((2, 3)), bias=jnp.ones(3))
 
 

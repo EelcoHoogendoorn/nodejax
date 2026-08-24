@@ -1,6 +1,6 @@
 """Path-addressed pytree surgery.
 
-Keyed registration (Node, Struct, DQ, ...) gives every leaf a stable
+Keyed registration (PNode, Struct, DQ, ...) gives every leaf a stable
 string address ('.actuator.motor.resistance' — identical to the
 attribute chain).
 replace_by_path is the functional-update primitive over those
@@ -12,7 +12,10 @@ Updates are a dict path -> new value, or path -> callable(old) -> new
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+from collections.abc import Mapping
+from typing import Any
+
+from nodejax.types import PyTree
 
 import jax
 
@@ -25,7 +28,7 @@ def set_by_path(tree: Any, updates: Mapping[str, Any]) -> Any:
     empty slot may become a Struct. Unknown paths fail loudly."""
     from nodejax.struct import Struct
 
-    def set_one(node: Any, segments: list, value: Any, path: str) -> Any:
+    def set_one(node, segments: list, value: Any, path: str) -> Any:
         head = segments[0]
         if not isinstance(node, Struct) or head not in node.__keys__:
             raise KeyError(f"path '{path}': no field '{head}'")
@@ -39,7 +42,7 @@ def set_by_path(tree: Any, updates: Mapping[str, Any]) -> Any:
     return tree
 
 
-def replace_by_path(tree: Any, updates: Mapping[str, Any | Callable[[Any], Any]]) -> Any:
+def replace_by_path(tree: PyTree, updates: dict[str, Any]) -> PyTree:
     """Return `tree` with the leaves at the given keyed paths replaced.
 
     A value may be a callable, applied to the old leaf (enabling

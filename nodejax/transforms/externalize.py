@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from nodejax.core import Node, NodeDef, _resolve
-from nodejax.struct import Struct
-from nodejax.generic import _over_generic
+from typing import Any
+
+from nodejax.node import Node
+from nodejax.wrapper import Wrapper
+from nodejax.transform import transform
 from nodejax.paths import set_by_path
-from nodejax.spec import materialize
-from nodejax.transforms.common import _transform_def
 
 
-@_over_generic
-def externalize(node_def: NodeDef, member: str,
-                at_init: Any | None = None) -> NodeDef:
+@transform
+def externalize(inner: Node, member: str,
+                at_init: Any | None = None) -> Node:
     """Demote a subtree from parameter to input: the member disappears from
     the node's param tree and becomes a required field on `input`.
 
@@ -37,37 +37,50 @@ def externalize(node_def: NodeDef, member: str,
     `at_init` when supplied — a composite init that spec-propagates by
     running its members (a persisted scan makes the outer init real)
     needs values in the slot, and since state shapes are independent
-    of them, the member's own param_fn defaults are the natural
+    of them, the member param operation's input defaults are the natural
     stand-in. With at_init omitted the slot stays empty at init,
     sufficient for inits that read shapes alone. param-rewriting:
-    defs only."""
-    if node_def.bound:
-        raise TypeError('externalize changes the meaning of param; apply it '
-                        'to the NodeDef')
+    nodes only."""
+    if not inner.parametric:
+        raise TypeError('externalize requires a parametric node')
 
-    def param_fn(outer, param_input=Struct()):
-        return set_by_path(node_def.build_param(param_input), {member: ()})
+    # `member` addresses the subtree, at any depth: 'motor', or 'inner.motor'
+    # for a plant inside a loop. The INPUT field it rides in on is named by
+    # the last segment, since a field name cannot carry a path.
+    field = member.rsplit('.', 1)[-1]
 
-    def apply_fn(nd, param, state, input):
-        full = set_by_path(param, {member: input[member]})
-        return node_def.apply_fn(full, state, input.input)
+    def param_fn(contract, param_input, rng):
+        return set_by_path(
+            contract.members.inner.param(param_input, rng), {member: ()})
 
-    def init_fn(outer, param, state_input=Struct(), input=None):
-        if at_init is not None:
-            param = set_by_path(param, {member: at_init})
-        carry = input if input is not None else (outer.input if outer.resolved else None)
-        if carry is None:
-            return node_def.build_state(param, state_input)
-        # the inner runs on the .input field; the externalized member rides
-        # in as data, so it is projected out of the offered shape
-        inner_in = materialize(carry)['input']
-        return _resolve(node_def, inner_in).build_state(param, state_input,
-                                                    input=inner_in)
+    def apply_fn(contract, param, state, input, rng):
+        current = contract.members.inner
+        full = set_by_path(param, {member: input[field]})
+        return current.apply(
+            full, state, current.feed(input.input), rng)
 
-    return _transform_def(
-        node_def,
-        name=f'externalize({node_def.name})',
-        param_fn=param_fn,
-        init_fn=init_fn,
-        apply_fn=apply_fn,
+    def init_param(param):
+        return (set_by_path(param, {member: at_init})
+                if at_init is not None else param)
+
+    def init_fn(contract, param, state_input, rng):
+        """Bind the inner from `.input` shape evidence only."""
+        current = contract.members.inner.for_input(
+            contract.input_spec_for('input'))
+        return current.init(init_param(param), state_input, rng)
+
+    def prime_fn(contract, param, state_input, input, rng):
+        """Prime the inner state from the real `.input` value."""
+        return contract.members.inner.prime(
+            init_param(param), state_input, input.input, rng)
+
+    return Wrapper(inner=inner).roles(
+        name=f'externalize({inner.name})',
+        destructurable=False,
+        param=param_fn,
+        init=init_fn,
+        prime=prime_fn,
+        apply=apply_fn,
+        apply_fields=('input', field),
+        input_spec=None,
     )

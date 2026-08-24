@@ -3,127 +3,140 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from nodejax.core import (Node, NodeDef, _resolve,
-                                _split_rng, _with_rng, _spec_resolved)
+from nodejax.contract import Contract
+from nodejax.node import Node
+from nodejax.spec import element_spec, add_axis, axis_count, tree_first
 from nodejax.struct import Struct
-from nodejax.generic import _over_generic
-from nodejax.transforms.common import _over_bound, _tile_state, _transform_def, _mapped_apply_fn
+from nodejax.transform import transform, vmap_apply, vmap_prime
+from nodejax.wrapper import Wrapper
 
 
-from nodejax.transforms.tree_utils import map_node_leaves, map_state_leaves
+def _state_axes(inner: Contract):
+    """Map ordinary state and broadcast ``single_batch_state`` members."""
+    return inner.state_tree(
+        lambda member: None if 'single_batch_state' in member.tags else 0)
 
 
-@_over_generic
-@_over_bound
-def batch(node_def: NodeDef, n: int | None = None,
-          axis: str = 'batch') -> NodeDef:
+def _batched_states(inner: Contract, single_state, count: int):
+    """Tile state rows while retaining explicitly shared state."""
+    def split_or_tile(tree):
+        if type(tree) is Struct:
+            return Struct(**{
+                name: (jax.random.split(value, count) if name == 'rng'
+                       else split_or_tile(value))
+                for name, value in tree.__items__})
+        return jax.tree.map(
+            lambda leaf: jnp.broadcast_to(
+                jnp.asarray(leaf), (count,) + jnp.shape(leaf)),
+            tree,
+        )
+
+    return inner.map_state(
+        single_state,
+        lambda member, m_state: m_state
+        if 'single_batch_state' in member.tags
+        else split_or_tile(m_state))
+
+
+@transform(preserves='param')
+def batch(sample: Node, n: int | None = None,
+          axis: str = 'batch') -> Node:
     """vmap over the input axis: params broadcast, input/output/state batched.
 
-    Type-preserving; accepts defs and bound nodes (param meaning unchanged).
+    Type-preserving; accepts nodes and bound nodes (param meaning unchanged).
     For cyclic nodes the per-element state is tiled to the batch size: read
     from the bound batched input shape, or from the static n=<batch size>
     here when the node inits without a shape (a shape-free, constant state).
 
-    The vmap axis is NAMED (default 'batch', the reserved convention), so
-    members reduce across it with jax collectives. Nodes tagged with
+    The vmap axis is named ``batch`` by default, so members can use JAX
+    collectives over it. Nodes tagged with
     'single_batch_state' retain a single unbatched state across the batch.
     """
-    state_in = map_node_leaves(node_def, lambda member: None if 'single_batch_state' in member.tags else 0)
+    def apply_fn(contract, param, state, input, rng):
+        """State axes are both in_axes and out_axes: a 'single_batch_state'
+        member broadcasts in and comes back unmapped, no slicing after
+        the fact."""
+        inner = contract.members.sample
+        state_axes = _state_axes(inner)
+        return vmap_apply(
+            inner, param, state, input, rng,
+            param_axis=None, state_axis=state_axes, input_axis=0,
+            axis_name=axis)
 
-    def apply_fn(nd, param, state, input):
-        # state_in is both in_axes and out_axes: a 'single_batch_state' member
-        # is broadcast in and comes back unmapped, no slicing after the fact
-        return _mapped_apply_fn(
-            node_def, param, state, input,
-            param_axis=None, state_axis=state_in, input_axis=0,
-            axis_name=axis,
-        )
+    def init_context(contract):
+        """Resolve the sample shape and the batch extent at this boundary."""
+        inner = contract.members.sample
+        batched = contract.input_spec
+        rows = axis_count(batched)
+        if rows is not None and n is not None and n != rows:
+            raise TypeError(
+                f'batch({inner.name}): n={n} conflicts with the bound '
+                f'batched axis {rows}')
+        count = rows if rows is not None else n
+        if count is None:
+            raise TypeError(
+                f'batch({inner.name}).init needs a bound batched input '
+                'shape (with_input(<batched spec>)), or batch(node, '
+                'n=<batch size>) for a shape-free node')
+        element_shape = (None if batched is None else element_spec(batched))
+        return inner, element_shape, count
 
-    if node_def.cyclic:
-        def init_fn(ndef, param, state_input=Struct(), input=None):
-            # per-element shape and batch size are STATIC: the shape from the
-            # bound (batched) def, the count from its leading axis (or the
-            # construction n= for a shape-free node) — never a runtime value
-            batched = input if input is not None else (ndef.input if ndef.resolved else None)
-            if batched is not None:
-                rows = jax.tree.leaves(batched)[0].shape[0]
-                if n is not None and n != rows:
-                    raise TypeError(f'batch({node_def.name}): n={n} conflicts with the bound '
-                                    f'batched axis {rows}')
-                count = rows
-                element = jax.tree.map(lambda leaf: leaf[0], batched)
-                seed_state = _resolve(node_def, element).build_state(param, state_input, input=element)
-            elif n is not None:
-                count = n
-                seed_state = node_def.build_state(param, state_input)
-            else:
-                raise TypeError(f'batch({node_def.name}).init needs a bound batched input '
-                                'shape (with_input(<batched spec>)), or batch(node, '
-                                'n=<batch size>) for a shape-free node')
-            return map_state_leaves(
-                node_def, seed_state,
-                lambda member, m_state: m_state if 'single_batch_state' in member.tags else _tile_state(m_state, count))
-    else:
-        init_fn = node_def._init_impl
+    def init_fn(contract, param, state_input, rng):
+        inner, element_shape, count = init_context(contract)
+        current = (inner if element_shape is None else
+                   inner._resolve_def(
+                       element_shape, bundled=True).contract)
+        single_state = current.init(
+            param, state_input, rng)
+        return _batched_states(inner, single_state, count)
 
-    if node_def.parametric:
-        def param_fn(ndef, param_input):
-            if ndef.resolved:
-                batched = ndef.input
-                inner_spec = node_def.input if node_def.resolved else None
-                leaf_b = jax.tree.leaves(batched)[0]
-                if inner_spec is not None and leaf_b.ndim == jax.tree.leaves(inner_spec)[0].ndim:
-                    element = batched
-                elif leaf_b.ndim > 1:
-                    element = jax.tree.map(lambda leaf: leaf[0], batched)
-                else:
-                    element = batched
-                return _resolve(node_def, element).build_param(param_input)
-            return node_def.build_param(param_input)
-    else:
-        param_fn = node_def._param_impl
+    def prime_fn(contract, param, state_input, input, rng):
+        inner, _, count = init_context(contract)
+        return vmap_prime(
+            inner, param, state_input, input, rng,
+            count=count, param_axis=None, input_axis=0,
+            state_axis=_state_axes(inner))
 
-    return _transform_def(
-        node_def,
-        name=f'batch({node_def.name})',
-        param_fn=param_fn,
-        init_fn=init_fn,
-        apply_fn=apply_fn,
-        apply_input_spec=node_def.apply_input_spec if not _spec_resolved(node_def.apply_input_spec) else None,
-        init_reads_shape=node_def.cyclic,
-        rebuild=lambda d: batch(d, n=n, axis=axis),
+    def param_fn(contract, param_input, rng):
+        """Parameterize the sample from the batch boundary's element spec."""
+        inner = contract.members.sample
+        batched = contract.input_spec
+        current = (inner if batched is None else
+                   inner._resolve_def(
+                       element_spec(batched), bundled=True).contract)
+        return current.param(param_input, rng)
+
+    batched = add_axis(sample.contract.input_spec, n)
+    return Wrapper(sample=sample).roles(
+        name=f'batch({sample.name})',
+        destructurable_state=False,   # state tiles per element; params stay flat
+        param=param_fn,
+        init=init_fn,
+        prime=prime_fn,
+        apply=apply_fn,
+        input_spec=batched,
     )
 
 
-@_over_generic
-@_over_bound
-def unbatched(node_def: NodeDef, axis: str = 'batch') -> NodeDef:
-    """Satisfy a named-axis need with a batch of ONE, keeping the axis out of
-    the interface: one sample in, one sample out.
+@transform(preserves='param')
+def unbatched(inner: Node, axis: str = 'batch') -> Node:
+    """Run one sample while binding the named axis at size one.
 
-    A per-sample block whose moments are collectives declares an axis need,
-    and batch() binds it. At inference there may be no batch to bind, but the
-    need is structural rather than a mode, so the answer is a different BUILD
-    of the same params — never a flag the node tests for the axis. This binds
-    the name over a size-one axis, added and stripped inside, so the caller's
-    signature is the unbatched one.
-
-    The OUTPUT is the batched path's for that sample: a normalizer divides by
-    its RUNNING moments, which do not depend on who else is in the batch. The
-    state UPDATE is another matter — a batch of one has zero variance — so
-    this belongs with a frozen state, which is what inference wants anyway.
+    The temporary axis is added before the inner call and removed from its
+    state and output afterward.
     """
-    def apply_fn(nd, param, state, input):
+    def apply_fn(contract, param, state, input, rng):
+        sample = contract.members.sample
         lead = lambda t: jax.tree.map(lambda a: jnp.asarray(a)[None], t)
-        new_state, out = jax.vmap(
-            lambda s_, i_: node_def.apply_fn(param, s_, i_), axis_name=axis,
-        )(lead(state), lead(input))
-        strip = lambda t: jax.tree.map(lambda a: a[0], t)
+        batched_input = lead(input)
+        new_state, out = vmap_apply(
+            sample, param, lead(state), batched_input, rng,
+            param_axis=None, state_axis=0, input_axis=0,
+            axis_name=axis, count=1)
+        strip = tree_first
         return strip(new_state), strip(out)
 
-    return _transform_def(
-        node_def,
-        name=f'unbatched({node_def.name})',
-        apply_fn=apply_fn,
-        rebuild=lambda d: unbatched(d, axis=axis),
+    return Wrapper(sample=inner).roles(
+        name=f'unbatched({inner.name})',
+        apply=apply_fn,
     )

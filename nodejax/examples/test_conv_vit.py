@@ -11,13 +11,17 @@ where explicit parameter sizing has to prove itself: widths are AMBIENT
 (hidden/heads supplied once), channels thread the stem by hand
 (1 -> 16 -> 32), and the sizes marked GEOMETRY below are hand-computed
 conv arithmetic: the grid side after the strided conv, the token count,
-and the flattened readout width (tokens * hidden — the classic
+and the flattened readout width (tokens * hidden, the classic
 conv-flatten size). Late-binding param specs would absorb all of them;
-this file is the measure of whether they hurt enough to build it.
+this file is the measure of whether they hurt enough to build it, and
+test_nn_vit is the answer: the same architecture and assertions with
+every layer imported from nodejax.nn, no width or geometry anywhere.
+EVERYTHING LOCAL HERE IS LOCAL ON PURPOSE, as the baseline of that pair.
 
 Attention is ONE leaf node: a fused qkv matmul (one reshape, unpack the
-size-3 dim), softmax, merge — einsum math inside a single apply — composition is for parametric
-and stateful structure, not for arithmetic. The transformer block is
+size-3 dim), softmax, merge, all einsum math inside a single apply,
+because composition is for parametric and stateful structure, not for
+arithmetic. The transformer block is
 structure: residual(norm >> attn) >> residual(norm >> up >> gelu >> down),
 stacked with per-layer params by stack(n=DEPTH).
 
@@ -39,7 +43,7 @@ import jax.numpy as jnp
 import optax
 from sklearn.datasets import load_digits
 
-from nodejax import (Node, NodeDef, nn, node_def, serial, stack, residual,
+from nodejax import (node, trained, scan, PNode, Node, nn, Leaf, serial, stack, residual,
                      batch, train_step, ambient, KeyStream)
 from nodejax.struct import Struct
 
@@ -48,13 +52,15 @@ GRID = IMAGE // 2              # GEOMETRY: SAME padding, one stride-2 conv
 TOKENS = GRID * GRID           # GEOMETRY: sequence length seen by attention
 BATCH, EPOCHS = 125, 40
 
-def reshape(shape: tuple[int, ...], name: str = 'reshape') -> Node:
-    return node_def(lambda input: input.reshape(shape), name=name)
+@node
+def reshape(shape: tuple[int, ...], name: str = 'reshape') -> PNode:
+    return Leaf(lambda input: input.reshape(shape), name=name)
 
 
 # --- the conv stem: real conv layers, channels threaded by hand ---
 
-def Conv(c_in: int, c_out: int, kernel: int = 3, stride: int = 1) -> NodeDef:
+@node
+def Conv(c_in: int, c_out: int, kernel: int = 3, stride: int = 1) -> Node:
     """3x3 SAME convolution over ONE (H, W, C) feature map. lax demands
     a batch dim, so a unit one is added and stripped; under batch() the
     vmap fuses it into a real batched conv."""
@@ -68,11 +74,11 @@ def Conv(c_in: int, c_out: int, kernel: int = 3, stride: int = 1) -> NodeDef:
             dimension_numbers=('NHWC', 'HWIO', 'NHWC'))[0]
         return out + param.bias
 
-    return node_def(apply, param=param, name='conv')
+    return Leaf(apply, param=param)
 
 
-@ambient
-def PosEmbed(tokens: int, hidden: int) -> NodeDef:
+@node(name='pos')
+def PosEmbed(tokens: int, hidden: int) -> Node:
     """Learned position embedding over the token axis."""
     def param(rng: KeyStream) -> Struct:
         return Struct(embed=0.02 * jax.random.normal(rng.next(), (tokens, hidden)))
@@ -80,13 +86,13 @@ def PosEmbed(tokens: int, hidden: int) -> NodeDef:
     def apply(param: Struct, input: jax.Array) -> jax.Array:
         return input + param.embed
 
-    return node_def(apply, param=param, name='pos')
+    return Leaf(apply, param=param)
 
 
 # --- the transformer block ---
 
-@ambient
-def LayerNorm(hidden: int, eps: float = 1e-5) -> NodeDef:
+@node(name='norm')
+def LayerNorm(hidden: int, eps: float = 1e-5) -> Node:
     """Layernorm over the feature axis."""
     def param() -> Struct:
         return Struct(scale=jnp.ones(hidden), bias=jnp.zeros(hidden))
@@ -96,11 +102,11 @@ def LayerNorm(hidden: int, eps: float = 1e-5) -> NodeDef:
         var = jnp.var(input, axis=-1, keepdims=True)
         return (input - mean) / jnp.sqrt(var + eps) * param.scale + param.bias
 
-    return node_def(apply, param=param, name='norm')
+    return Leaf(apply, param=param)
 
 
-@ambient
-def Attention(hidden: int, heads: int) -> NodeDef:
+@node(name='attn')
+def Attention(hidden: int, heads: int) -> Node:
     """Multi-head self-attention over one (T, hidden) sequence."""
     assert hidden % heads == 0
     dim = hidden // heads
@@ -117,10 +123,11 @@ def Attention(hidden: int, heads: int) -> NodeDef:
         mix = jnp.einsum('hqk,khd->qhd', jax.nn.softmax(logits, axis=-1), v)
         return mix.reshape(input.shape) @ param.wo
 
-    return node_def(apply, param=param, name='attn')
+    return Leaf(apply, param=param)
 
 
-def Linear(n_in: int, n_out: int) -> NodeDef:
+@node
+def Linear(n_in: int, n_out: int) -> Node:
     def param(rng: KeyStream) -> Struct:
         return Struct(w=jax.random.normal(rng.next(), (n_in, n_out)) / jnp.sqrt(n_in),
                       b=jnp.zeros(n_out))
@@ -128,10 +135,10 @@ def Linear(n_in: int, n_out: int) -> NodeDef:
     def apply(param: Struct, input: jax.Array) -> jax.Array:
         return input @ param.w + param.b
 
-    return node_def(apply, param=param, name='linear')
+    return Leaf(apply, param=param)
 
 
-def Block() -> NodeDef:
+def Block() -> Node:
     """Pre-norm transformer block; shape-preserving, so stack-able."""
     return serial(
         attn=residual(serial(norm=LayerNorm(), attn=Attention())),
@@ -142,7 +149,7 @@ def Block() -> NodeDef:
     )
 
 
-def build() -> NodeDef:
+def build() -> Node:
     """The per-sample model: (64,) pixels -> (10,) logits."""
     with ambient(hidden=HIDDEN, heads=HEADS, tokens=TOKENS):
         return serial(
@@ -205,29 +212,29 @@ def test_trains_on_real_digits():
     """End to end: the little conv-transformer learns real digits through
     the conv stem, the attention stack, and the flattened readout."""
     X_train, y_train, X_test, y_test = data()
-    pipe = batch(build())
-    model = pipe.parameterize(rng=jax.random.PRNGKey(0))
 
     shuffle = np.random.RandomState(1)
     batch_indices = np.concatenate(
         [shuffle.permutation(len(X_train)) for _ in range(EPOCHS)]
     ).reshape(-1, BATCH)
-    stream = Struct(input=X_train[batch_indices], target=y_train[batch_indices])
 
-    trainer = train_step(pipe, xent, optax.adam(1e-3))
-    final, losses = trainer.scan(trainer.init(model=model.param), stream)
 
-    assert jnp.all(jnp.isfinite(losses))
-    assert losses[-1] < 0.3 * losses[0]
+    trainer = train_step(
+        batch(build()).with_input(X_train[:BATCH]).parameterize(
+            rng=jax.random.PRNGKey(0)).initialize(),
+        xent, optax.adam(1e-3))
+    done, aux = trained(trainer).apply(input=X_train[batch_indices], target=y_train[batch_indices])
 
-    trained = pipe.bind(final.model)
-    logits = trained.apply(X_test)
+    assert jnp.all(jnp.isfinite(aux.loss))
+    assert aux.loss[-1] < 0.3 * aux.loss[0]
+
+    _, logits = done(X_test)
     test_accuracy = accuracy(logits, y_test)
     assert test_accuracy > 0.85, test_accuracy
 
-    train_accuracy = accuracy(trained.apply(X_train), y_train)
-    n_weights = sum(leaf.size for leaf in jax.tree.leaves(final.model))
+    train_accuracy = accuracy(done(X_train)[1], y_train)
+    n_weights = sum(leaf.size for leaf in jax.tree.leaves(done.param))
     print(f"\n[conv-vit] {n_weights} weights | "
-          f"loss {losses[0]:.3f} -> {losses[-1]:.3f} over {len(losses)} steps | "
+          f"loss {aux.loss[0]:.3f} -> {aux.loss[-1]:.3f} over {len(aux.loss)} steps | "
           f"train acc {train_accuracy:.3f} | "
           f"TEST acc {test_accuracy:.3f} ({len(y_test)} unseen digits)")

@@ -1,41 +1,51 @@
-"""nodejax.nn — stock neural blocks with in-shapes inferred.
+"""nodejax.nn: stock neural blocks with input shapes inferred.
 
-Capitalized names are units that own params or state; lowercase ones are
-pure functions of their input, carrying neither.
+Factories return components that participate in the same shape resolution,
+composition, and transform APIs whether or not they own params or state.
 
 Organized into modular subfiles:
-- linear: Linear, flat
-- activations: gelu, relu, silu, sigmoid, tanh
-- norm: LayerNorm, BatchNorm, Whiten
-- conv: Conv
-- attention: Attention, Block, PosEmbed, tokens
-- mlp: MLP, MoE
-- embeddings: Embed, Unembed
-- recurrent: RNN
-- stochastic: Dropout
+- linear: Linear, Reshape, flat
+- activations: gelu, relu, silu, sigmoid, tanh, elu, leaky_relu,
+  softplus, softmax, log_softmax, identity
+- norm: LayerNorm, RMSNorm, L2Norm, BatchNorm, Whiten
+- conv: Conv, ConvTranspose
+- spatial: MaxPool, AvgPool, GlobalAvgPool, Upsample, Downsample
+- attention: Attention, TransformerBlock, PosEmbed, tokens
+- mlp: MLP, SwiGLU, MoE
+- embeddings: OneHot, Embed, Unembed
+- recurrent: RNN, GRU, LSTM
+- stochastic: Dropout, DropPath, GaussianNoise
 - filtering: EMA
 """
 
-from nodejax.nn.linear import Linear, flat
-from nodejax.nn.activations import gelu, relu, silu, sigmoid, tanh
-from nodejax.nn.norm import LayerNorm, BatchNorm, Whiten
-from nodejax.nn.conv import Conv
-from nodejax.nn.attention import Attention, Block, tokens, PosEmbed
-from nodejax.nn.mlp import MLP, MoE
-from nodejax.nn.embeddings import Embed, Unembed
-from nodejax.nn.recurrent import RNN
-from nodejax.nn.stochastic import Dropout
+from nodejax.nn.linear import Linear, flat, Reshape
+from nodejax.nn.activations import (
+    elu, gelu, identity, leaky_relu, log_softmax, relu, sigmoid, silu,
+    softmax, softplus, tanh,
+)
+from nodejax.nn.norm import LayerNorm, RMSNorm, L2Norm, BatchNorm, Whiten
+from nodejax.nn.conv import Conv, ConvTranspose
+from nodejax.nn.spatial import (
+    MaxPool, AvgPool, GlobalAvgPool, Upsample, Downsample,
+)
+from nodejax.nn.attention import Attention, TransformerBlock, tokens, PosEmbed
+from nodejax.nn.mlp import MLP, SwiGLU, MoE
+from nodejax.nn.embeddings import OneHot, Embed, Unembed
+from nodejax.nn.recurrent import RNN, GRU, LSTM
+from nodejax.nn.stochastic import Dropout, DropPath, GaussianNoise
 from nodejax.nn.filtering import EMA
 
 __all__ = [
-    'Linear', 'flat',
-    'gelu', 'relu', 'silu', 'sigmoid', 'tanh',
-    'LayerNorm', 'BatchNorm', 'Whiten',
-    'Conv',
-    'Attention', 'Block', 'tokens', 'PosEmbed',
-    'MLP', 'MoE',
-    'Embed', 'Unembed',
-    'RNN',
-    'Dropout',
+    'Linear', 'flat', 'Reshape',
+    'gelu', 'relu', 'silu', 'sigmoid', 'tanh', 'elu', 'leaky_relu',
+    'softplus', 'softmax', 'log_softmax', 'identity',
+    'LayerNorm', 'RMSNorm', 'L2Norm', 'BatchNorm', 'Whiten',
+    'Conv', 'ConvTranspose',
+    'MaxPool', 'AvgPool', 'GlobalAvgPool', 'Upsample', 'Downsample',
+    'Attention', 'TransformerBlock', 'tokens', 'PosEmbed',
+    'MLP', 'SwiGLU', 'MoE',
+    'OneHot', 'Embed', 'Unembed',
+    'RNN', 'GRU', 'LSTM',
+    'Dropout', 'DropPath', 'GaussianNoise',
     'EMA',
 ]

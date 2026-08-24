@@ -17,7 +17,7 @@ def test_externalize_member():
                             gain_2=Struct(scale=jnp.asarray(0.0)))
     assert node.param.gain_2 == ()               # externalized: an empty slot
 
-    out = node.apply(Struct(gain_2=Struct(scale=jnp.asarray(3.0)), input=1.0))
+    out = node.apply(gain_2=Struct(scale=jnp.asarray(3.0)), input=1.0)
     assert jnp.allclose(out, 6.0)                # 1 * 2 * 3, world bound from input
 
     reference = pipe.parameterize(gain=Struct(scale=jnp.asarray(2.0)),
@@ -32,13 +32,16 @@ def test_externalize_at_init():
     pipe = Gain() >> Integrator()
 
     bare = externalize(pipe, 'gain').parameterize(
-        gain=Struct(scale=jnp.asarray(0.0)), integrator=Struct(gain=jnp.asarray(0.5)))
+        gain=Struct(scale=jnp.asarray(0.0)))
     with pytest.raises(TypeError):
-        bare.with_input(Struct(gain=Struct(scale=jnp.asarray(0.0)), input=0.0)).init()
+        bare.with_input(
+            Struct(gain=Struct(scale=jnp.asarray(0.0)), input=0.0)
+        ).bind(bare.param).init()
 
     ext = externalize(pipe, 'gain', at_init=Struct(scale=jnp.asarray(1.0)))
-    node = ext.parameterize(gain=Struct(scale=jnp.asarray(0.0)),
-                            integrator=Struct(gain=jnp.asarray(0.5)))
-    state = node.with_input(Struct(gain=Struct(scale=jnp.asarray(0.0)), input=0.0)).init()
-    _, out = node.apply(state, Struct(gain=Struct(scale=jnp.asarray(3.0)), input=2.0))
-    assert jnp.allclose(out, 3.0)                # 0 + 0.5 * (2 * 3)
+    node = ext.parameterize(gain=Struct(scale=jnp.asarray(0.0)))
+    state = node.with_input(
+        Struct(gain=Struct(scale=jnp.asarray(0.0)), input=0.0)
+    ).bind(node.param).init()
+    _, out = node.apply(state, gain=Struct(scale=jnp.asarray(3.0)), input=2.0)
+    assert jnp.allclose(out, 6.0)                # 0 + (2 * 3), accumulated once

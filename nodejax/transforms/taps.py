@@ -1,37 +1,43 @@
 from __future__ import annotations
 
+from nodejax.binding import Aux, split_aux
+from nodejax.node import Node
 from nodejax.struct import Struct
-from nodejax.core import Node, NodeDef, Composite, Serial, split_aux
-from nodejax.generic import _over_generic
-from nodejax.transforms.common import _over_bound, _transform_def
+from nodejax.transform import transform
+from nodejax.wrapper import Wrapper
 
 
-@_over_generic
-@_over_bound
-def taps(node_def: NodeDef) -> NodeDef:
+@transform(preserves='param')
+def taps(inner: Node) -> Node:
     """Observe every wire of a composite def: the output becomes
     (final carry, Struct(<each member's output, keyed by name>)) — the aux
     convention with every member opted in. Because taps are ordinary
     outputs, batch/ensemble/scan add their axes to them automatically.
     Shallow: this pipe's wires, not nested ones — tap an inner pipe
     before composing to see inside it."""
-    if not isinstance(node_def, Serial):
+    if inner._def.layout.kind != 'serial':
         raise TypeError(f'taps requires a serial pipe def (its members chain on '
-                        f'the carry), got {node_def!r}')
-    members = node_def.members
-    names = list(members)
+                        f'the carry), got {inner!r}')
 
-    def apply_fn(nd, p, s, i):
-        carry, states, aux = i, {}, {}
-        for nm in names:
-            states[nm], out = members[nm].apply_fn(p[nm], s[nm], carry)
+    def apply_fn(contract, param, state, input, rng):
+        pipe = contract.members.inner
+        members = pipe.members
+        carry = pipe.intake(input)
+        states, aux = {}, {}
+        for name, member in members.__items__:
+            child_rng = rng.child(member.apply_takes_rng)
+            next_state, out = member.apply(
+                getattr(param, name) if member.parametric else (),
+                getattr(state, name) if member.cyclic else (),
+                member.feed(carry), child_rng)
+            if member.cyclic:
+                states[name] = next_state
             carry, member_aux = split_aux(out)
-            aux[nm] = carry if member_aux is None else (carry, member_aux)
-        return Struct(**states), (carry, Struct(**aux))
+            aux[name] = (carry if member_aux is None
+                         else (carry, member_aux))
+        return (Struct(**states) if states else ()), (carry, Aux(**aux))
 
-    return _transform_def(
-        node_def,
-        name=f'taps({node_def.name})',
-        apply_fn=apply_fn,
-        rebuild=lambda d: taps(d),
+    return Wrapper(inner=inner).roles(
+        name=f'taps({inner.name})',
+        apply=apply_fn,
     )

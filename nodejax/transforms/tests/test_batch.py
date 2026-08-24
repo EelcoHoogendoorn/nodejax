@@ -1,9 +1,10 @@
-"""batch: vmap over the input axis — params broadcast, state per element."""
+"""batch: vmap over the input axis, with broadcast params and row state."""
 
 import jax
 import jax.numpy as jnp
+import pytest
 
-from nodejax import batch, node_def
+from nodejax import batch, Leaf
 from nodejax.struct import Struct
 from nodejax.control import Gain, Integrator
 
@@ -15,11 +16,39 @@ def test_batch():
 
 
 def test_batch_cyclic():
-    b = batch(Integrator(), n=3).parameterize(gain=jnp.array(1.0))
+    b = batch(Integrator(), n=3).parameterize()
     state = b.init()
     state, out = b.apply(state, jnp.array([1.0, 2.0, 3.0]))
     state, out = b.apply(state, jnp.array([1.0, 2.0, 3.0]))
     assert jnp.allclose(out, jnp.array([2.0, 4.0, 6.0]))
+
+
+def test_batch_primes_each_state_from_its_own_row():
+    """Priming is mapped over values, never first-row initialization tiled."""
+    def init(input):
+        return input
+
+    def apply(state, input):
+        return state, input
+
+    model = batch(Leaf(apply, init=init), n=3)
+    values = jnp.array([1.0, 2.0, 4.0])
+    state = model.init(input=values)
+    assert jnp.allclose(state, values)
+
+
+def test_batch_nonpriming_input_binds_shape_without_forwarding_value():
+    """A supplied batch can resolve shape without becoming init data."""
+    def init(node):
+        return jnp.zeros_like(node.input)
+
+    def apply(state, input):
+        return state, input
+
+    model = batch(Leaf(apply, init=init))
+    state = model.init(input=jnp.ones((3, 2)))
+    assert state.shape == (3, 2)
+    assert jnp.allclose(state, 0.0)
 
 
 def test_batch_single_batch_state():
@@ -29,10 +58,10 @@ def test_batch_single_batch_state():
         new_state = Struct(count=state.count + total)
         return new_state, input * param.scale
 
-    def pop_init(param):                      # a constant seed: no shape, no value
+    def pop_init(param):                      # a constant state: no shape, no value
         return Struct(count=jnp.array(0.0))
 
-    pop_node = node_def(pop_apply, init=pop_init, param=lambda: Struct(scale=2.0), tags={'single_batch_state'})
+    pop_node = Leaf(pop_apply, init=pop_init, param=lambda: Struct(scale=2.0), tags={'single_batch_state'})
 
     b = batch(pop_node).with_input(jnp.array([1.0, 2.0, 3.0]))
     m = b.parameterize()
@@ -41,3 +70,23 @@ def test_batch_single_batch_state():
     state, out = m.apply(state, jnp.array([1.0, 2.0, 3.0]))
     assert state.count == 6.0
     assert jnp.allclose(out, jnp.array([2.0, 4.0, 6.0]))
+
+
+def test_batch_splits_one_boundary_key_per_element():
+    """The apply-rng contract through batch: the structural
+    apply plan survives the wrap, the caller hands ONE key at
+    the batch boundary, and each element draws independently. The leaf
+    receives its rng as a KeyStream and draws with next(); a first
+    version of this pin passed the stream to jax.random directly, broke
+    that contract, and misread its own crash as a batch defect."""
+    def apply(x: jax.Array, rng) -> jax.Array:
+        return x + jax.random.normal(rng.next(), jnp.shape(x))
+    noisy = Leaf(apply)
+    assert noisy.contract.apply_takes_rng
+
+    b = batch(noisy, n=4).with_input(
+        bundle=Struct(x=jnp.zeros((4, 3))))
+    assert b.contract.apply_takes_rng                       # the bit cannot be erased
+    out = b.apply(x=jnp.ones((4, 3)), rng=jax.random.PRNGKey(1))
+    assert out.shape == (4, 3)
+    assert not jnp.allclose(out[0], out[1])       # each element its own draw

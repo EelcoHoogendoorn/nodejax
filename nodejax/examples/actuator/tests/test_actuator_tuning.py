@@ -19,12 +19,12 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from nodejax import scan, replace_by_path
+from nodejax import scan, scanned, replace_by_path
 from nodejax.struct import Struct
 from nodejax.examples.actuator.tests.test_actuator_stack import build_env, DT
 
 
-def uniform(lo, hi):
+def uniform(lo: float, hi: float):
     """A domain sampler: key -> multiplicative factor on a nominal leaf."""
     return lambda key: lambda v: v * jax.random.uniform(key, minval=lo, maxval=hi)
 
@@ -86,7 +86,7 @@ def scenario():
     return jnp.asarray(t), jnp.asarray(cmds, dtype=jnp.float32)
 
 
-def randomize_domain(env, key):
+def randomize_domain(env, key: jax.Array):
     """Sample one physical world: split the key per domain entry, apply
     every sampler at its address."""
     keys = jax.random.split(key, len(DOMAIN))
@@ -94,13 +94,13 @@ def randomize_domain(env, key):
                                  for (path, fn), k in zip(DOMAIN.items(), keys)})
 
 
-def with_gains(env, vector):
+def with_gains(env, vector: jax.Array):
     """Optimizer vector -> gains at their addresses (log-mapped, so the
     search stays positive)."""
     return replace_by_path(env, dict(zip(INITIAL_GAINS, jnp.exp(vector))))
 
 
-def cost(ys, cmds):
+def cost(ys: jax.Array, cmds: jax.Array) -> jax.Array:
     """Tracking, settled-window dissipation, torque jitter (an
     audible-noise proxy), and soft overcurrent."""
     v = ys.state.mechanical.velocity
@@ -123,7 +123,7 @@ def cost(ys, cmds):
 
 def test_domain_randomized_tuning():
     env, _ = build_env()
-    rollout = scan(env.ndef, record=True)
+    rollout = scanned(env.node, record=True)
 
     t, cmds = scenario()
 
@@ -133,8 +133,10 @@ def test_domain_randomized_tuning():
 
     def run(vector, domain_key, sensor_key):
         world = randomize_domain(with_gains(env, vector), domain_key)
-        ys = rollout.apply(world.param, rng=sensor_key, command=cmds)
-        return ys
+        out, aux = rollout.apply(
+            world.param, rng=sensor_key, command=cmds,
+            load=jnp.zeros_like(cmds))
+        return Struct(output=out, state=aux.state)
 
     @jax.jit
     @jax.vmap

@@ -11,13 +11,16 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from nodejax.types import PyTree
 from nodejax.struct import Struct
-from nodejax import node_def, serial, tree_detach, train_step
-from nodejax.util import mse, tile
+from nodejax import Node, node, trained, Leaf, serial, tree_detach, train_step
+from nodejax import tile
+from nodejax.examples.util import mse
 N_IN, FEAT = 4, 16
 
 
-def Trunk():
+@node
+def Trunk() -> Node:
     def param(rng):
         return Struct(w1=0.5 * jax.random.normal(rng.next(), (N_IN, FEAT)),
                       w2=0.5 * jax.random.normal(rng.next(), (FEAT, FEAT)))
@@ -25,24 +28,24 @@ def Trunk():
     def apply(param, input):
         return jnp.tanh(jnp.tanh(input @ param.w1) @ param.w2)
 
-    return node_def(apply, param=param, name='trunk')
+    return Leaf(apply, param=param)
 
 
-def Head():
+@node
+def Head() -> Node:
     def param(rng):
         return Struct(w=0.1 * jax.random.normal(rng.next(), (FEAT, 1)))
 
     def apply(param, input):
         return input @ param.w
 
-    return node_def(apply, param=param, name='head')
+    return Leaf(apply, param=param)
 
 
-def _fit(node, params, X, y, steps, lr=1e-2):
-    trainer = train_step(node, mse, optax.adam(lr))
-    state = trainer.init(model=params)
-    state, losses = trainer.scan(state, Struct(input=tile(X, steps), target=tile(y, steps)))
-    return state.model, losses
+def _fit(node, params: PyTree, X, y: jax.Array, steps: int, lr: float=1e-2):
+    trainer = train_step(node.bind(params).initialize(), mse, optax.adam(lr))
+    done, aux = trained(trainer).apply(input=tile(X, steps), target=tile(y, steps))
+    return done.param, aux.loss
 
 
 def test_freeze_trunk_swap_head_retrain():

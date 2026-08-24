@@ -1,23 +1,23 @@
 """Methods and derivation: FOOP subclassing.
 
-Methods are non-reserved callables on the def whose reserved parameter
-names are CHANNELS (ndef, param, state, rng), injected by the view
+Methods are non-reserved callables on the node whose reserved parameter
+names are CHANNELS (node, param, state, rng), injected by the view
 that binds the method; every other parameter is a call argument.
 Derivation is functional record update — the degenerate def->def
 transform: no hierarchy, no MRO, and 'super' is an explicit call to
-Parent.apply_fn.
+the parent compiled apply call.
 """
 
 import jax
 import jax.numpy as jnp
 import pytest
 
-from nodejax import Node, NodeDef, node_def, derive, batch
+from nodejax import scan, PNode, Node, Leaf, derive, batch
 from nodejax.struct import Struct
 from nodejax.control import Gain, Integrator
 
 
-def Gaussian():
+def Gaussian() -> Node:
     """A node carrying behavior beyond apply: whiten as the mapping,
     log_prob/sample as methods."""
     def param(mean, log_std):
@@ -34,7 +34,7 @@ def Gaussian():
         # rng is a channel, delivered as a KeyStream in every context
         return param.mean + jnp.exp(param.log_std) * jax.random.normal(rng.next())
 
-    return node_def(apply, param=param, name='gaussian',
+    return Leaf(apply, param=param, name='gaussian',
                     methods=dict(log_prob=log_prob, sample=sample))
 
 
@@ -43,11 +43,11 @@ def test_methods_bind_param():
 
     assert jnp.allclose(g.log_prob(0.0), -0.5 * jnp.log(2 * jnp.pi))
     key = jax.random.PRNGKey(0)
-    # rng is a channel: a bare node offers none, so the caller passes it
+    # rng is a channel: a bare node declares none, so the caller passes it
     # by keyword, explicitly
     assert jnp.allclose(g.sample(rng=key), g.sample(rng=key))
 
-    # unbound access on the def: the raw function, channels and all
+    # unbound access on the node: the raw function, channels and all
     raw = Gaussian().log_prob
     assert jnp.allclose(raw(g.param, 0.0), g.log_prob(0.0))
 
@@ -57,7 +57,7 @@ def test_grad_through_method():
     the node flows into its params."""
     g = Gaussian().parameterize(mean=jnp.asarray(1.0), log_std=jnp.asarray(0.0))
     grads = jax.grad(lambda n: n.log_prob(2.0))(g)
-    assert isinstance(grads, Node)
+    assert type(grads) is PNode
     assert jnp.allclose(grads.param.mean, 1.0)  # d/dmean of -(x-mean)^2/2 at x=2
 
 
@@ -69,7 +69,30 @@ def test_missing_method_error_lists_methods():
 
 def test_reserved_method_names_rejected():
     with pytest.raises(TypeError, match='apply'):
-        node_def(lambda input: input, name='x', methods={'apply': lambda p: p})
+        Leaf(lambda input: input, name='x', methods={'apply': lambda p: p})
+
+
+@pytest.mark.parametrize('name', [
+    'contract', 'members', 'specialize', 'with_input',
+])
+def test_framework_authoring_names_are_reserved(name):
+    with pytest.raises(TypeError, match=name):
+        Leaf(lambda input: input, name='x', methods={name: lambda: None})
+
+
+@pytest.mark.parametrize('name', [
+    'param_fn', 'init_fn', 'apply_fn', 'feed', 'feed_bundle',
+    'resolve_input', 'rebuild_members', 'preserve_input',
+    'get_apply_input_spec',
+])
+def test_old_internal_operation_names_are_valid_methods(name):
+    node = Leaf(
+        lambda input: input,
+        name='x',
+        methods={name: lambda value: value + 1},
+    )
+
+    assert getattr(node, name)(2) == 3
 
 
 def test_derive_override_apply_with_super():
@@ -78,13 +101,13 @@ def test_derive_override_apply_with_super():
     integrator = Integrator()
 
     def apply(param, state, input):
-        state, y = integrator.apply_fn(param, state, input)
+        state, y = integrator.apply(param, state, input)
         return state, jnp.clip(y, -1.0, 1.0)
 
     Clipped = derive(integrator, apply=apply, name='clipped')
-    node = Clipped.parameterize(gain=jnp.asarray(1.0))
+    node = Clipped.parameterize()
 
-    final, outs = node.scan(None, jnp.ones(3))
+    final, outs = scan(node)(node.init(), jnp.ones(3))
     assert jnp.allclose(outs, jnp.array([1.0, 1.0, 1.0]))  # output clipped...
     assert jnp.allclose(final, 3.0)                        # ...state integrates on
 
@@ -104,7 +127,7 @@ def test_derive_can_add_state():
         return smoothed, smoothed
 
     Smoothed = derive(gain, apply=apply, init=init, name='smoothed')
-    assert isinstance(Smoothed, NodeDef) and Smoothed.cyclic and Smoothed.parametric
+    assert type(Smoothed) is Node and Smoothed.cyclic and Smoothed.parametric
 
     node = Smoothed.parameterize(scale=jnp.asarray(2.0))  # parent's param ctor inherited
     s = node.init()
@@ -112,6 +135,28 @@ def test_derive_can_add_state():
     assert jnp.allclose(out, 1.0)   # 0.5*0 + 0.5*2
     s, out = node.apply(s, 1.0)
     assert jnp.allclose(out, 1.5)   # 0.5*1 + 0.5*2
+
+
+def test_derive_struct_state_default_remains_complete():
+    def init(initial=Struct(original=1.0)):
+        return initial
+
+    def apply(state, input):
+        return state, input
+
+    parent = Leaf(apply, init=init)
+    child = derive(
+        parent,
+        state_input_spec=Struct(initial=Struct(replacement=2.0)),
+    )
+
+    default = child.initialize()
+    assert default.state.__keys__ == ('replacement',)
+    assert default.state.replacement == 2.0
+
+    explicit = child.initialize(initial=Struct(other=3.0))
+    assert explicit.state.__keys__ == ('other',)
+    assert explicit.state.other == 3.0
 
 
 def test_derive_merges_methods():
@@ -130,33 +175,59 @@ def test_derive_merges_methods():
 
 
 def test_derived_defs_stay_composable():
-    """Derived defs are ordinary defs: they transform and compose."""
+    """Derived nodes are ordinary nodes: they transform and compose."""
     integrator = Integrator()
 
     def apply(param, state, input):
-        state, y = integrator.apply_fn(param, state, input)
+        state, y = integrator.apply(param, state, input)
         return state, jnp.clip(y, -1.0, 1.0)
 
     Clipped = derive(integrator, apply=apply, name='clipped')
 
-    b = batch(Clipped, n=2).parameterize(gain=jnp.asarray(1.0))
+    b = batch(Clipped, n=2).parameterize()
     state = b.init()
     state, out = b.apply(state, jnp.array([0.4, 5.0]))
     assert jnp.allclose(out, jnp.array([0.4, 1.0]))
 
     pipe = (Gain() >> Clipped).parameterize(
-        gain=Struct(scale=3.0), clipped=Struct(gain=1.0))
+        gain=Struct(scale=3.0))
     s = pipe.init()
     s, out = pipe.apply(s, 1.0)
     assert jnp.allclose(out, 1.0)  # 3.0 integrated once, clipped to 1
 
 
+def test_derived_apply_keeps_its_entropy_requirement():
+    parent = Leaf(lambda input: input, name='identity')
+
+    def apply(input, rng):
+        return input + jax.random.normal(rng.next())
+
+    child = derive(parent, apply=apply, name='noisy_identity')
+    key = jax.random.PRNGKey(0)
+
+    assert child.contract.apply_takes_rng
+    assert child.contract.input_spec is None
+    assert 'rng' not in child.contract.apply_fields
+    assert jnp.allclose(child(input=0.0, rng=key), child(input=0.0, rng=key))
+
+
+def test_derive_inherits_boundary_actions():
+    def reset(carried, initialized, decided):
+        return initialized
+
+    parent = Leaf(lambda input: input, name='identity',
+                  boundary={'episode': reset})
+    child = derive(parent, name='derived_identity')
+
+    assert child._def.boundaries == parent._def.boundaries
+    assert child._def.boundaries['episode'] is reset
+
+
 def test_method_channels_by_name():
-    """Reserved names in a method signature are channels, injected by
-    name: a leading prefix in the contract order (ndef, param, state,
-    rng), the call's own arguments after them, positional or
-    keyword. state on a bare node is the caller's to pass by
-    keyword."""
+    """Reserved names in a method signature are injected by name: the
+    binding-stage prefix in binding order (self, node, param, state), the
+    call's own arguments after them, positional or keyword. state on a bare
+    node is the caller's to pass by keyword."""
     def param(scale):
         return Struct(scale=jnp.asarray(scale))
 
@@ -166,27 +237,27 @@ def test_method_channels_by_name():
     def apply(param, state, input):
         return state + input, state + input
 
-    def level(ndef, param, state, x):
-        return (state + x) * param.scale, ndef.name
+    def level(node, param, state, x):
+        return (state + x) * param.scale, node.name
 
-    acc = node_def(apply, param=param, init=init, name='acc',
+    acc = Leaf(apply, param=param, init=init, name='acc',
                    methods=dict(level=level)).parameterize(scale=2.0)
 
-    # the contract order is validated at definition: channels lead...
-    with pytest.raises(TypeError, match='lead'):
-        node_def(apply, param=param, init=init, name='acc',
+    # binding order is validated at definition: bound names come first...
+    with pytest.raises(TypeError, match='come first'):
+        Leaf(apply, param=param, init=init, name='acc',
                  methods=dict(bad=lambda x, param: x))
     # ...and keep their order among themselves
     with pytest.raises(TypeError, match='order'):
-        node_def(apply, param=param, init=init, name='acc',
+        Leaf(apply, param=param, init=init, name='acc',
                  methods=dict(bad=lambda state, param: state))
 
-    # bare node: param and ndef inject; state is passed explicitly
+    # bare node: param and node inject; state is passed explicitly
     val, nm = acc.level(1.0, state=jnp.asarray(3.0))
     assert val == 8.0 and nm == 'acc'
 
     # wired member: all channels live, state chained through the step
-    from nodejax import composite
+    from nodejax import Composite
 
     def wapply(self, input):
         before = self.acc.level(0.0)[0]
@@ -194,14 +265,14 @@ def test_method_channels_by_name():
         after = self.acc.level(0.0)[0]
         return Struct(before=before, after=after)
 
-    rig = composite(wapply, members=dict(acc=acc), name='rig').parameterize()
-    s = rig.with_input(jnp.asarray(1.0)).init()
+    rig = Composite(acc=acc)(wapply, name='rig').parameterize()
+    s = rig.with_input(jnp.asarray(1.0)).bind(rig.param).init()
     _, out = rig.apply(s, jnp.asarray(1.0))
     assert out.before == 0.0 and out.after == 2.0
 
 
 def test_method_rng_is_a_stream_everywhere():
-    """The rng channel arrives as a KeyStream in every context: the
+    """The rng slot arrives as a KeyStream in every context: the
     boundary stream inside a wiring, a wrapped explicit key on a bare
     node — one drawing idiom."""
     def param(scale):
@@ -210,7 +281,7 @@ def test_method_rng_is_a_stream_everywhere():
     def draw(param, rng):
         return jax.random.normal(rng.next()) * param.scale
 
-    g = node_def(lambda param, input: input * param.scale, param=param,
+    g = Leaf(lambda param, input: input * param.scale, param=param,
                  name='g', methods=dict(draw=draw)).parameterize(scale=1.0)
 
     key = jax.random.PRNGKey(0)
@@ -219,13 +290,13 @@ def test_method_rng_is_a_stream_everywhere():
 
     # in a wiring, the boundary stream feeds the method: the author
     # declares rng at the composite boundary, the method draws from it
-    from nodejax import composite
+    from nodejax import Composite
 
     def wapply(self, x, rng):
         return self.g.draw() + x
 
-    rig = composite(wapply, members=dict(g=g), name='rig').parameterize()
-    o1 = rig.apply(Struct(x=jnp.asarray(0.0), rng=key))
-    o2 = rig.apply(Struct(x=jnp.asarray(0.0), rng=key))
-    o3 = rig.apply(Struct(x=jnp.asarray(0.0), rng=jax.random.PRNGKey(1)))
+    rig = Composite(g=g)(wapply, name='rig').parameterize()
+    o1 = rig.apply(x=jnp.asarray(0.0), rng=key)
+    o2 = rig.apply(x=jnp.asarray(0.0), rng=key)
+    o3 = rig.apply(x=jnp.asarray(0.0), rng=jax.random.PRNGKey(1))
     assert jnp.allclose(o1, o2) and not jnp.allclose(o1, o3)

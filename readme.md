@@ -1,124 +1,127 @@
-# nodejax
+# NodeJAX
 
 [![tests](https://github.com/EelcoHoogendoorn/nodejax/actions/workflows/test.yml/badge.svg)](https://github.com/EelcoHoogendoorn/nodejax/actions/workflows/test.yml)
 
-```python
-core       = Up(HIDDEN) >> reconstruction >> ttt(RNN(HIDDEN), mse, 0.01) >> Readout(HIDDEN)
-controller = serial(norm=Norm(), committee=ensemble(core, n=MEMBERS), mix=mix)
-rollout    = scan(closed_loop(controller >> Motor(DT)))
-trainer    = train_step(batch(rollout), mse, optax.adam(0.02))
+> **Purely functional JAX middleware: JAX without PyTorch envy.**
 
-final, losses = jax.jit(trainer.scan)(trainer.init(model=params), reference_batches)
-```
-Code: [`nodejax/tests/test_motor_control.py`](nodejax/tests/test_motor_control.py).
-
-```
-pip install git+https://github.com/EelcoHoogendoorn/nodejax.git
-```
-
-Nodejax is purely functional middleware for JAX. The core object is a Node in the compute graph, and every capability above (`ttt`, `ensemble`, `scan`, `closed_loop`, `batch`, `train_step`) is a function from Node to Node, a Node transform. It serves neural network use cases ergonomically, and is designed to generalize to classical control, physical simulation and beyond; [`nodejax/examples/actuator/`](nodejax/examples/actuator/) is a nontrivial example.
-
-Unpacking the above: A committee of recurrent controllers drives a simulated motor in closed loop. Each member carries a test-time-training core: at every control step it adapts its own weights by one reconstruction gradient step at the same time as evolving its recurrent hidden state, while the outer trainer backpropagates through the unrolled physics to learn every member's initial weights and per-weight adaptation rates, as one compiled scan.
-
-Six kinds of state are involved: the motor's, each RNN's carry, the running statistics, the ttt weight updates, the loop's feedback register, and the training state itself. They compose without a line of glue, because all six fill the same slot of the same Node contract.
-
-## The node
+A learned controller, its recurrent state, a differentiable physical system,
+and the optimizer training the whole experiment can be assembled as one
+component:
 
 ```python
-def Motor(dt, kt=1.0, friction=0.5):           # a physical plant
-    def init(ndef):
-        return jnp.zeros_like(ndef.input)      # shape from the resolved input spec
-    def apply(state, input):
-        omega = state + dt * (kt * input - friction * state)
-        return omega, omega
-    return node_def(apply, init=init, name='motor')
+core = Up(HIDDEN) >> stack(RNN(HIDDEN), n=LAYERS) >> Readout(HIDDEN)
+controller = Norm() >> ensemble(core, n=MEMBERS) >> reduce(jnp.mean)
+rollout = batch(scanned(closed_loop(controller >> Motor(DT))))
 
-def Linear(n_out):                             # a neural layer
-    def param(ndef, rng):
-        n_in = ndef.apply_input_spec.shape[-1]
-        return Struct(w=jax.random.normal(rng.next(), (n_in, n_out)) / jnp.sqrt(n_in),
-                      b=jnp.zeros(n_out))
-    def apply(param, input):
-        return input @ param.w + param.b
-    return node_def(apply, param=param, name='linear')
+model = rollout.parameterize(rng=jax.random.PRNGKey(0)).initialize()
+trainer = train_step(model, mse, optax.adam(0.02))
+final, aux = trained(trainer).apply(
+    input=reference_batches,
+    target=reference_batches,
+)
 ```
 
-Code: [`nodejax/tests/test_motor_control.py`](nodejax/tests/test_motor_control.py), [`nodejax/nn/`](nodejax/nn/).
+A committee of recurrent controllers drives a simulated motor in closed loop.
+The outer trainer differentiates through the complete rollout, including the
+controller, feedback, actuator saturation, and motor dynamics. Recurrent carry,
+running statistics, plant state, active weights, and optimizer moments all use
+the same explicit state contract.
 
-Everything in the opening block is, underneath, of this form: up to three pure functions against one rigid contract. It is similar in feel to an equinox or torch Module, but crucially it is a purely functional representation, with distinct slots for static arguments, parameters, state, and input.
-
-```
-param : (param_input)           -> params
-init  : (params, state_input)   -> state
-apply : (params, state, input)  -> (state, output)
-```
-
-The contract and its container live in [`nodejax/core.py`](nodejax/core.py). Statics like `n_out` bind at construction, params bind at `parameterize`, state initializes with init and evolves across steps within a run, and input arrives fresh per call. State being first-class in the contract is what the compositionality and the transforms below rest on, and one of the key differentiators from other frameworks.
-
-## Composition
-
-Nodejax aims to make composition and transformations of nodes frictionless, with or without state.
+The same system can go one step further. Build its recurrent core from a
+learning process:
 
 ```python
-net   = Linear(64) >> gelu >> Linear(10)
-model = net.with_input(images).parameterize(rng=key)   # one key, split per member
+from nodejax.transforms.train_step import learned_sgd
 
-model.param.linear.w.shape          # (784, 64): named trees, plain pytrees
-model.apply(images)                 # logits
+adaptive_rnn = reconstruction_ttt(
+    train_step(RNN(HIDDEN), mse, learned_sgd(0.01))
+)
+adaptive_core = Up(HIDDEN) >> adaptive_rnn >> Readout(HIDDEN)
+controller = Norm() >> ensemble(adaptive_core, n=MEMBERS) >> reduce(jnp.mean)
 ```
-Code: [`nodejax/nn/`](nodejax/nn/), and section 4 of [`docs/cookbook.md`](docs/cookbook.md).
 
-`>>` chains nodes into a node. The pipe's params and state are trees named by member, each member sized from what its own upstream produces.
+Now each controller adapts its own weights during every control step, while the
+outer trainer learns the initial weights and adaptation rates through the
+simulated physics. The outer rollout and training expressions stay unchanged.
 
-## Example Transforms
+This is abridged from the executable
+[`test_motor_control.py`](nodejax/tests/test_motor_control.py), which contains
+the component definitions, data construction, and assertions that the system
+learns.
+
+## The idea
+
+NodeJAX introduces no new execution model; it gives JAX's existing functional
+model an immutable compositional object form.
 
 ```python
-batch(node)                   # vmap over data: params shared, state per element
-ensemble(node, n=8)           # vmap over params: independent members, one call
-stack(node, n=4)              # scan over depth: layer k feeds layer k+1, vectorized
-scan(node)                    # internalize state: a stepper becomes a sequence fn
-train_step(node, loss, opt)   # internalize optimization: params become state
-finetune(node, loss, opt)     # adaptation as a differentiable function
-tie(pipe, src, *aliases)      # parameter sharing as reparameterization
+@node
+def RNN(activation: Callable) -> Node:
+    def param(memory: float):
+        return Struct(memory=memory)
+
+    def init():
+        return 0
+
+    def apply(param, state, input):
+        next_state = activation(input + param.memory * state)
+        return next_state, next_state
+
+    return Leaf(apply, param=param, init=init)
 ```
 
-Each of these is a reusable standard library component, written in a few dozen lines, generic over any Node. Because a node separates statics, params, state and apply input, every transform knows which axes to act on in a generic manner. Code: [`nodejax/transforms/`](nodejax/transforms/).
+The separate static argument binding facilitates `jit`; a `grad` of its parameters is unambiguous. `apply` has exactly the transition shape that `scan` requires. The separate roles tell `vmap` what a transform may share or map.
 
-## The trainer is a composable node
+Anything you can do with JAX, you can do within this contract. Composition and valid transforms preserve this contract, so their results remain components and can be composed again.
 
-```python
-population = train_step(ensemble(mlp, n=8), mse, adam)   # 8 models, one program
-maml = train_step(batch(finetune(model, loss, sgd(0.1))), loss, adam(1e-2))
-targets = enc.apply(state.ema, v2)  # BYOL: an EMA node smoothing a weight subtree
-```
+Randomness remains equally explicit. A public role call accepts one raw
+`rng=key` exactly when that role requires entropy. Internally, a
+`MaybeKeyStream` routes and splits the key according to declared child
+requirements. An authored leaf that declares `rng` receives a keyed
+`KeyStream` and draws with `rng.next()`.
 
-`train_step` is itself a Node whose state holds the weights, the optimizer moments, and the model's own state. This makes it easy to implement concepts like meta-learning. Code: [`nodejax/examples/test_population.py`](nodejax/examples/test_population.py), [`nodejax/transforms/tests/test_finetune.py`](nodejax/transforms/tests/test_finetune.py), [`nodejax/examples/test_byol.py`](nodejax/examples/test_byol.py).
+## See it working
 
-```python
-gan, gen = GAN(adam(d_lr), adam(g_lr))   # one adversarial round; two trainers inside
-meta = train_step(Score(), dist, adam(0.2))   # Score's params are the lrs; its apply scans a whole game
-```
+Examples are written as tests so their claims can be checked:
 
-And node transforms nest without limit: the adversarial round holds two trainers, and an outer trainer learns their learning rates through the replayed game. Code: [`nodejax/examples/test_gan.py`](nodejax/examples/test_gan.py).
+- [`test_train_loop.py`](nodejax/examples/test_train_loop.py) shows an ordinary
+  training loop in compiled chunks, with host-side logging and early stopping.
+- [`test_kv_cache.py`](nodejax/examples/test_kv_cache.py) treats a decoder cache
+  as ordinary state, including branched decoding and batched users with shared
+  params.
+- [`test_maml_composed.py`](nodejax/examples/test_maml_composed.py) expresses
+  MAML by placing an adapting trainer inside an outer trainer.
+- [`test_gan.py`](nodejax/examples/test_gan.py) represents both sides of a GAN
+  and their optimizers inside one differentiable program.
+- [`examples/comparisons/`](nodejax/examples/comparisons/) contains runnable
+  NodeJAX, JAX, Equinox, Flax, Haiku, and PyTorch formulations of the same
+  problems.
 
-## Examples
+The complete gallery lives in [`nodejax/examples/`](nodejax/examples/).
 
-Each is a test; each runs.
+## Read next
 
-- [`nodejax/tests/test_motor_control.py`](nodejax/tests/test_motor_control.py): the opening block; a test-time-training committee drives a motor, trained through the physics.
-- [`nodejax/examples/test_gan.py`](nodejax/examples/test_gan.py): a GAN as one node; a population of games via `ensemble`; the learning rates meta-learned through the unrolled game.
-- [`nodejax/examples/test_byol.py`](nodejax/examples/test_byol.py): BYOL, where the target network is an EMA filter applied to the encoder's weight subtree.
-- [`nodejax/examples/comparisons/ttt_nodejax.py`](nodejax/examples/comparisons/ttt_nodejax.py): test-time training with a RECURRENT inner model; the same model in flax, torch, and raw JAX sits beside it, and [`ttt_variants.py`](nodejax/examples/comparisons/ttt_variants.py) runs the wider study (fixed baselines, other inner models) on the shared harness.
-- [`nodejax/examples/test_meta_controller.py`](nodejax/examples/test_meta_controller.py): MAML over controllers: `train_step(batch(metasgd(task)))` adapts to plants unseen at training time.
-- [`nodejax/examples/test_char_lm.py`](nodejax/examples/test_char_lm.py): a character LM with mixture-of-experts aux losses, tied embeddings, and a sampling loop as a scanned node.
-- [`nodejax/examples/test_digits_committee.py`](nodejax/examples/test_digits_committee.py): deep residual recurrent committee over pixel rows; whitening stats live inside the stack, frozen-read at eval.
-- [`nodejax/examples/test_transfer.py`](nodejax/examples/test_transfer.py): pretrain, freeze the trunk, swap the head: the frozen trunk comes out bitwise identical.
-- [`nodejax/examples/test_population.py`](nodejax/examples/test_population.py): eight models trained as one program; the champion slices out as an ordinary model.
-- [`nodejax/examples/test_train_loop.py`](nodejax/examples/test_train_loop.py): the mundane loop done right: jitted chunks, host-side stats, early stopping, bit-exact reproducibility.
-- [`nodejax/examples/comparisons/imu_nodejax.py`](nodejax/examples/comparisons/imu_nodejax.py): a drifting, quantized accelerometer as a pipe of four physical components; equinox and flax versions sit beside it.
-- [`nodejax/examples/comparisons/tower_nodejax.py`](nodejax/examples/comparisons/tower_nodejax.py): a stacked RNN, scanned, batched, trained, and meta-adapted, four nested axes; the flax and equinox towers sit beside it.
-- [`nodejax/transforms/tests/test_tie.py`](nodejax/transforms/tests/test_tie.py): tied autoencoders and tied embeddings: one copy in the tree, so the two views cannot drift apart.
+- The [cookbook](docs/cookbook.md) builds from a minimal component to state,
+  composition, transforms, and training.
+- The [handbook](docs/handbook.md) is the technical reference for the contract,
+  binding stages, authoring system, and transforms.
+- The [design philosophy](docs/philosophy.md) explains why components, explicit
+  lifetimes, value semantics, and transform closure belong together.
+- The [framework comparison](docs/comparison.md) examines ecosystem tradeoffs
+  through side-by-side implementations.
 
 ## Status
 
-Working prototype: the tests double as documentation. [`docs/cookbook.md`](docs/cookbook.md) builds up from a minimal node, explaining as it goes (runnable in Colab: [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/EelcoHoogendoorn/nodejax/blob/main/docs/cookbook.ipynb)); [`docs/handbook.md`](docs/handbook.md) is the reference; [`docs/comparison.md`](docs/comparison.md) compares with equinox, flax, and haiku, with runnable counterparts in [`nodejax/examples/comparisons/`](nodejax/examples/comparisons/).
+NodeJAX is under active development and its API is evolving. The test suite and
+example programs are the executable specification. It is licensed under the
+[MIT License](LICENSE).
+
+## Install
+
+NodeJAX requires Python 3.11 or newer. To install from a source checkout:
+
+```console
+git clone https://github.com/EelcoHoogendoorn/nodejax.git
+cd nodejax
+pip install -e .
+```

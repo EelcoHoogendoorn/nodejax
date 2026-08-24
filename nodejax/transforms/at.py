@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from nodejax.core import Node, NodeDef, _resolve
-from nodejax.struct import Struct
-from nodejax.generic import _over_generic
-from nodejax.spec import materialize
-from nodejax.transforms.common import _over_bound, _transform_def
+from nodejax.node import Node
+from nodejax.transform import transform
+from nodejax.wrapper import Wrapper
 
 
-@_over_generic
-@_over_bound
-def at(node_def: NodeDef, field: str) -> NodeDef:
+@transform(preserves='param')
+def at(inner: Node, field: str) -> Node:
     """Route a node onto one field of a Struct input: the output is the
     input Struct with `field` replaced by the node's output, every
     other field passed through untouched. Pipes chain whole signals;
@@ -17,26 +14,36 @@ def at(node_def: NodeDef, field: str) -> NodeDef:
     the rest ride alongside.
 
     Type-preserving and transparent: param and state are the inner
-    node's own, an offered init input is projected to the field, and
+    node's own, a supplied init input is projected to the field, and
     the wrapper keeps the inner node's name, so pipe member keys and
     state paths read as if the node were placed directly."""
 
-    def init_fn(ndef, p, state_input=Struct(), input=None):
-        carry = input if input is not None else (ndef.input if ndef.resolved else None)
-        if carry is None:
-            return node_def.build_state(p, state_input)
-        fld = materialize(carry)[field]
-        return _resolve(node_def, fld).build_state(p, state_input,
-                                             input=fld)
+    def param(contract, param_input, rng):
+        current = contract.members.inner.for_input(
+            contract.input_spec_for(field))
+        return current.param(param_input, rng)
 
-    def apply_fn(nd, p, s, i):
-        s2, out = node_def.apply_fn(p, s, i[field])
-        return s2, i.replace(**{field: out})
+    def init(contract, param, state_input, rng):
+        current = contract.members.inner.for_input(
+            contract.input_spec_for(field))
+        return current.init(param, state_input, rng)
 
-    return _transform_def(
-        node_def,
-        name=node_def.name,
-        init_fn=init_fn,
-        apply_fn=apply_fn,
-        rebuild=lambda d: at(d, field=field),
+    def prime(contract, param, state_input, input, rng):
+        return contract.members.inner.prime(
+            param, state_input, input[field], rng)
+
+    def apply(contract, param, state, input, rng):
+        current = contract.members.inner
+        next_state, output = current.apply(
+            param, state, current.feed(input[field]), rng)
+        return next_state, input.replace(**{field: output})
+
+    return Wrapper(inner=inner).roles(
+        name=inner.name,
+        param=param,
+        init=init,
+        prime=prime,
+        apply=apply,
+        apply_fields=(field,),
+        open=True,
     )

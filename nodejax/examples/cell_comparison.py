@@ -18,36 +18,17 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import Node, NodeDef, node_def, stack, scan, batch, train_step, KeyStream
+from nodejax.transforms.train_step import learned_sgd
+from nodejax import (
+    KeyStream, Leaf, Node, PNode, batch, finetune, nn, node, scan, stack,
+    train_step, trained,
+)
 from nodejax.struct import Struct
 import nodejax.examples.test_meta_controller as mc
 
 
-def GRU(hidden: int) -> NodeDef:
-    """The classic gated cell: update and reset gates, candidate mixed
-    through a reset-gated hidden state."""
-    def param(rng: KeyStream) -> Struct:
-        def w() -> jax.Array:
-            return 0.4 * jax.random.normal(rng.next(), (2 * hidden, hidden)) / jnp.sqrt(2 * hidden)
-        return Struct(wz=w(), bz=jnp.zeros(hidden),
-                      wr=w(), br=jnp.zeros(hidden),
-                      wh=w(), bh=jnp.zeros(hidden))
-
-    def init(ndef, param: Struct) -> jax.Array:
-        return jnp.zeros_like(ndef.input)
-
-    def apply(param: Struct, state: jax.Array, input: jax.Array) -> tuple[jax.Array, jax.Array]:
-        xh = jnp.concatenate([input, state])
-        z = jax.nn.sigmoid(xh @ param.wz + param.bz)
-        r = jax.nn.sigmoid(xh @ param.wr + param.br)
-        hc = jnp.tanh(jnp.concatenate([input, r * state]) @ param.wh + param.bh)
-        h = (1 - z) * state + z * hc
-        return h, h
-
-    return node_def(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN), name='gru')
-
-
-def MinGRU(hidden: int, tanh_candidate: bool) -> NodeDef:
+@node(name='mingru')
+def MinGRU(hidden: int, tanh_candidate: bool) -> Node:
     """minGRU: gate and candidate depend on the input alone (no
     hidden-to-hidden matrix), so the temporal gradient is a product of
     (1 - z) factors — stable by construction. The form has a
@@ -57,8 +38,8 @@ def MinGRU(hidden: int, tanh_candidate: bool) -> NodeDef:
             return 0.5 * jax.random.normal(rng.next(), (hidden, hidden)) / jnp.sqrt(hidden)
         return Struct(wz=w(), bz=jnp.zeros(hidden), wh=w(), bh=jnp.zeros(hidden))
 
-    def init(ndef, param: Struct) -> jax.Array:
-        return jnp.zeros_like(ndef.input)
+    def init(node, param: Struct) -> jax.Array:
+        return jnp.zeros_like(node.input)
 
     def apply(param: Struct, state: jax.Array, input: jax.Array) -> tuple[jax.Array, jax.Array]:
         z = jax.nn.sigmoid(input @ param.wz + param.bz)
@@ -68,10 +49,11 @@ def MinGRU(hidden: int, tanh_candidate: bool) -> NodeDef:
         h = (1 - z) * state + z * hc
         return h, h
 
-    return node_def(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN), name='mingru')
+    return Leaf(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN))
 
 
-def LRU(hidden: int) -> NodeDef:
+@node
+def LRU(hidden: int) -> Node:
     """Diagonal leaky-integrator units: per-unit poles sigmoid-bounded
     in (0, 1) — gradient-stable by construction, mixing only through
     depth."""
@@ -80,35 +62,36 @@ def LRU(hidden: int) -> NodeDef:
                       wx=0.5 * jax.random.normal(rng.next(), (hidden,)),
                       b=jnp.zeros(hidden))
 
-    def init(ndef, param: Struct) -> jax.Array:
-        return jnp.zeros_like(ndef.input)
+    def init(node, param: Struct) -> jax.Array:
+        return jnp.zeros_like(node.input)
 
     def apply(param: Struct, state: jax.Array, input: jax.Array) -> tuple[jax.Array, jax.Array]:
         a = jax.nn.sigmoid(param.p)
         h = a * state + (1 - a) * jnp.tanh(param.wx * input + param.b)
         return h, h
 
-    return node_def(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN), name='lru')
+    return Leaf(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN))
 
 
-def task_with_cell(cell: NodeDef, layers: int) -> NodeDef:
+def task_with_cell(cell: Node, layers: int) -> Node:
     """The meta-controller task node with the given recurrent core."""
     from nodejax import externalize, observed_loop, at
     pipe = at(mc.Filters(mc.DT), 'error') >> mc.flat \
         >> mc.Up(3 + mc.ORDER + 1, mc.HIDDEN) \
         >> stack(cell, n=layers) >> mc.Readout(mc.HIDDEN) \
         >> mc.identified(mc.Motor(mc.DT), mc.ORDER)
-    rollout = scan(observed_loop(pipe, belief0=jnp.zeros(mc.ORDER + 1)),
-                   persist=('rls', 'belief'))
-    return externalize(rollout, 'motor', at_init=mc.Motor(mc.DT).build_param())
+    rollout = scan(observed_loop(pipe, belief_spec=jnp.zeros(mc.ORDER + 1)),
+                   boundary='episode')
+    return externalize(
+        rollout, 'motor', at_init=mc.Motor(mc.DT).parameterize().param)
 
 
-def run(name: str, cell: NodeDef, layers: int) -> None:
-    from nodejax import metasgd
+def run(name: str, cell: Node, layers: int) -> None:
     task = task_with_cell(cell, layers)
-    adapt = metasgd(task, mc.mse, mc.INNER_LR0)
-    trainer = train_step(batch(adapt), mc.mse, optax.adam(mc.META_LR))
-    model = batch(adapt).parameterize(rng=jax.random.PRNGKey(0))
+    adapt = finetune(train_step(task, mc.mse, learned_sgd(mc.INNER_LR0)))
+    trainer = train_step(batch(adapt), mc.mse, optax.adam(mc.META_LR)).parameterize(
+        rng=jax.random.PRNGKey(0))
+    start = trainer.param.model              # the un-meta-trained inits
 
     _, train_tasks, q_t = mc.make_tasks(np.random.RandomState(0),
                                         mc.META_STEPS * mc.TASKS, k=mc.K)
@@ -116,30 +99,38 @@ def run(name: str, cell: NodeDef, layers: int) -> None:
     def fold(x):
         return jax.tree.map(lambda a: a.reshape(mc.META_STEPS, mc.TASKS, *a.shape[1:]), x)
 
-    final, losses = trainer.scan(trainer.init(model=model.param), Struct(input=fold(train_tasks), target=fold(q_t)))
+    final, aux = trained(trainer).apply(input=fold(train_tasks), target=fold(q_t))
 
     plant, tasks, q_t = mc.make_tasks(np.random.RandomState(99), mc.TASKS, k=mc.K)
-    adapted = batch(adapt).apply(final.model, tasks)
-    untuned = batch(task).bind(final.model.init)
-    _, unadapted = untuned.apply(untuned.with_input(tasks.query).init(), tasks.query)
-    random_adapted = batch(adapt).apply(model.param, tasks)
+    # three probes on FRESH tasks, isolating what meta-training bought:
+    # 1) the method itself: meta-learned inits, adapted per task on its
+    #    support episode, scored on the query
+    _, meta_adapted = final.apply(bundle=tasks)
+    # 2) the inits alone: the meta-learned weights predict the query with
+    #    NO per-task adaptation (the recurrent cells still get their
+    #    fresh start state)
+    init_model = batch(task).with_input(tasks.query).bind(final.param.model)
+    _, init_only = init_model.initialize()(tasks.query)
+    # 3) adaptation alone: the same inner loop from RANDOM inits, meta-
+    #    training ablated
+    adapt_only = batch(adapt).bind(start).apply(bundle=tasks)
 
-    settled = mc.mse(adapted[:, mc.T // 2:], q_t[:, mc.T // 2:])
-    bias = jnp.mean(adapted[:, -20:] - q_t[:, -20:], axis=1)
-    n_weights = sum(x.size for x in jax.tree.leaves(final.model.init))
+    settled = mc.mse(meta_adapted[:, mc.T // 2:], q_t[:, mc.T // 2:])
+    bias = jnp.mean(meta_adapted[:, -20:] - q_t[:, -20:], axis=1)
+    n_weights = sum(x.size for x in jax.tree.leaves(final.param.model))
     mc.plot_tuning(f'cells_{name}.png',
                    f'{name}: {layers} layers, {n_weights} weights | '
                    f'settled mse {settled:.5f}, worst bias {jnp.max(jnp.abs(bias)):.3f}',
-                   plant, q_t, adapted, unadapted, random_adapted)
+                   plant, q_t, meta_adapted, init_only, adapt_only)
     print(f'{name:16s} L={layers} weights={n_weights:4d}: '
-          f'finite={bool(jnp.all(jnp.isfinite(losses)))} '
-          f'adapted {mc.mse(adapted, q_t):.4f} unadapted {mc.mse(unadapted, q_t):.4f} '
+          f'finite={bool(jnp.all(jnp.isfinite(aux.loss)))} '
+          f'adapted {mc.mse(meta_adapted, q_t):.4f} unadapted {mc.mse(init_only, q_t):.4f} '
           f'settled {settled:.5f} worst|bias| {jnp.max(jnp.abs(bias)):.4f}')
 
 
 def main() -> None:
     run('elman-2', mc.RNN(mc.HIDDEN), 2)
-    run('gru-2', GRU(mc.HIDDEN), 2)
+    run('gru-2', nn.GRU(mc.HIDDEN), 2)
     run('mingru-tanh-2', MinGRU(mc.HIDDEN, tanh_candidate=True), 2)
     run('mingru-tanh-4', MinGRU(mc.HIDDEN, tanh_candidate=True), 4)
     run('mingru-lin-2', MinGRU(mc.HIDDEN, tanh_candidate=False), 2)

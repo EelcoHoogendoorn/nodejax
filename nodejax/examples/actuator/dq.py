@@ -62,7 +62,7 @@ class DQ:
         return f'DQ(d={self.d!r}, q={self.q!r})'
 
 
-def _flatten_with_keys(t):
+def _flatten_with_keys(t: float):
     return ((jax.tree_util.GetAttrKey('d'), t.d),
             (jax.tree_util.GetAttrKey('q'), t.q)), None
 

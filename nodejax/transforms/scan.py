@@ -1,153 +1,192 @@
 from __future__ import annotations
 
-import jax
-
+from nodejax.binding import split_aux
+from nodejax.contract import Contract
+from nodejax.node import Node
+from nodejax.pnode import PNode
+from nodejax.spec import add_axis, element_spec, tree_first
 from nodejax.struct import Struct
-from nodejax.core import Node, NodeDef, _trivial_init_fn, _resolve, _has_rng
-from nodejax.generic import _over_generic
-from nodejax.spec import materialize
-from nodejax.transforms.common import _over_bound, _transform_def
+from nodejax.transform import scan_inputs, scan_steps, transform
+from nodejax.wrapper import Wrapper
 
 
-@_over_generic
-@_over_bound
-def scan(node_def: NodeDef, record: bool = False,
-         persist: tuple[str, ...] | None = None) -> NodeDef | Node:
-    """Internalize the state loop: a step-level cyclic node becomes a
-    sequence-level non-cyclic one (CN -> N, PCN -> PN in lattice terms).
+def _sequence_spec(inner: Contract):
+    """Lift a step input specification over a variable-length time axis."""
+    step = inner.input_spec
+    if step is None:
+        return None
+    return Struct(**{
+        k: add_axis(v, fixed=False) for k, v in step.__items__})
 
-    State starts from init defaults and stays inside. With record=True the
-    per-step output becomes Struct(state=..., output=...) — the full state
-    trajectory rides along for plotting/analysis, doctrine-compliant
-    (a Struct, not a tuple).
 
-    A reserved 'rng' field of the input Struct — a single key, no time
-    axis (entropy cannot ride the xs) — is diverted to the internalized
-    init, so stochastic state under a scanned rollout initializes from
-    the same one-shot rng-as-input entry point as everything else.
+def _state_at_first_step(inner: Contract, param, state_input, data, rng, *,
+                         bundled: bool):
+    """Build fresh state from the first element of a sequence.
 
-    persist splits FAST state from SLOW state. It is a MAPPING from
-    write slot to read slot, applied at episode start by exact path
-    segment ('norm' does not match 'denormalizer'):
+    `scan` needs what a restart would produce at a claimed boundary;
+    internalized runs need the same fresh carry as their start. The element is
+    a real value, so a node that primes gets data and not a shape, and the node
+    is bound to it so a node that only reads its shape is served too.
+    """
+    element = tree_first(scan_inputs(inner, data))
+    if bundled:
+        element = inner.intake(element)
+    return inner.prime(param, state_input, element, rng)
 
-        persist={'stats': 'stats'}                  # slot carries itself
-        persist={'frozen': 'stats', 'stats': 'stats'}
-            # 'frozen' REFRESHES from the carried 'stats' sibling —
-            # within-episode reads never see within-episode updates
-            # (true frozen-read evaluation under a scan; the same shape
-            # as a target network refreshing from the live one)
-        # unmatched slots re-initialize fresh (recurrent activations,
-        # episode registers); a bare tuple of names is identity sugar
 
-    The result stays CYCLIC, with the full step state as its state —
-    internalizing everything is a choice, and for slow state the wrong
-    one; the enclosing loop (a trainer, an outer scan) carries the slow
-    state to the next episode. Fresh slots ride along structurally but
-    their persisted values are ignored (each apply overwrites them from
-    init, so batch-shaped fast state tolerates shape changes between
-    applies). A callable merge(fresh, outer) -> episode-start state
-    remains the general escape hatch."""
-    if not node_def.cyclic:
-        raise TypeError(f'scan requires a cyclic node, got {node_def!r}')
+def _prime_from_first_element(contract, param, state_input, input, rng):
+    """Prime the step's state from the sequence's first real element."""
+    current = contract.members.step
+    return _state_at_first_step(
+        current, param, state_input, input, rng, bundled=False)
 
-    # scan's input contract is a stream, the inner node's is a step: the
-    # inner def resolves against ONE element of the bound stream
-    def param_fn(ndef, param_input=Struct()):
-        d = (_resolve(node_def, jax.tree.map(lambda x: x[0], ndef.input))
-             if ndef.resolved else node_def)
-        return d.build_param(param_input)
 
-    def _divert_rng(inputs):
-        if _has_rng(inputs):
-            return (Struct(rng=inputs['rng']),
-                    inputs.without('rng'))
-        return Struct(), inputs
+def _element_initialize(contract, param, state_input, rng):
+    """Build the step's state from one element's shape alone."""
+    current = contract.members.step
+    sequence_spec = contract.input_spec
+    element = (None if sequence_spec is None else
+               element_spec(sequence_spec))
+    current = (current if element is None else
+               current._resolve_def(element, bundled=True).contract)
+    return current.init(
+        param, state_input, rng)
 
-    def _loop(p, s0, inputs):
-        if record:
-            def step(s_, i_):
-                s2, out = node_def.apply_fn(p, s_, i_)
-                return s2, Struct(state=s2, output=out)
-            return jax.lax.scan(step, s0, inputs)
-        return jax.lax.scan(lambda s_, i_: node_def.apply_fn(p, s_, i_), s0, inputs)
 
-    if persist is None:
-        def apply_fn(nd, p, s, inputs):
-            seed, inputs = _divert_rng(inputs)
-            # the first sequence element seeds the internalized init, so
-            # input-shaped state (previous-error registers, feedback seeds)
-            # derives from the sequence itself — no shape statics
-            element = jax.tree.map(lambda x: x[0], inputs)
-            s0 = _resolve(node_def, element).build_state(p, seed, input=element)
-            _, ys = _loop(p, s0, inputs)
-            return (), ys
+def _sequence_parameterize(member_name: str):
+    def parameterize(contract, param_input, rng):
+        current = getattr(contract.members, member_name)
+        sequence_spec = contract.input_spec
+        if sequence_spec is not None:
+            current = current._resolve_def(
+                element_spec(sequence_spec), bundled=True).contract
+        return current.param(param_input, rng)
 
-        return _transform_def(
-            node_def,
-            name=f'scan({node_def.name})',
-            param_fn=param_fn,
-            init_fn=_trivial_init_fn,
-            apply_fn=apply_fn,
-            cyclic=False,
-            apply_input_spec=None,
-            rebuild=lambda d: scan(d, record=record, persist=persist),
-        )
+    return parameterize
 
-    if callable(persist):
-        merge = persist
-    else:
-        mapping = dict(persist) if isinstance(persist, dict) else {t: t for t in persist}
 
-        def _segments(key_path):
-            return tuple(getattr(k, 'name', getattr(k, 'key', None)) for k in key_path)
+def _fresh_step_state(step: Contract, param, inputs, rng):
+    """Initialize an internalized run from its first sequence element."""
+    child_rng = rng.child(step.init_takes_rng)
+    return _state_at_first_step(
+        step, param, Struct(), inputs, child_rng, bundled=True)
 
-        def merge(fresh, outer):
-            """The episode-start state, decided leaf by leaf: a leaf whose
-            path crosses a slot named in the mapping is READ from the
-            carried `outer` state — at the same path with that slot renamed
-            to its mapped source, so 'frozen' <- 'stats' reads the sibling
-            slot — and every other leaf keeps its fresh re-initialized
-            value. Paths compare by NAME segments, so the rule is
-            structural (a slot name anywhere in the tree), not positional."""
-            fresh_leaves, treedef = jax.tree_util.tree_flatten_with_path(fresh)
-            carried = {_segments(path): leaf
-                       for path, leaf in jax.tree_util.tree_flatten_with_path(outer)[0]}
-            leaves = []
-            for path, fresh_leaf in fresh_leaves:
-                segments = _segments(path)
-                hit = next(((i, s) for i, s in enumerate(segments) if s in mapping), None)
-                if hit is None:
-                    leaves.append(fresh_leaf)                # unmapped: episode restart
-                    continue
-                i, slot = hit
-                source = segments[:i] + (mapping[slot],) + segments[i + 1:]
-                if source not in carried:
-                    raise TypeError(f"persist mapping '{slot} <- {mapping[slot]}' "
-                                    f"has no source slot at {source}")
-                leaves.append(carried[source])               # mapped: carried across
-            return jax.tree_util.tree_unflatten(treedef, leaves)
 
-    def init_fn(ndef, p, state_input=Struct(), input=None):
-        seq = input if input is not None else (ndef.input if ndef.resolved else None)
-        if seq is None:
-            return node_def.build_state(p, state_input)
-        element = jax.tree.map(lambda x: x[0], seq)
-        return _resolve(node_def, element).build_state(p, state_input, input=element)
+def _check_claim(inner: Contract, boundary):
+    """Reject a boundary name that no node in the step declares."""
+    if boundary is None:
+        return
+    declared = inner.boundary_names
+    if boundary in declared:
+        return
+    known = (f'; this subtree declares {sorted(declared)}' if declared
+             else '; nothing beneath it declares any boundary')
+    raise TypeError(
+        f"scan({inner.name}): boundary={boundary!r} fires nothing{known}. "
+        'Name the boundary the nodes name, or drop the argument: carrying is '
+        'what happens either way, so the claim is doing nothing for you.')
 
-    def apply_fn(nd, p, s_outer, inputs):
-        seed, inputs = _divert_rng(inputs)
-        element = jax.tree.map(lambda x: x[0], inputs)
-        fresh = _resolve(node_def, element).build_state(p, seed, input=element)
-        final, ys = _loop(p, merge(fresh, s_outer), inputs)
-        return final, ys
 
-    return _transform_def(
-        node_def,
-        name=f'scan({node_def.name})',
-        param_fn=param_fn,
-        init_fn=init_fn,
-        apply_fn=apply_fn,
-        cyclic=True,
-        apply_input_spec=None,
-        rebuild=lambda d: scan(d, record=record, persist=persist),
+@transform(preserves='param,state')
+def scan(step: Node, record: bool = False,
+         boundary: str | None = None) -> Node | PNode:
+    """Run ``step`` over a sequence while keeping its state external.
+
+    The supplied state becomes the initial carry and the returned state can be
+    passed to another call, making this form suitable for chunks or open-ended
+    streams. ``boundary`` may reinitialize matching state slots at the start
+    of each call. ``record=True`` adds the state trajectory to the auxiliary
+    output.
+    """
+    if not step.cyclic:
+        raise TypeError(f'scan requires a cyclic node, got {step!r}')
+    _check_claim(step.contract, boundary)
+
+    def apply_fn(contract, param, state, input, rng):
+        current = contract.members.step
+        start = state
+        if boundary is not None:
+            start = current.merge_boundary(
+                state,
+                _state_at_first_step(
+                    current,
+                    param,
+                    Struct(),
+                    input,
+                    rng.child(current.init_takes_rng),
+                    bundled=True,
+                ),
+                boundary)
+        return scan_steps(
+            current, param, start, input, rng, record=record)
+
+    sequence_spec = _sequence_spec(step.contract)
+    return Wrapper(step=step).roles(
+        name=f'scan({step.name})',
+        param=_sequence_parameterize('step'),
+        init=_element_initialize,
+        prime=_prime_from_first_element,
+        apply=apply_fn,
+        input_spec=sequence_spec,
+        apply_takes_rng=(
+            (boundary is not None and step.contract.init_takes_rng)
+            or step.contract.apply_takes_rng),
+    )
+
+
+@transform(preserves='param')
+def scanned(step: Node, record: bool = False) -> Node | PNode:
+    """Run ``step`` over a sequence with fresh state on every call.
+
+    The first sequence element initializes the state, the per-step outputs are
+    returned, and the final state is discarded. ``record=True`` adds the state
+    trajectory to the auxiliary output without changing the ordinary output.
+    """
+    if not step.cyclic:
+        raise TypeError(f'scanned requires a cyclic node, got {step!r}')
+
+    def apply_fn(contract, param, input, rng):
+        current = contract.members.step
+        initial = _fresh_step_state(current, param, input, rng)
+        _, outputs = scan_steps(
+            current, param, initial, input, rng, record=record)
+        return outputs
+
+    return Wrapper(step=step).roles(
+        name=f'scanned({step.name})',
+        param=_sequence_parameterize('step'),
+        init=False,
+        apply=apply_fn,
+        input_spec=_sequence_spec(step.contract),
+        apply_takes_rng=(step.contract.init_takes_rng
+                         or step.contract.apply_takes_rng),
+    )
+
+
+@transform(preserves='param')
+def carried(step: Node) -> Node | PNode:
+    """Run ``step`` from fresh state and return its final state.
+
+    Per-step outputs are discarded. Any auxiliary values emitted by the step
+    remain available alongside the final state.
+    """
+    if not step.cyclic:
+        raise TypeError(f'carried requires a cyclic node, got {step!r}')
+
+    def apply_fn(contract, param, input, rng):
+        current = contract.members.step
+        initial = _fresh_step_state(current, param, input, rng)
+        final, outputs = scan_steps(
+            current, param, initial, input, rng)
+        _, aux = split_aux(outputs)
+        return final if aux is None else (final, aux)
+
+    return Wrapper(step=step).roles(
+        name=f'carried({step.name})',
+        param=_sequence_parameterize('step'),
+        init=False,
+        apply=apply_fn,
+        input_spec=_sequence_spec(step.contract),
+        apply_takes_rng=(step.contract.init_takes_rng
+                         or step.contract.apply_takes_rng),
     )

@@ -3,7 +3,7 @@
 The classic U-Net architecture demonstrates how self-style composite wiring
 simplifies multi-resolution skip connections:
 
-- Downward path (encoder): conv, pool, recurse into inner level
+- Downward path (encoder): conv, downsample, recurse into inner level
 - Upward path (decoder): upsample inner output, concatenate encoder skip feature, conv
 - The skip connection is simply a Python local (`e = self.enc(input)`)!
 
@@ -19,45 +19,29 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from nodejax import NodeDef, composite, batch, train_step, nn
+from nodejax import node, trained, Node, Composite, batch, train_step, nn
 from nodejax.struct import Struct
+from nodejax import tile
 
-
-def conv(c_out: int, kernel: int = 3) -> NodeDef:
-    """Convolution + ReLU block using stock nn.Conv."""
-    return nn.Conv(c_out, kernel=kernel) >> nn.relu
-
-
-def pool(x: jax.Array) -> jax.Array:
-    """2x2 spatial downsampling via nearest resize."""
-    h, w, c = x.shape
-    return jax.image.resize(x, (h // 2, w // 2, c), method='nearest')
-
-
-def upsample(x: jax.Array, target_hw: tuple[int, int]) -> jax.Array:
-    """Bilinear upsampling back to target spatial shape."""
-    h, w = target_hw
-    return jax.image.resize(x, (h, w, x.shape[-1]), method='bilinear')
-
-
-def UNetLevel(c_outer: int, c_inner: int, inner: NodeDef) -> NodeDef:
+@node
+def UNetLevel(c_outer: int, c_inner: int, inner: Node) -> Node:
     """One level of the recursive U-Net."""
-    members = dict(
-        enc=conv(c_inner),
-        inner=inner,
-        dec=conv(c_outer)
-    )
+    members = Composite(enc=nn.Conv(c_inner, kernel=3) >> nn.relu,
+                        down=nn.Downsample(),
+                        inner=inner,
+                        up=nn.Upsample(method='bilinear'),
+                        dec=nn.Conv(c_outer, kernel=3) >> nn.relu)
 
     def apply(self, input: jax.Array) -> jax.Array:
         e = self.enc(input)                                 # the skip connection: a Python local!
-        d = self.inner(pool(e))
-        u = upsample(d, e.shape[:2])
+        d = self.inner(self.down(e))
+        u = self.up(d)
         return self.dec(jnp.concatenate([e, u], axis=-1))
 
-    return composite(apply, members=members, name=f'level_{c_outer}_{c_inner}')
+    return members(apply, name=f'level_{c_outer}_{c_inner}')
 
 
-def UNet(channels: list[int]) -> NodeDef:
+def UNet(channels: list[int]) -> Node:
     """Build a U-Net recursively from a list of channel depths.
     
     e.g. channels = [1, 16, 32] builds:
@@ -69,7 +53,7 @@ def UNet(channels: list[int]) -> NodeDef:
         raise ValueError('U-Net needs at least 2 channel specs (input/output and bottleneck)')
     
     # Bottleneck at innermost level
-    current = conv(channels[-1])
+    current = nn.Conv(channels[-1], kernel=3) >> nn.relu
     
     # Wrap levels from inside out
     for i in reversed(range(len(channels) - 1)):
@@ -110,16 +94,17 @@ def test_batched_unet_training():
     def mse(pred, target):
         return jnp.mean((pred - target) ** 2)
 
-    trainer = train_step(batched_model, mse, optax.adam(0.01))
-    bound = batched_model.parameterize(rng=jax.random.PRNGKey(42))
-    state = trainer.init(model=bound.param)
-    
-    # Create dummy batch of 4 images (4, 16, 16, 1)
-    dummy_input = jnp.ones((4, 16, 16, 1))
-    dummy_target = jnp.ones((4, 16, 16, 1)) * 2.0
-    
-    # Single optimization step
-    new_state, loss = trainer.apply(state, Struct(input=dummy_input, target=dummy_target))
-    
-    assert jnp.isfinite(loss)
-    assert loss > 0.0
+    trainer = train_step(
+        batched_model.parameterize(rng=jax.random.PRNGKey(42)).initialize(),
+        mse, optax.adam(0.01))
+
+    # a batch of 4 images, the same one every step
+    images = jnp.ones((4, 16, 16, 1))
+    targets = images * 2.0
+    steps = 5
+
+    _, aux = trained(trainer).apply(input=tile(images, steps),
+                                    target=tile(targets, steps))
+
+    assert jnp.all(jnp.isfinite(aux.loss))
+    assert aux.loss[-1] < aux.loss[0]        # and it is actually training

@@ -18,15 +18,15 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax import ambient, node_def, composite
+from nodejax import Node, node, ambient, Leaf, Composite
 
 from nodejax.examples.actuator.dq import DQ
 from nodejax.control import ClampNorm, Delay, Diff
 from nodejax.examples.actuator.motor import current_model, voltage_terms
 
 
-@ambient
-def foc_current_model(dt):
+@node
+def foc_current_model(dt: float):
     """Predict the current the previously commanded modulated voltage
     implies, with di/dt taken filtered-vs-previous — the physics as
     plain functions on plain param data. The model bundle carries:
@@ -40,7 +40,8 @@ def foc_current_model(dt):
     return model_fn
 
 
-def Feedforward():
+@node(name='ff')
+def Feedforward() -> Node:
     """Per-term feedforward: the model's voltage terms weighted by the
     trust placed in each (resistive/bemf/inductive gains), summed. A
     leaf node — the terms its input, the gains its params."""
@@ -51,11 +52,11 @@ def Feedforward():
         return (resistive * self.r + bemf * self.bemf
                 + inductive * self.l)
 
-    return node_def(apply, param=param, name='ff')
+    return Leaf(apply, param=param)
 
 
-@ambient
-def CurrentController(dt, motor, estimator, controller, fets, bus_est):
+@node
+def CurrentController(dt: float, motor: Node, estimator: Node, controller: Node, fets: Node, bus_est: Node) -> Node:
     """Target current + measurements in, PWM out.
 
     input fields, declared by the apply signature: true_i (true DQ
@@ -69,11 +70,11 @@ def CurrentController(dt, motor, estimator, controller, fets, bus_est):
     member list; ff (per-term feedforward weighting) and limit (a
     norm-clamp on the target current) are leaf-node members like the
     rest."""
-    members = dict(motor=motor, estimator=estimator, controller=controller,
+    members = Composite(motor=motor, estimator=estimator, controller=controller,
                    fets=fets, bus_est=bus_est,
                    ff=Feedforward()(r=1.0, bemf=1.0, l=0.0),
                    limit=ClampNorm()(limit=100.0),
-                   pwm_prev=Delay(DQ()), d_dt=Diff(dt))
+                   pwm_prev=Delay().with_input(DQ()), d_dt=Diff(dt))
 
     def apply(self, true_i, est_velocity, true_v, target_i):
         # the controller owns its ADCs: the TRUE bus voltage arrives and
@@ -101,7 +102,7 @@ def CurrentController(dt, motor, estimator, controller, fets, bus_est):
         # error-driven di/dt is a hidden P-gain of L/dt on measurement
         # noise (measured: tracking flat, jitter x4)
         terms = self.motor.voltage_terms(target_i, self.d_dt(target_i), est_velocity)
-        v = fb_v + self.ff(terms)
+        v = fb_v + self.ff(bundle=terms)
 
         # guard: an estimator still converging from zero must not produce
         # NaN pwm; the norm clamp bounds the result either way
@@ -112,28 +113,30 @@ def CurrentController(dt, motor, estimator, controller, fets, bus_est):
         return pwm
 
     # the signature declares the spec, exactly as at a leaf
-    return composite(apply, members=members, name='current_controller')
+    return members(apply)
 
 
 # --- command controllers: command -> current target ---
 
+@node
 def torque_command():
     """Torque command -> DQ current target (id = 0)."""
     def apply(command, motor):
         iq = command / motor.kt
         return DQ(d=jnp.zeros_like(iq), q=iq)
-    return node_def(apply, name='torque_command')
+    return Leaf(apply)
 
 
-def VelocityCommand(velocity_ctrl):
+@node
+def VelocityCommand(velocity_ctrl: Node) -> Node:
     """Velocity command -> torque (via the velocity PID member) ->
     DQ current target. Runs on ESTIMATED mechanicals: the observer's
     output, not the true state."""
-    members = dict(velocity_ctrl=velocity_ctrl)
+    members = Composite(velocity_ctrl=velocity_ctrl)
 
     def apply(self, command, est_mechanical, motor):
         torque = self.velocity_ctrl(command - est_mechanical.velocity)
         iq = torque / motor.kt
         return DQ(d=jnp.zeros_like(iq), q=iq)
 
-    return composite(apply, members=members, name='velocity_command')
+    return members(apply)

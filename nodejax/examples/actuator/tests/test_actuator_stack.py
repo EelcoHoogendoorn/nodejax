@@ -13,7 +13,8 @@ apply after).
 import jax
 import jax.numpy as jnp
 
-from nodejax import scan, composite, ambient
+from nodejax import Node, scan, scanned, Composite, ambient
+from nodejax.types import PyTree
 from nodejax.struct import Struct
 from nodejax.control import EMA, PID
 from nodejax.examples.actuator import (DQ, Electrical, Mechanical,
@@ -26,23 +27,23 @@ from nodejax.examples.actuator import (DQ, Electrical, Mechanical,
 DT = 1e-4
 
 
-def Environment(actuator, mechanical):
+def Environment(actuator: Node, mechanical: Node) -> Node:
     """Environment-level closure: the actuator maps (mechanical, command)
     -> torque; the environment integrates mechanics."""
-    members = dict(actuator=actuator, mechanical=mechanical)
+    members = Composite(actuator=actuator, mechanical=mechanical)
 
-    def apply(self, command=0.0, load=0.0):
+    def apply(self, command, load):
         torque = self.actuator(mechanical=self.state.mechanical, command=command)
         self.mechanical(torque=torque, load=load)
         return torque
 
-    return composite(apply, members=members, name='env')
+    return members(apply, name='env')
 
 
-def build_env(command_ctrl=None, capacity=jnp.inf, model_tau=0.0,
-              fet_limit=80.0, dt=DT):
+def build_env(command_ctrl: Node=None, capacity: float=jnp.inf, model_tau: float=0.0,
+              fet_limit: float=80.0, dt: float=DT) -> Node:
     """Assemble the full chain — the member tree spelled once, at the
-    factories: blocks arrive as defs or constructed (bound nodes, their
+    factories: blocks arrive as nodes or constructed (bound nodes, their
     params the stored construction values). dt is AMBIENT: declared
     eligible at each factory's definition site (@ambient), supplied
     once here, filled only where a call leaves it unbound — no
@@ -73,20 +74,31 @@ def build_env(command_ctrl=None, capacity=jnp.inf, model_tau=0.0,
                            inertia=0.1, friction=0.2)).parameterize(), motor
 
 
-def simulate(node, n, command, key=0):
-    rollout = scan(node.ndef, record=True).bind(node.param)
+# a real initial condition: the actuator at rest, no command, no load. Supplying
+# one is what lets the warm filters prime; a resolved shape will not do, since
+# zeros are a spec and a spec never enters an input slot (see test_priming)
+AT_REST = Struct(command=0.0, load=0.0)
+
+
+def simulate(node, n: int, command: jax.Array, key: jax.Array=0):
+    rollout = scanned(node.node, record=True).bind(node.param)
     cmds = jnp.broadcast_to(jnp.asarray(command, dtype=jnp.float32), (n,))
-    # commands are the raw input sequence; the key rides the reserved field
-    return rollout.apply(Struct(rng=jax.random.PRNGKey(key), command=cmds))
+    # Commands are data; the raw key enters through its separate public channel.
+    out, aux = rollout.apply(
+        rng=jax.random.PRNGKey(key), command=cmds,
+        load=jnp.zeros_like(cmds))
+    # record SOWS the trajectory rather than wrapping the output, so pairing
+    # the two is this helper's business and not the transform's
+    return Struct(output=out, state=aux.state)
 
 
 def test_stack_assembly():
     env, _ = build_env()
-    state = env.init(rng=jax.random.PRNGKey(0))
+    state = env.init(rng=jax.random.PRNGKey(0), input=AT_REST)
 
     act = state.actuator
-    assert isinstance(act.current_ctrl.pwm_prev, DQ)            # previous pwm
-    assert isinstance(act.current_ctrl.estimator.prev, DQ)  # model blend memory
+    assert type(act.current_ctrl.pwm_prev) is DQ             # previous pwm
+    assert type(act.current_ctrl.estimator.prev) is DQ   # model blend memory
     assert act.battery == 1.0                                 # full charge
     assert act.current_ctrl.fets == 25.0                      # fets at ambient
     assert act.motor_thermal == 25.0
@@ -202,7 +214,7 @@ def punchy_command():
         PID(DT).parameterize(kp=8.0, ki=40.0, integral_limit=15.0))
 
 
-def step_profile(n=8000):
+def step_profile(n: int=8000):
     """The step up/down velocity command, sized to exhaust the bus:
     back-EMF is ~0.8*omega volts against a 48V battery, so +/-55 rad/s
     puts the CRUISE at the pwm norm-1 rail (velocity asymptotes as
@@ -212,7 +224,7 @@ def step_profile(n=8000):
     return t, jnp.where(t < 0.25, 55.0, jnp.where(t < 0.55, -55.0, 0.0))
 
 
-def render_stack_panels(t, cmd, traj, filename, title):
+def render_stack_panels(t: float, cmd, traj, filename: str, title: str):
     """The four-panel stack view (velocity, currents, pwm, thermals),
     shared by the visual tests. A trajectory with a trailing member axis
     overlays one line per ensemble member (matplotlib draws 2-D arrays
@@ -297,7 +309,7 @@ def test_step_response_visual():
     assert os.path.exists(out)
 
 
-def census(title, tree):
+def census(title: str, tree: PyTree):
     """Print every leaf of a pytree by keyed path, dtype and shape
     (visible under pytest -s); returns the keyed leaf list."""
     keyed = jax.tree_util.tree_flatten_with_path(tree)[0]
@@ -315,16 +327,17 @@ def test_structure_census(capsys=None):
     addresses read as the object graph and resolve as attribute chains;
     state mirrors it member-for-member."""
     env, _ = build_env()
-    state = env.init(rng=jax.random.PRNGKey(0))
+    state = env.init(rng=jax.random.PRNGKey(0), input=AT_REST)
 
     params = census('params (the object graph)', env)
     states = census('state (one tick of the world)', state)
 
-    # addresses ARE attribute chains: any path resolves by plain getattr
+    # param addresses ARE attribute chains off env.param, the explicit
+    # value spelling (member hops off the node itself slice bound nodes)
     import functools
     for key_path, leaf in params[:6]:
         chain = jax.tree_util.keystr(key_path).split('.')[1:]
-        assert functools.reduce(getattr, chain, env) is leaf
+        assert functools.reduce(getattr, chain, env.param) is leaf
     # state mirrors the stateful members only; both trees are non-trivial
     assert len(params) > 25 and len(states) > 15
 
@@ -333,7 +346,7 @@ def test_dt_is_one_ambient_knob():
     """dt is one ambient value at one point of use, so rebinding it
     re-times every block coherently: the same 0.2s velocity command at
     half the step size tracks the same physics (dt-in-seconds discipline
-    enforced across 11 defs at once — a per-step unit bug anywhere
+    enforced across 11 nodes at once — a per-step unit bug anywhere
     splits these runs)."""
     fine, _ = build_env(dt=DT / 2)
     coarse, _ = build_env()
@@ -363,7 +376,7 @@ def test_model_mismatch_ensemble_visual():
                                jax.random.uniform(jax.random.PRNGKey(7), (N - 1, 4),
                                                   minval=0.9, maxval=1.1)])
     census('params (the tree the corruption edits)', env)
-    census('state (one member, before stacking)', env.init(rng=jax.random.PRNGKey(0)))
+    census('state (one member, before stacking)', env.init(rng=jax.random.PRNGKey(0), input=AT_REST))
 
     def corrupt(f):
         MODEL = '.actuator.current_ctrl.motor'
@@ -373,10 +386,14 @@ def test_model_mismatch_ensemble_visual():
             f'{MODEL}.inductance_d': lambda v: v * f[2],
             f'{MODEL}.inductance_q': lambda v: v * f[3]})
 
-    rollout = scan(ensemble(env.ndef), record=True).bind(jax.vmap(corrupt)(factors))
+    rollout = scanned(ensemble(env.node, n=len(factors)), record=True).bind(
+        jax.vmap(corrupt)(factors))
 
     t, cmd = step_profile()
-    traj = rollout.apply(Struct(rng=jax.random.PRNGKey(0), command=cmd))
+    out, aux = rollout.apply(
+        rng=jax.random.PRNGKey(0), command=cmd,
+        load=jnp.zeros_like(cmd))
+    traj = Struct(output=out, state=aux.state)
 
     vel = traj.state.mechanical.velocity                   # (n, N)
     assert vel.shape == (len(t), N)

@@ -1,12 +1,7 @@
-"""
+"""NodeJAX's immutable named record.
 
-Key design goals:
-- Lightweight container for return types  
-- Suitable base class for Nodes
-- No tuple subclassing (avoids method shadowing issues)
-- Hidden __keys__ __values__
-- Minimal attrdict + tuple-like interfaces
-- JAX pytree registration
+``Struct`` is a JAX pytree for fixed shapes whose fields benefit from attribute
+access. It is not a base class for framework objects.
 """
 
 from typing import Any, Iterator
@@ -22,7 +17,7 @@ class Struct:
 	"""
 
 	def __init__(self, **kwargs):
-		# Store fields in hidden attribute as frozendict-like structure
+		"""Store fields in hidden attributes, a frozendict-like structure."""
 		object.__setattr__(self, '__keys__', tuple(kwargs.keys()))
 		object.__setattr__(self, '__values__', tuple(kwargs.values()))
 
@@ -48,7 +43,7 @@ class Struct:
 		"""Support both string keys and integer indices."""
 		if key in self.__keys__:
 			key = self.__keys__.index(key)
-		if isinstance(key, int):
+		if type(key) is int:
 			return self.__values__[key]
 		raise KeyError(f"'{self.__class__.__name__}' object key '{key}' not found.")
 
@@ -69,7 +64,7 @@ class Struct:
 	def __repr__(self) -> str:
 		"""Compact representation."""
 		fields = ', '.join(f'{k}={repr(v)}' for k, v in self.__as_dict__.items())
-		return f'Struct2({fields})'
+		return f'{type(self).__name__}({fields})'
 
 	def __str__(self) -> str:
 		"""Same as repr for now."""
@@ -92,50 +87,45 @@ class Struct:
 	def without(self, *names: str) -> 'Struct':
 		"""A copy without the named fields. Filter semantics: a name that is
 		not present is simply not there to remove."""
-		return Struct(**{k: v for k, v in self.__items__ if k not in names})
+		return type(self)(**{k: v for k, v in self.__items__ if k not in names})
 
 	def replace(self, *args, **kwargs) -> 'Struct':
-		"""Create new Struct with updated fields, supporting nested dict-like updates."""
-		# Convert positional args to field updates by zipping with our keys
+		"""Create a new record with the named fields replaced wholesale."""
 		if len(args) > len(self.__keys__):
 			raise TypeError(f"replace() takes at most {len(self.__keys__)} positional arguments ({len(args)} given)")
-
-		# Build uniform update dict: positional args mapped to field names + kwargs
-		updates = dict(zip(self.__keys__, args))
-		updates.update(kwargs)
-
-		return self._merge_nested(updates, preserve_structure=False)
+		positional = dict(zip(self.__keys__, args))
+		return type(self)(**{
+			**self.__as_dict__, **positional, **kwargs,
+		})
 
 	def merge(self, other) -> 'Struct':
 		"""Merge another struct-like object, with other's fields taking precedence."""
 		return self._merge_nested(other, preserve_structure=True)
 
-	def _merge_nested(self, updates: dict, preserve_structure=True) -> 'Struct':
-		"""Recursively merge nested dict-like updates."""
+	def _merge_nested(self, other: dict, preserve_structure=True) -> 'Struct':
+		"""Recursively merge another dict-like value."""
 		result = self.__as_dict__
-		if isinstance(updates, Struct):
-			updates = updates.__as_dict__
-		if not isinstance(updates, dict):
+		if issubclass(type(other), Struct):
+			other = other.__as_dict__
+		if not issubclass(type(other), dict):
 			raise TypeError(f"merges to Struct must be a dict-like")
 
-		for key, value in updates.items():
+		for key, value in other.items():
 			if key in result:
-				rvalue = result[key]
-				if isinstance(rvalue, Struct):
-					if preserve_structure and not isinstance(value, (Struct, dict)):
-						raise TypeError(f"Attempting to merge incompatible structures")
-					value = rvalue._merge_nested(value)
-				else:
-					if preserve_structure and isinstance(value, (Struct, dict)):
-						raise TypeError(f"Attempting to merge incompatible structures")
+				current = result[key]
+				current_is_struct = issubclass(type(current), Struct)
+				value_is_struct = issubclass(type(value), Struct)
+				value_is_dict = issubclass(type(value), dict)
+				value_is_structure = value_is_struct or value_is_dict
+
+				if current_is_struct and value_is_structure:
+					value = current._merge_nested(
+						value, preserve_structure=preserve_structure)
+				elif preserve_structure and current_is_struct != value_is_structure:
+					raise TypeError(f"Attempting to merge incompatible structures")
 			result[key] = value
 
-		return Struct(**result)
-
-
-class Aux(Struct):
-	"""Explicit auxiliary data container for sown metrics, losses, and taps."""
-	pass
+		return type(self)(**result)
 
 
 # === JAX PyTree registration ===
@@ -162,9 +152,20 @@ try:
 	import jax
 	jax.tree_util.register_pytree_with_keys(
 		Struct, _struct_flatten_with_keys, _struct_unflatten, _struct_flatten)
-	def _aux_unflatten(aux_data, children):
-		return Aux(**dict(zip(aux_data, children)))
-	jax.tree_util.register_pytree_with_keys(
-		Aux, _struct_flatten_with_keys, _aux_unflatten, _struct_flatten)
 except ImportError:
 	pass  # JAX not available
+
+
+def register_struct_subtype(cls: type) -> type:
+	"""Register a Struct subtype as its own pytree, so it survives a
+	flatten/unflatten round trip as itself rather than decaying to Struct.
+	A subtype that carries meaning (a marker the reader dispatches on) has
+	to come back wearing it."""
+	import jax
+
+	def unflatten(keys, values):
+		return cls(**dict(zip(keys, values)))
+
+	jax.tree_util.register_pytree_with_keys(
+		cls, _struct_flatten_with_keys, unflatten, _struct_flatten)
+	return cls

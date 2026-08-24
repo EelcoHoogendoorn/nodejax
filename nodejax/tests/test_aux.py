@@ -1,4 +1,4 @@
-"""The aux channel: one tuple convention for secondary outputs.
+"""The aux stream: one tuple convention for secondary outputs.
 
 The output doctrine makes it unambiguous: a node's output is an array or a
 Struct (positional pairs as DATA are named Structs, in the same
@@ -9,7 +9,7 @@ escape hatch). The 2-tuple is thereby contract syntax:
     return output, aux     # sown losses, taps, metrics
 
 Composites divert member aux under member names and re-emit
-(carry, collection) — same pair shape, so the channel nests with no
+(carry, collection) — same pair shape, so the slot nests with no
 wrapper fields and no unwrap heuristics; destructure at the top. And
 because aux rides ordinary outputs, scan stacks it over time, ensemble
 over members, batch over elements: the axes just appear.
@@ -19,20 +19,21 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from nodejax import node_def, serial, scan, train_step, split_aux, Aux
+from nodejax import Node, Leaf, serial, scan, scanned, train_step, split_aux, Aux
 from nodejax.struct import Struct
 from nodejax.control import Gain
-from nodejax.util import mse, tile
+from nodejax import tile
+from nodejax.examples.util import mse
 
 
-def Watched():
+def Watched() -> Node:
     """A node that sows: emits its activity alongside its output."""
     def param(w):
         return Struct(w=jnp.asarray(w))
     def apply(param, input):
         y = param.w * input
         return y, Aux(activity=y ** 2)
-    return node_def(apply, param=param, name='watched')
+    return Leaf(apply, param=param, name='watched')
 
 
 def test_aux_diverts_and_carry_flows_clean():
@@ -67,10 +68,10 @@ def test_aux_stacks_under_scan():
         def apply(param, state, input):
             new = state + param.gain * input
             return new, (new, Aux(mag=new ** 2))
-        return node_def(apply, param=param, init=init, name='wint')
+        return Leaf(apply, param=param, init=init, name='wint')
 
     pipe = watched_integrator() >> Gain()
-    seq = scan(pipe).parameterize(wint=Struct(gain=1.0), gain=Struct(scale=10.0))
+    seq = scanned(pipe).parameterize(wint=Struct(gain=1.0), gain=Struct(scale=10.0))
     ys, aux = seq.apply(jnp.array([1.0, 1.0, 1.0]))
 
     assert jnp.allclose(ys, jnp.array([10.0, 20.0, 30.0]))
@@ -87,15 +88,14 @@ def test_aux_loss_in_training():
         y, aux = output
         return mse(y, target) + lam * aux.activity
 
-    trainer = train_step(model, loss, optax.adam(0.05))
-    state = trainer.init(model=model.parameterize(w=jnp.asarray(0.0)).param)
+    trainer = train_step(model.parameterize(w=jnp.asarray(0.0)).initialize(),
+                         loss, optax.adam(0.05))
     steps = 600
-    inputs = Struct(input=tile(jnp.asarray(2.0), steps),
-                    target=tile(jnp.asarray(6.0), steps))
-    final, losses = trainer.scan(state, inputs)
+    final, (_, aux) = trainer.scan(input=tile(jnp.asarray(2.0), steps),
+                                   target=tile(jnp.asarray(6.0), steps))
 
     # d/dw [(2w-6)^2 + lam*(2w)^2] = 0  ->  w = 24/(8 + 8*lam) = 8/3
-    assert jnp.allclose(final.model.w, 24.0 / (8.0 + 8.0 * lam), atol=0.01)
+    assert jnp.allclose(final.state.opt.params.w, 24.0 / (8.0 + 8.0 * lam), atol=0.01)
 
 
 def test_split_aux_is_the_whole_convention():
@@ -111,14 +111,14 @@ def test_split_aux_is_the_whole_convention():
 
 
 def test_self_sow_sugar():
-    """Verify self.sow(**kwargs) imperatively sows aux fields into the step's aux channel."""
-    from nodejax import composite
+    """Verify self.sow(**kwargs) imperatively sows aux fields into the step's aux stream."""
+    from nodejax import Composite
 
     def Block():
         def apply(self, input):
             self.sow(activity=input ** 2)
             return input * 2.0
-        return composite(apply, members={}, name='sower')
+        return Composite(**{})(apply, name='sower')
 
     node = Block()
     out, aux = node.apply(3.0)
@@ -135,7 +135,7 @@ def test_leaf_self_sow_sugar():
             y = self.param.w * input
             self.sow(activity=y ** 2)
             return y
-        return node_def(apply, param=param, name='leaf_sower')
+        return Leaf(apply, param=param, name='leaf_sower')
 
     node = LeafSower().parameterize(w=3.0)
     out, aux = node.apply(2.0)

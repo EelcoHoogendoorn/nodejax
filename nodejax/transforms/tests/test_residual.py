@@ -17,7 +17,7 @@ def test_residual():
 def test_residual_cyclic():
     """State rides through the wrap: the integrator accumulates as
     usual, the output gains the skip."""
-    r = residual(Integrator()).parameterize(gain=jnp.array(1.0))
+    r = residual(Integrator()).parameterize()
     state = r.init()
     state, out = r.apply(state, 1.0)
     state, out = r.apply(state, 1.0)

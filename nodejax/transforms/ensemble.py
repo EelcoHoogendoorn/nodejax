@@ -1,56 +1,79 @@
 from __future__ import annotations
 
-import jax
+from nodejax.ambient import node
+from nodejax.binding import Aux
+from nodejax.node import Node
+from nodejax.pnode import PNode
+from nodejax.transform import (
+    transform, vmap_apply, vmap_init, vmap_prime, vmap_param,
+)
+from nodejax.wrapper import Wrapper
 
-from nodejax.struct import Struct
-from nodejax.core import Node, NodeDef, _split_rng, _with_rng
-from nodejax.generic import _over_generic
-from nodejax.transforms.common import _mapped_init_fn, _mapped_param_fn, _transform_def, _mapped_apply_fn
 
+@transform
+def ensemble(member: Node, n: int,
+             axis: str = 'ensemble') -> Node:
+    """Build ``n`` independent copies along one named axis.
 
-@_over_generic
-def ensemble(node_def: NodeDef, n: int | None = None,
-             axis: str = 'ensemble') -> NodeDef:
-    """vmap over the member axis: input broadcast, output stacked.
-
-    A parametric node carries one param row per member — parameterize with
-    stacked leaves, or declare the size n and parameterize(rng=key) to draw
-    n independent members from the inner def's initializers. A
-    NON-parametric cyclic node ensembles too: n independent state streams
-    under the one broadcast input (declare n; there is no param axis to
-    infer it from). A node with neither params nor state has no member
-    identity to ensemble — use it directly.
-
-    The member axis is NAMED (default 'ensemble', the reserved
-    convention), so members reduce across the population with jax
-    collectives; a declared axis need for the name is satisfied here,
-    and re-binding a name already bound inside refuses.
+    Param constructs one parameter row per member. Init constructs or primes
+    one state row per member. Apply broadcasts runtime input and stacks output.
+    A stochastic role splits its RNG per member. The member's input forms,
+    priming requirement, and apply shape evidence remain unchanged.
     """
-    if node_def.bound:
-        raise TypeError('ensemble changes the meaning of param; apply it to the '
-                        'NodeDef and parameterize with stacked params')
-    if not (node_def.parametric or node_def.cyclic):
-        raise TypeError(f'ensemble of {node_def!r}: no params and no state means no '
+    if not (member.parametric or member.cyclic):
+        raise TypeError(f'ensemble of {member!r}: no params and no state means no '
                         'member identity; use the node directly')
-    if not node_def.parametric and n is None:
-        raise TypeError(f'ensemble({node_def.name}) needs n=<member count>: with no '
-                        'params, nothing else determines the ensemble size')
-
     num_members = n
-    def apply_fn(nd, param, state, input):
-        param_axis = 0 if node_def.parametric else None
-        count = jax.tree.leaves(param)[0].shape[0] if node_def.parametric else num_members
-        return _mapped_apply_fn(
-            node_def, param, state, input,
-            param_axis=param_axis, state_axis=0, input_axis=None,
-            axis_name=axis, count=count,
+
+    def apply_fn(contract, param, state, input, rng):
+        inner = contract.members.member
+        return vmap_apply(
+            inner, param, state, input, rng,
+            param_axis=0,
+            state_axis=0,
+            input_axis=None,
+            axis_name=axis,
+            count=num_members,
         )
 
-    return _transform_def(
-        node_def,
-        name=f'ensemble({node_def.name})',
-        param_fn=_mapped_param_fn(node_def, n),
-        init_fn=_mapped_init_fn(node_def, num_members),
-        apply_fn=apply_fn,
-        rebuild=lambda d: ensemble(d, n=n, axis=axis),
+    def param_fn(contract, param_input, rng):
+        return vmap_param(
+            contract.members.member, contract,
+            rng, param_input, count=num_members)
+
+    def init_fn(contract, param, state_input, rng):
+        inner = contract.members.member
+        return vmap_init(
+            inner, contract, rng, param, state_input,
+            count=num_members,
+            param_axis=0)
+
+    def prime_fn(contract, param, state_input, input, rng):
+        inner = contract.members.member
+        return vmap_prime(
+            inner, param, state_input, input, rng,
+            count=num_members,
+            param_axis=0,
+            input_axis=None,
+            state_axis=0,
+        )
+
+    return Wrapper(member=member).roles(
+        destructurable=False,
+        name=f'ensemble({member.name})',
+        param=param_fn,
+        init=init_fn,
+        prime=prime_fn,
+        apply=apply_fn,
     )
+
+
+@node
+def reduce(fn) -> PNode:
+    """Reduce the leading ensemble axis and retain the rows as auxiliary data."""
+    from nodejax.authoring import Leaf
+
+    def apply(input):
+        return fn(input, axis=0), Aux(population=input)
+
+    return Leaf(apply, name=f"reduce({getattr(fn, '__name__', 'fn')})")

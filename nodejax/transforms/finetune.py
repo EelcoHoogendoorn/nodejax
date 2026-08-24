@@ -1,62 +1,77 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-from nodejax.core import Node, NodeDef
-from nodejax.authoring import derive
-from nodejax.types import LossFn
-from nodejax.generic import _over_generic
-from nodejax.transforms.common import _over_bound, _transform_def
-from nodejax.transforms.train_step import train_step
-
-if TYPE_CHECKING:
-    import optax
+from nodejax.ambient import node
+from nodejax.node import BaseNode, Node
+from nodejax.pnode import PNode
+from nodejax.spec import add_axis, element_spec, tree_first
+from nodejax.struct import Struct
+from nodejax.transform import scan_steps
+from nodejax.transforms.train_step import _require_train_step
+from nodejax.wrapper import Wrapper
 
 
-@_over_generic
-@_over_bound
-def finetune(nd: NodeDef, loss_fn: LossFn,
-             optimizer: optax.GradientTransformation) -> NodeDef | Node:
-    """Finetuning as a transform (the meta-learning literature calls this
-    'adaptation'): parametric -> parametric, with the SAME param meaning.
+@node
+def finetune(step: BaseNode) -> Node | PNode:
+    """Run ``train_step`` on support data, then evaluate on a query.
 
-    Where train_step moves params into evolving state, finetune closes the
-    loop back to parametric: the result's param is the STARTING weights, and
-    its apply takes Struct(support=Struct(input=..., target=...), query=...) —
-    it scans the train step over the support sequence starting from param
-    (one step per leading-axis element), keeps the final tuned weights (not
-    the loss trace), and applies them to the query.
-
-    This reframes 'training the model' as an ordinary differentiable function
-    initial-weights -> prediction. Meta-learning is therefore literally
-    train_step(finetune(model)), and task-batched MAML is
-    train_step(batch(finetune(model))): learn an init that finetunes well.
-
-    Stateful models finetune their internal state on the support set too — it
-    rides along inside the inner trainer state, as in train_step.
+    The step's parameters are the episode's starting parameters, so an
+    outer optimization can differentiate through the support updates.
     """
-    if not nd.parametric:
-        raise TypeError(f'finetune requires a parametric node, got {nd!r}')
-    inner = train_step(nd, loss_fn, optimizer)
+    step_node = _require_train_step(step, 'finetune')
+    model = step_node.members.model
 
-    def apply(param, input):
-        tuned, _ = inner.scan(inner.init(model=param), input.support)
-        _, output = nd.apply_fn(tuned.model, tuned.inner, input.query)
+    apply_takes_rng = (
+        step_node.contract.init_takes_rng
+        or step_node.contract.apply_takes_rng
+        or model.contract.apply_takes_rng)
+
+    def apply_fn(contract, param, input, rng):
+        """Reset from ``param``, train on support, then evaluate the query."""
+        current = contract.members.step
+        current_model = current.members.model
+        init_rng = rng.child(current.init_takes_rng)
+        first = tree_first(input.support)
+        start = current.prime(param, Struct(), first, init_rng)
+        final, _ = scan_steps(
+            current, param, start, input.support, rng)
+        query_rng = rng.child(current_model.apply_takes_rng)
+        _, output = current_model.apply(
+            final.opt.params,
+            final.model,
+            current_model.feed(input.query),
+            query_rng,
+        )
         return output
 
-    out = derive(nd, apply=apply, name=f'finetune({nd.name})')
-    return _transform_def(
-        nd,
-        name=out.name,
-        param_fn=out._param_impl,
-        init_fn=out._init_impl,
-        apply_fn=out._apply_impl,
-        parametric=out.parametric,
-        cyclic=out.cyclic,
-        apply_input_spec=out.apply_input_spec,
-        init_requires_input=False,
-        init_reads_shape=False,
-        state_input_spec=out.state_input_spec,
-        tags=out.tags,
-        rebuild=lambda d: finetune(d, loss_fn, optimizer),
+    def param_fn(contract, param_input, rng):
+        """Fresh meta-params through the train step's own constructor. The
+        episode is Struct(support=<sequence>, query=<one input>) and the
+        train step consumes one support element per call, so a shape-reading
+        constructor beneath resolves against that slice rather than the
+        episode."""
+        current = contract.members.step
+        episode = contract.input_spec
+        current = current.for_input(
+            None if episode is None else element_spec(episode.support))
+        return current.param(param_input, rng)
+
+    episode_spec = (
+        Struct(
+            support=add_axis(step_node.contract.input_spec),
+            query=model.contract.intake(model.contract.input_spec),
+        )
+        if (step_node.contract.input_spec is not None
+            and model.contract.input_spec is not None)
+        else None
     )
+    episode = Wrapper(step=step_node).roles(
+        name=f'finetune({step.name})',
+        param=param_fn,
+        init=False,
+        apply=apply_fn,
+        apply_fields=('support', 'query'),
+        input_spec=episode_spec,
+        apply_takes_rng=apply_takes_rng,
+    )
+    # Bound step parameters become the differentiable episode start.
+    return step._transfer_bindings(episode, ('param',))

@@ -2,65 +2,85 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax.core import NodeDef, hoist_rng
-from nodejax.authoring import derive
+from nodejax.ambient import node
+from nodejax.composite import (Composite)
+from nodejax.node import (Node)
+from nodejax.compose import composite
+from nodejax.control.blocks import Delay
+from nodejax.transforms import state_reinit
 
 
-def feedback(pipe: NodeDef, last: float = 0.0) -> NodeDef:
-    """Close the loop — a user-land control transform: the wrapped node maps
-    tracking error -> output, and feedback supplies error = reference - the
-    previous output. Cyclic -> cyclic; param meaning unchanged."""
-    def init(ndef, param, state=Struct()):
-        seed = state.inner if 'inner' in state else Struct()
-        if 'rng' in state:
-            seed = seed.replace(rng=state.rng)
-        if ndef.apply_input_spec is None:
-            return Struct(inner=pipe.build_state(param, seed),
-                          last=jax.tree.map(jnp.asarray, last))
-        return Struct(inner=pipe.build_state(param, seed, input=ndef.input),
-                      last=jax.tree.map(jnp.zeros_like, ndef.input))
-
-    def apply(param, state, input):
-        error = jax.tree.map(jnp.subtract, input, state.last)
-        new_inner, out = pipe.apply_fn(param, state.inner, error)
-        return Struct(inner=new_inner, last=out), out
-
-    seed_spec = hoist_rng(dict(inner=pipe.state_input_spec if pipe.cyclic else Struct()))
-    return derive(pipe, apply=apply, init=init, state_input_spec=seed_spec,
-                  name=f'feedback({pipe.name})')
 
 
-def closed_loop(pipe: NodeDef) -> NodeDef:
-    """Wrap an actuation pipe in unit feedback: reference in ->
-    measurement out, with the pipe mapping tracking error -> actuation
-    -> measurement. State is the pipe's own plus the fed-back
-    measurement register."""
-    def init(ndef, param):
-        return Struct(inner=pipe.build_state(param, input=ndef.input),
-                      last=jnp.zeros_like(ndef.input))
+@node
+def feedback(pipe: Node, output_spec: Any = 0.0) -> Node:
+    """Close the loop: the wrapped node maps tracking error to output, and
+    feedback supplies error = reference minus the previous output.
 
-    def apply(param, state, input):
-        new_inner, out = pipe.apply_fn(param, state.inner, input - state.last)
-        return Struct(inner=new_inner, last=out), out
+    A COMPOSITE of the controlled node and the register carrying its output
+    back round, because that is what a closed loop is made of. The register
+    is the stock one-tick Delay, starting at rest like any cold register.
 
-    return derive(pipe, apply=apply, init=init, name='loop')
+    `output_spec` says what flows round the loop, scalar by default and a
+    shaped zero for a MIMO loop. The register is READ before it is fed, which
+    is what closing a loop means, so forward shape propagation never reaches
+    it and the loop must declare it. The value is deducible in principle,
+    since the register carries the pipe's output and jax.eval_shape derives
+    that exactly; it is passed because resolving a member from the composite
+    that holds it is machinery the framework has not got. See scratch/todo.md.
+
+    Deriving from the pipe instead would flatten it into an opaque leaf,
+    taking its members with it: a normalizer inside the loop would then be
+    handed per-sample statistics under batch(), silently."""
+    def apply(self, input):
+        error = jax.tree.map(jnp.subtract, input, self.state.last)
+        out = self.pipe(error)
+        self.last(out)                        # carry it round for the next step
+        return out
+
+    last = Delay().with_input(output_spec)
+    return Composite(pipe=pipe, last=last)(apply, name=f'feedback({pipe.name})')
 
 
-def observed_loop(pipe: NodeDef, belief0) -> NodeDef:
-    """closed_loop with an in-loop observer riding the plant side —
-    the indirect-adaptive-control block."""
-    def init(ndef, param):
-        return Struct(inner=pipe.build_state(param, input=Struct(error=ndef.input, belief=belief0)),
-                      last=jnp.zeros_like(ndef.input),
-                      belief=jax.tree.map(jnp.zeros_like, belief0))
+@node(name='loop')
+def closed_loop(pipe: Node, output_spec: Any = 0.0) -> Node:
+    """Unit feedback around an actuation pipe: reference in, measurement
+    out, with the pipe mapping tracking error to actuation to measurement.
+    feedback under another name, kept for the control vocabulary."""
+    def apply(self, input):
+        error = jax.tree.map(jnp.subtract, input, self.state.last)
+        out = self.pipe(error)
+        self.last(out)
+        return out
 
-    def apply(param, state, input):
-        new_inner, out = pipe.apply_fn(
-            param, state.inner, Struct(error=input - state.last, belief=state.belief))
-        return Struct(inner=new_inner, last=out.output, belief=out.belief), out.output
+    last = Delay().with_input(output_spec)
+    return Composite(pipe=pipe, last=last)(apply)
 
-    return derive(pipe, apply=apply, init=init, name='oloop')
+
+@node(name='oloop')
+def observed_loop(pipe: Node, belief_spec: Any, output_spec: Any = 0.0) -> Node:
+    """closed_loop with an in-loop observer riding the plant side — the
+    indirect-adaptive-control block. Two registers, so two members: the
+    fed-back measurement and the observer's belief. Both are read before
+    they are fed, so both declare what they carry, `belief_spec` being the
+    one nothing else could supply: a belief is the pipe's second output and
+    has nothing to do with the loop's signal."""
+    def apply(self, input):
+        error = jax.tree.map(jnp.subtract, input, self.state.last)
+        out = self.pipe(error=error, belief=self.state.belief)
+        self.last(out.output)
+        self.belief(out.belief)
+        return out.output
+
+    # the belief OUTLIVES an episode, the fed-back measurement does not:
+    # the half that departs from carrying declares it, inert until an
+    # enclosing scan claims the boundary
+    last = state_reinit(Delay().with_input(output_spec))
+    belief = Delay().with_input(belief_spec)
+    return Composite(pipe=pipe, last=last, belief=belief)(apply)

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "nodejax"
 version = "0.1.0"
 description = "Stateful computation composed the way JAX composes functions: models, simulators, and trainers as one kind of object."
-readme = "README.md"
+readme = "readme.md"
 authors = [{name = "Eelco Hoogendoorn"}]
 requires-python = ">=3.11"
 license = "MIT"
@@ -15,7 +15,7 @@ dependencies = ["jax", "optax"]
 
 [project.optional-dependencies]
 test = ["pytest", "scikit-learn", "matplotlib"]
-comparisons = ["equinox", "flax", "torch"]
+comparisons = ["equinox", "flax", "dm-haiku", "torch", "keras"]
 
 [tool.setuptools.packages.find]
 include = ["nodejax*"]

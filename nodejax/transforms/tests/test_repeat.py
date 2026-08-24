@@ -1,14 +1,15 @@
 """repeat: weight-tied depth — one param, applied n times in sequence."""
 
+import jax
 import jax.numpy as jnp
 
-from nodejax import repeat
+from nodejax import Node, Leaf, repeat, stack
 from nodejax.control import Gain, Integrator
 
 
 def test_repeat():
     """One param applied n times — vs stack's per-layer params — and
-    rebinding a bound Node (param meaning unchanged)."""
+    rebinding a bound PNode (param meaning unchanged)."""
     r = repeat(Gain(), n=3).parameterize(scale=jnp.array(2.0))
     assert jnp.allclose(r.apply(1.0), 8.0)
     assert r.param.scale.shape == ()          # no layer axis, unlike stack
@@ -18,13 +19,53 @@ def test_repeat():
 
 
 def test_repeat_cyclic():
-    """Tied weights, untied state: each position keeps its own state slot."""
-    r = repeat(Integrator(), n=2).parameterize(gain=jnp.array(1.0))
+    """One state slot, threaded through the iterations exactly as through
+    calls: repeat is apply in a loop, and the state keeps the inner's own
+    shape."""
+    r = repeat(Integrator(), n=2).parameterize()
     state = r.init()
-    assert state.shape == (2,)
+    assert jnp.shape(state) == ()          # no position axis: same node, looped
     state, out = r.apply(state, 1.0)
+    # two iterations: 0+1 -> 1, then 1 plus the first iteration's output -> 2
+    assert jnp.allclose(state, 2.0) and jnp.allclose(out, 2.0)
     state, out = r.apply(state, 1.0)
-    # position 0 integrates the input, position 1 integrates position 0's
-    # output: [1, 1] -> [2, 3]
-    assert jnp.allclose(state, jnp.array([2.0, 3.0]))
-    assert jnp.allclose(out, 3.0)
+    # the state carries into the next call: 2+1 -> 3, then 3+3 -> 6
+    assert jnp.allclose(state, 6.0) and jnp.allclose(out, 6.0)
+
+
+def test_repeat_allocates_one_apply_stream_per_step():
+    def apply(input, rng):
+        return input + jax.random.normal(rng.next())
+
+    definition = repeat(Leaf(apply), n=4)
+    assert definition.contract.apply_takes_rng
+
+    key = jax.random.PRNGKey(0)
+    first = definition.apply(0.0, rng=key)
+    replay = definition.apply(0.0, rng=key)
+    other = definition.apply(0.0, rng=jax.random.PRNGKey(1))
+    assert jnp.array_equal(first, replay)
+    assert not jnp.array_equal(first, other)
+
+
+def Register() -> Node:
+    """Primes its state from the first value it meets; apply increments the
+    signal and holds the primed value still."""
+    def init(input):
+        return input
+    def apply(state, input):
+        return state, input + 1.0
+    return Leaf(apply, init=init, name='register')
+
+
+def test_stack_init_walks_the_positions():
+    """stack's layers run in SEQUENCE, so a priming init at layer k boots
+    from the signal as it arrives there, not from the raw input n times: the
+    walk serial's init does, done with one node. ensemble legitimately primes
+    every member from the same input, which is what makes it the parallel
+    one, and repeat needs no walk at all: one state, primed once."""
+    state = stack(Register().node, n=3).parameterize().init(input=jnp.array(1.0))
+    assert jnp.allclose(state, jnp.array([1.0, 2.0, 3.0]))
+
+    state = repeat(Register(), n=3).parameterize().init(input=jnp.array(1.0))
+    assert jnp.shape(state) == () and jnp.allclose(state, 1.0)

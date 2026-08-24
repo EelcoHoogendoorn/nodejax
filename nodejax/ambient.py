@@ -1,52 +1,32 @@
-"""Ambient construction arguments: dynamic scope for the def-building
-stage, declared at the definition site.
-
-The problem: quantities like dt or a train flag are needed by a dozen
-def factories across a construction graph, and threading them through
-every call site is noise (while registries of wrapped factories are
-worse). The solution is dynamic scope, tightly fenced:
-
-    @ambient                       # at the definition site
-    def PID(dt, dwrap=None): ...
-
-    with ambient(dt=1e-4):         # at the single point of use
-        PID()                      # dt filled from scope
-
-Rules that keep it fenced:
-- Eligibility is declared by the decorator, visible where the factory is
-  defined; undecorated functions never see the scope.
-- Explicit arguments ALWAYS win; the scope only fills parameters the
-  call left unbound.
-- Outside any scope, an unfilled required parameter fails exactly as it
-  always did (a TypeError at the factory) — nothing becomes optional.
-- CONSTRUCTION TIME ONLY: factories run when defs are built; nothing
-  here exists at trace/apply time, so the functional semantics of nodes
-  are untouched. This is scoping for Python configuration, not implicit
-  state in the compute graph.
-- Scopes nest (inner wins) and are contextvar-based (task/thread safe).
-
-Relationship to '*.name' generic broadcasts: broadcasts travel WITH a
-generic tree and resolve at specialize, wherever and whenever that
-happens; ambient scope covers plain-callable construction happening
-lexically inside the with-block. Deferred specialization outside the
-block should use broadcasts.
-"""
+"""Construction-time scope and definition-factory recording."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import inspect
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from functools import wraps
+from functools import partial, wraps
 from typing import Any, Callable
 
-_SCOPE: ContextVar[tuple[dict[str, Any], ...]] = ContextVar('ambient_scope', default=())
+from nodejax.definition import Construction
+from nodejax.frozendict import frozendict
+from nodejax.generic import Generic, is_generic
+from nodejax.node import Node, _is_node
+from nodejax.struct import Struct
 
-_FILLABLE = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+
+_SCOPE: ContextVar[tuple[dict[str, Any], ...]] = ContextVar(
+    'nodejax_ambient', default=())
+_FILLABLE = (
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    inspect.Parameter.KEYWORD_ONLY,
+)
 
 
 @contextmanager
-def _scope(values: dict[str, Any]):
+def _scope(values):
     token = _SCOPE.set(_SCOPE.get() + (values,))
     try:
         yield
@@ -54,37 +34,152 @@ def _scope(values: dict[str, Any]):
         _SCOPE.reset(token)
 
 
-def _lookup(name: str) -> tuple[bool, Any]:
-    for frame in reversed(_SCOPE.get()):
-        if name in frame:
-            return True, frame[name]
+def _lookup(name):
+    for scope in reversed(_SCOPE.get()):
+        if name in scope:
+            return True, scope[name]
     return False, None
 
 
 class _Ambient:
-    """`ambient` is both the decorator (given a function) and the scope
-    (given keyword values)."""
-
-    def __call__(self, fn: Callable | None = None, **values: Any):
+    def __call__(self, fn=None, **values):
         if fn is not None:
-            if values:
-                raise TypeError('ambient takes a function OR scope values, not both')
-            sig = inspect.signature(fn)
-            names = [n for n, p in sig.parameters.items() if p.kind in _FILLABLE]
-
-            @wraps(fn)
-            def wrapper(*args: Any, **kwargs: Any):
-                taken = sig.bind_partial(*args, **kwargs).arguments
-                filled = dict(kwargs)
-                for name in names:
-                    if name not in taken:
-                        hit, value = _lookup(name)
-                        if hit:
-                            filled[name] = value
-                return fn(*args, **filled)
-
-            return wrapper
+            raise TypeError('use @node on factories and ambient(...) as scope')
         return _scope(values)
 
 
 ambient = _Ambient()
+
+
+def _snake(name):
+    return re.sub(
+        r'([a-z0-9])([A-Z])', r'\1_\2',
+        re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name),
+    ).lower()
+
+
+def _contains_unbound(value):
+    from nodejax.binding import REQUIRED
+
+    if value is REQUIRED or is_generic(value):
+        return True
+    if type(value) is Struct:
+        return any(_contains_unbound(item) for item in value)
+    if issubclass(type(value), Mapping):
+        return any(_contains_unbound(item) for item in value.values())
+    if type(value) in (tuple, list):
+        return any(_contains_unbound(item) for item in value)
+    return False
+
+
+def _construction_value(value):
+    if _is_node(value):
+        return value.node
+    if issubclass(type(value), Mapping):
+        return frozendict({
+            name: _construction_value(item) for name, item in value.items()
+        })
+    if type(value) is tuple:
+        return tuple(_construction_value(item) for item in value)
+    if type(value) is list:
+        return tuple(_construction_value(item) for item in value)
+    return value
+
+
+def node(fn: Callable | None = None, *, name: str | None = None):
+    """Record a factory call, deferring execution while statics are missing."""
+    if fn is None:
+        return partial(node, name=name)
+    signature = inspect.signature(fn)
+    fillable = [field for field, parameter in signature.parameters.items()
+                if parameter.kind in _FILLABLE]
+
+    @wraps(fn)
+    def factory(*args, **kwargs):
+        supplied = dict(kwargs)
+        try:
+            partial_call = signature.bind_partial(*args, **kwargs)
+        except TypeError:
+            partial_call = None
+        if partial_call is not None:
+            for field in fillable:
+                if field not in partial_call.arguments:
+                    found, value = _lookup(field)
+                    if found:
+                        supplied[field] = value
+        try:
+            call = signature.bind_partial(*args, **supplied)
+        except TypeError:
+            call = None
+
+        if call is not None:
+            from nodejax.binding import REQUIRED
+            missing = [
+                field for field, parameter in signature.parameters.items()
+                if parameter.kind in _FILLABLE
+                and ((parameter.default is inspect.Parameter.empty
+                      and field not in call.arguments)
+                     or call.arguments.get(field) is REQUIRED)
+            ]
+            if missing or any(_contains_unbound(value)
+                              for value in call.arguments.values()):
+                call.apply_defaults()
+                arguments = {
+                    **{field: _construction_value(value)
+                       for field, value in call.arguments.items()},
+                    **{field: REQUIRED for field in missing},
+                }
+                return Generic(_snake(fn.__name__), factory,
+                               Struct(**arguments))
+            product = fn(*call.args, **call.kwargs)
+            call.apply_defaults()
+            recorded = Struct(**{
+                field: _construction_value(value)
+                for field, value in call.arguments.items()
+            })
+        else:
+            product = fn(*args, **supplied)
+            if args:
+                return product
+            recorded = Struct(**{
+                field: _construction_value(value)
+                for field, value in supplied.items()
+            })
+
+        if is_generic(product):
+            return Generic(name or product.name, factory, recorded)
+
+        if not _is_node(product):
+            return product
+
+        definition = product._def
+        weak_name = (definition.name in ('apply', '<lambda>', 'composite')
+                     or definition.name.startswith('composite('))
+        actual_name = (name if name is not None else
+                       _snake(fn.__name__) if weak_name else definition.name)
+
+        member_arguments = {
+            member: field
+            for member in definition.members.__keys__
+            for field, value in recorded.__items__
+            if field == member
+        }
+        tree = definition.tree
+        if len(member_arguments) == len(definition.members):
+            def tree(replacements):
+                arguments = dict(recorded.__items__)
+                for member, field in member_arguments.items():
+                    arguments[field] = Node(replacements[member])
+                rebuilt = factory(**arguments)
+                if not _is_node(rebuilt):
+                    raise TypeError('tree binding did not rebuild a Node')
+                return rebuilt._def
+
+        definition = definition.copy(
+            name=actual_name,
+            construction=Construction(factory, recorded),
+            tree=tree,
+        )
+        return product._with_definition(definition)
+
+    return factory

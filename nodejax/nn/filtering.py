@@ -5,11 +5,11 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from nodejax.ambient import ambient
-from nodejax.authoring import node_def
+from nodejax.ambient import node
+from nodejax.authoring import Leaf
 
 
-@ambient
+@node
 def EMA(tau: float, warm: bool = False):
     """One-pole low-pass over an arbitrary pytree: state is the smoothed
     tree. On a signal it is an ordinary smoothing filter; on a param
@@ -25,11 +25,11 @@ def EMA(tau: float, warm: bool = False):
     def init(input):
         return input
 
-    def init_cold(ndef):
-        return jax.tree.map(jnp.zeros_like, ndef.input)
+    def init_cold(node):
+        return jax.tree.map(jnp.zeros_like, node.input)
 
     def apply(state, input):
         new = jax.tree.map(lambda s, i: tau * s + (1.0 - tau) * i, state, input)
         return new, new
 
-    return node_def(apply, init=init if warm else init_cold, name='ema')
+    return Leaf(apply, init=init if warm else init_cold)

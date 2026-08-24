@@ -29,24 +29,24 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import node_def, ensemble, batch, train_step
+from nodejax import Node, trained, scan, Leaf, ensemble, batch, train_step
 from nodejax.struct import Struct
-from nodejax.util import mse
+from nodejax.examples.util import mse
 
 
-def Hyperplane():
+def Hyperplane() -> Node:
     """ONE unit: w @ x + b -> scalar, its width read from the wiring.
     The whole definition — shape-generic, so the ensemble scales with
     whatever input it is bound to."""
-    def param(ndef, rng):
-        d = ndef.input.shape[-1]
+    def param(node, rng):
+        d = node.input.shape[-1]
         return Struct(w=jax.random.normal(rng.next(), (d,)) / jnp.sqrt(d),
                       b=0.0)
 
     def apply(param, input):
         return param.w @ input + param.b
 
-    return node_def(apply, param=param, name='unit')
+    return Leaf(apply, param=param, name='unit')
 
 
 def test_linear_is_an_ensemble_of_hyperplanes():
@@ -74,16 +74,17 @@ def test_the_ensemble_layer_trains_like_any_layer():
                        [0.0, 1.0, -1.0, 2.0],
                        [2.0, 0.0, 1.0, -1.0]])
 
-    layer = batch(ensemble(Hyperplane(), n=3)).with_input(jnp.zeros((16, 4)))
-    trainer = train_step(layer, mse, optax.adam(0.05))
-    model = layer.parameterize(rng=jax.random.PRNGKey(0))
+    model = batch(ensemble(Hyperplane(), n=3)).with_input(jnp.zeros((16, 4))).parameterize(
+        rng=jax.random.PRNGKey(0)).initialize()
+    trainer = train_step(model, mse, optax.adam(0.05))
 
     xs = jax.random.normal(jax.random.PRNGKey(1), (300, 16, 4))
-    stream = Struct(input=xs, target=jnp.einsum('sbi,oi->sbo', xs, w_true))
-    final, losses = trainer.scan(trainer.init(model=model.param), stream)
+    final, aux = trained(trainer).apply(input=xs, target=jnp.einsum('sbi,oi->sbo', xs, w_true))
 
-    assert losses[-1] < 1e-3 * losses[0]
-    assert jnp.allclose(final.model.w, w_true, atol=0.05)
+    assert aux.loss[-1] < 1e-3 * aux.loss[0]
+    from nodejax import PSNode
+    assert isinstance(final, PSNode)                        # the scaffolding is struck
+    assert jnp.allclose(final.param.w, w_true, atol=0.05)
 
 
 def test_an_mlp_is_units_all_the_way_down():
@@ -96,10 +97,9 @@ def test_an_mlp_is_units_all_the_way_down():
     mlp = ensemble(Hyperplane(), n=16) >> nn.gelu >> Hyperplane()
     model = mlp.with_input(jnp.zeros(3)).parameterize(rng=jax.random.PRNGKey(0))
 
-    trainer = train_step(batch(mlp), mse, optax.adam(0.01))
+    trainer = train_step(batch(model).initialize(), mse, optax.adam(0.01))
     xs = jax.random.normal(jax.random.PRNGKey(1), (400, 32, 3))
     ys = jnp.sin(2.0 * xs[..., 0]) + 0.5 * xs[..., 1] * xs[..., 2]
-    final, losses = trainer.scan(trainer.init(model=model.param),
-                                 Struct(input=xs, target=ys))
+    final, aux = trained(trainer).apply(input=xs, target=ys)
 
-    assert losses[-1] < 0.05 * losses[0]      # a nonlinear fit, units only
+    assert aux.loss[-1] < 0.05 * aux.loss[0]      # a nonlinear fit, units only

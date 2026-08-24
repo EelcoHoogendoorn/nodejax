@@ -6,27 +6,28 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax.ambient import ambient
-from nodejax.authoring import node_def
+from nodejax.ambient import node
+from nodejax.authoring import Leaf
 
 
+@node
 def PD(dt):
     """PD controller: parametric cyclic node. Its state (the previous error,
     for the D term) is shaped by the init input value — no shape static."""
     def param(kp, kd):
         return Struct(kp=jnp.asarray(kp), kd=jnp.asarray(kd))
 
-    def init(ndef, param):
-        return jnp.zeros_like(ndef.input)
+    def init(node, param):
+        return jnp.zeros_like(node.input)
 
     def apply(param, state, input):
         force = param.kp * input + param.kd * (input - state) / dt
         return input, force
 
-    return node_def(apply, param=param, init=init, name='pd')
+    return Leaf(apply, param=param, init=init)
 
 
-@ambient
+@node
 def PID(dt, dwrap=None):
     """The PID core: error -> command. Numerics:
     back-calculation anti-windup (I-term clamped in output units),
@@ -37,8 +38,8 @@ def PID(dt, dwrap=None):
         return Struct(kp=kp, ki=ki, kd=kd,
                       decay=decay, integral_limit=integral_limit)
 
-    def init(ndef, param):
-        zeros = jax.tree.map(jnp.zeros_like, ndef.input)
+    def init(node, param):
+        zeros = jax.tree.map(jnp.zeros_like, node.input)
         return Struct(integral=zeros, last_error=zeros)
 
     def apply(self, state, input):
@@ -62,4 +63,4 @@ def PID(dt, dwrap=None):
         output = p_term + i_term + d_term
         return Struct(integral=integral, last_error=error), output
 
-    return node_def(apply, init=init, param=param, name='pid')
+    return Leaf(apply, init=init, param=param)

@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import optax
 
 from nodejax.struct import Struct
-from nodejax import stack, batch, train_step, serial, node_def, nn
+from nodejax import Node, trained, stack, batch, train_step, serial, Leaf, nn
 from nodejax.examples.test_conv_vit import data, xent, accuracy
 
 IMAGE = 8                       # data geometry
@@ -26,16 +26,17 @@ STEM, HIDDEN, HEADS, DEPTH = 16, 32, 4, 2   # design decisions
 BATCH, EPOCHS = 125, 40
 
 
-def build():
+def build() -> Node:
     return serial(
-        image=node_def(lambda input: input.reshape(IMAGE, IMAGE, 1), name='image'),
+        image=nn.Reshape((IMAGE, IMAGE, 1)),
         conv1=nn.Conv(STEM),
         act1=nn.gelu,
         conv2=nn.Conv(HIDDEN, stride=2),
         act2=nn.gelu,
         tokens=nn.tokens(),
         pos=nn.PosEmbed(),
-        blocks=stack(nn.Block(HIDDEN, heads=HEADS, ratio=4), n=DEPTH),
+        blocks=stack(
+            nn.TransformerBlock(HIDDEN, heads=HEADS, ratio=4), n=DEPTH),
         flat=nn.flat,
         head=nn.Linear(10),
     )
@@ -70,22 +71,23 @@ def test_nn_assembly():
 
 def test_nn_vit_trains_on_real_digits():
     X_train, y_train, X_test, y_test = data()
-    pipe = batch(build())
-    model = pipe.with_input(jnp.zeros(IMAGE * IMAGE)).parameterize(rng=jax.random.PRNGKey(0))
+    # the inner resolves against ONE element; batch's spec is a batch
+    pipe = batch(build().with_input(jnp.zeros(IMAGE * IMAGE)))
 
     shuffle = np.random.RandomState(1)
     batch_indices = np.concatenate(
         [shuffle.permutation(len(X_train)) for _ in range(EPOCHS)]
     ).reshape(-1, BATCH)
 
-    trainer = train_step(pipe, xent, optax.adam(1e-3))
-    final, losses = trainer.scan(
-        trainer.init(model=model.param),
-        Struct(input=X_train[batch_indices], target=y_train[batch_indices]))
+    trainer = train_step(
+        pipe.parameterize(rng=jax.random.PRNGKey(0)).initialize(),
+        xent, optax.adam(1e-3))
+    done, aux = trained(trainer).apply(input=X_train[batch_indices],
+                                       target=y_train[batch_indices])
 
-    assert jnp.all(jnp.isfinite(losses))
-    assert losses[-1] < 0.3 * losses[0]
-    test_accuracy = accuracy(pipe.apply(final.model, X_test), y_test)
+    assert jnp.all(jnp.isfinite(aux.loss))
+    assert aux.loss[-1] < 0.3 * aux.loss[0]
+    test_accuracy = accuracy(done(X_test)[1], y_test)
     assert test_accuracy > 0.85, test_accuracy
-    print(f"\n[nn-vit] loss {losses[0]:.3f} -> {losses[-1]:.3f} | "
+    print(f"\n[nn-vit] loss {aux.loss[0]:.3f} -> {aux.loss[-1]:.3f} | "
           f"TEST acc {test_accuracy:.3f}")

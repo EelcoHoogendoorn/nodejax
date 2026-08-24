@@ -20,7 +20,7 @@ Signal flow, one timestep of the closed loop:
 
 And the training system is that loop, transformed:
 
-    rollout = scan(closed_loop(controller >> motor))  # ref seq -> velocity seq
+    rollout = scanned(closed_loop(controller >> motor))  # ref seq -> velocity seq
     trainer = train_step(batch(rollout), mse, adam)   # fleet of setpoints, BPTT
 
 test_assembly checks the composed structure (member namespace, input-resolved
@@ -40,8 +40,11 @@ scan/batch/train_step closure.
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 
-from nodejax import NodeDef, node_def, serial, ensemble, stack, scan, batch, train_step, closed_loop
+from nodejax.binding import (split_aux)
+from nodejax.transforms.train_step import learned_sgd
+from nodejax import node, trained, Node, Leaf, serial, ensemble, reduce, stack, scan, scanned, batch, train_step, closed_loop
 from nodejax.struct import Struct
 
 DT = 0.05
@@ -51,12 +54,13 @@ HIDDEN, MEMBERS, LAYERS = 4, 3, 2
 
 # --- the simulation component: a saturated DC motor ---
 
-def Motor(dt, resistance=1.0, inductance=0.2, kt=1.0, ke=1.0,
-              inertia=0.5, friction=0.5, v_max=6.0):
+@node
+def Motor(dt: float, resistance: float=1.0, inductance: float=0.2, kt: float=1.0, ke: float=1.0,
+              inertia: float=0.5, friction: float=0.5, v_max: float=6.0) -> Node:
     """DC motor with electrical and mechanical state plus actuator
     saturation: voltage command -> measured angular velocity."""
-    def init(ndef):
-        z = jnp.zeros_like(ndef.input)
+    def init(node):
+        z = jnp.zeros_like(node.input)
         return Struct(current=z, omega=z)
 
     def apply(state, input):
@@ -67,26 +71,28 @@ def Motor(dt, resistance=1.0, inductance=0.2, kt=1.0, ke=1.0,
                      omega=state.omega + dt * domega)
         return new, new.omega
 
-    return node_def(apply, init=init, name='motor')
+    return Leaf(apply, init=init)
 
 
 # --- the controller: running-stats norm >> committee of RNNs >> mean ---
 
-def Norm(momentum=0.05, eps=1e-3):
+@node
+def Norm(momentum: float=0.05, eps: float=1e-3) -> Node:
     """Streaming standardizer: running mean/var as cyclic state, shaped by
     the init input value. No mode flags, no shape statics."""
-    def init(ndef):
-        return Struct(mean=jnp.zeros_like(ndef.input), var=jnp.ones_like(ndef.input))
+    def init(node):
+        return Struct(mean=jnp.zeros_like(node.input), var=jnp.ones_like(node.input))
 
     def apply(state, input):
         new = Struct(mean=(1 - momentum) * state.mean + momentum * input,
                      var=(1 - momentum) * state.var + momentum * (input - state.mean) ** 2)
         return new, (input - state.mean) / jnp.sqrt(state.var + eps)
 
-    return node_def(apply, init=init, name='norm')
+    return Leaf(apply, init=init)
 
 
-def Up(hidden):
+@node
+def Up(hidden: int) -> Node:
     """Input projection: scalar error -> (hidden,), so the signal threaded
     through the stacked RNN layers has a layer-invariant shape (a lax.scan
     carry may not change shape between layers)."""
@@ -96,10 +102,11 @@ def Up(hidden):
     def apply(param, input):
         return param.win * input
 
-    return node_def(apply, param=param, name='up')
+    return Leaf(apply, param=param)
 
 
-def RNN(hidden):
+@node
+def RNN(hidden: int) -> Node:
     """Minimal recurrent cell over a (hidden,)-shaped signal. The param
     constructor is a plain callable — the tree(param) form: declaring rng,
     it receives a KeyStream and draws via rng.next(); explicit values could
@@ -118,10 +125,11 @@ def RNN(hidden):
         h = jnp.tanh(param.wx * input + param.wh @ state + param.b)
         return h, h
 
-    return node_def(apply, init=init, param=param, name='rnn')
+    return Leaf(apply, init=init, param=param)
 
 
-def Readout(hidden):
+@node
+def Readout(hidden: int) -> Node:
     """Linear head: RNN hidden state -> scalar voltage command. Small init
     scale means the untrained controller commands near-zero voltage — a
     safe, stable starting policy."""
@@ -132,31 +140,35 @@ def Readout(hidden):
     def apply(param, input):
         return param.w @ input + param.b
 
-    return node_def(apply, param=param, name='readout')
+    return Leaf(apply, param=param)
 
 
-def Controller():
+def Controller() -> Node:
     """The learned controller: tracking error in, voltage command out.
     The error is standardized against its running statistics, fed to a
     committee of MEMBERS independent DEEP recurrent controllers — each a
     stack of LAYERS RNN cells with per-member, per-layer params and hidden
     state — and their votes are averaged."""
     core = Up(HIDDEN) >> stack(RNN(HIDDEN), n=LAYERS) >> Readout(HIDDEN)
-    mix = node_def(lambda input: jnp.mean(input, axis=0), name='mix')
-    return serial(norm=Norm(), committee=ensemble(core, n=MEMBERS), mix=mix)
+    return serial(norm=Norm(), committee=ensemble(core, n=MEMBERS),
+                  reduce=reduce(jnp.mean))
 
 
-def build():
+def build() -> Node:
     """Assemble the system at both time scales: `loop` is the cyclic
     single-step closed loop (reference -> measured velocity), `rollout`
     its sequence-level scan (reference sequence -> velocity trajectory,
     controller and plant state internalized per episode)."""
     loop = closed_loop(Controller() >> Motor(DT))
-    rollout = scan(loop)
+    rollout = scanned(loop)
     return loop, rollout
 
 
-def mse(pred, target):
+def mse(pred: jax.Array, target: jax.Array):
+    # a loss receives what the model emitted, aux included -> jax.Array: a gradient cell
+    # inside the pipe reports its own loss on that channel, and this
+    # objective has nothing to say about it
+    pred, _ = split_aux(pred)
     return jnp.mean((pred - target) ** 2)
 
 
@@ -167,11 +179,13 @@ def test_assembly():
     state shapes, and rng-derived params: ONE key at parameterize splits
     down through the pipe, the committee, and every declared initializer."""
     loop, rollout = build()
-    assert isinstance(loop, NodeDef) and loop.parametric and loop.cyclic
-    assert isinstance(rollout, NodeDef) and not rollout.cyclic
+    assert type(loop) is Node and loop.parametric and loop.cyclic
+    assert type(rollout) is Node and not rollout.cyclic
 
     node = loop.parameterize(rng=jax.random.PRNGKey(0))
-    wx = node.param.committee.stack_rnn.wx
+    # the loop holds the controlled pipe and its register, so the controller's
+    # params live under the inner member
+    wx = node.param.pipe.committee.stack_rnn.wx
     assert wx.shape == (MEMBERS, LAYERS, HIDDEN)   # stacked members x layers
     assert not jnp.allclose(wx[0], wx[1])          # independent member draws
     assert not jnp.allclose(wx[0, 0], wx[0, 1])    # independent layer draws
@@ -183,12 +197,12 @@ def test_assembly():
     deep = stack(RNN(HIDDEN), n=LAYERS).parameterize(rng=jax.random.PRNGKey(1))
     assert deep.init().shape == (LAYERS, HIDDEN)
 
-    state = node.with_input(0.0).init()
+    state = node.with_input(0.0).bind(node.param).init()
 
-    assert state.inner.committee.stack_rnn.shape == (MEMBERS, LAYERS, HIDDEN)
-    assert state.inner.norm.mean.shape == ()
-    assert state.inner.motor.current.shape == ()
-    assert state.inner.mix == ()                   # trivial, uniform
+    assert state.pipe.committee.stack_rnn.shape == (MEMBERS, LAYERS, HIDDEN)
+    assert state.pipe.norm.mean.shape == ()
+    assert state.pipe.motor.current.shape == ()
+    assert 'reduce' not in state.pipe              # stateless: no slot
     assert state.last.shape == ()
 
 
@@ -201,7 +215,7 @@ def test_closed_loop_training():
 
     model = fleet.parameterize(rng=jax.random.PRNGKey(0))
 
-    wh = model.param.committee.stack_rnn.wh
+    wh = model.param.pipe.committee.stack_rnn.wh
     assert wh.shape == (MEMBERS, LAYERS, HIDDEN, HIDDEN)
 
     setpoints = jnp.array([0.5, 1.0, -0.5, 1.5])
@@ -214,18 +228,18 @@ def test_closed_loop_training():
     def tile(x):
         return jnp.broadcast_to(x, (train_steps,) + x.shape)
 
-    trainer = train_step(fleet, mse, optax.adam(0.02))
-    final, losses = trainer.scan(trainer.init(model=model.param), Struct(input=tile(refs), target=tile(refs)))
+    trainer = train_step(model.initialize(), mse, optax.adam(0.02))
+    final, aux = trained(trainer).apply(input=tile(refs), target=tile(refs))
 
-    assert jnp.all(jnp.isfinite(losses))          # never destabilized the loop
-    assert losses[-1] < 0.35 * losses[0]          # tracking improved substantially
+    assert jnp.all(jnp.isfinite(aux.loss))          # never destabilized the loop
+    assert aux.loss[-1] < 0.35 * aux.loss[0]          # tracking improved substantially
 
     # generalization: an unseen setpoint, trained vs untrained params
     def track_mse(params, setpoint):
         ref = setpoint * jnp.ones(T)
         return mse(rollout.apply(params, ref), ref)
 
-    assert track_mse(final.model, 0.8) < 0.5 * track_mse(model.param, 0.8)
+    assert track_mse(final.param, 0.8) < 0.5 * track_mse(model.param, 0.8)
 
 
 def test_ttt_in_the_loop():
@@ -235,22 +249,26 @@ def test_ttt_in_the_loop():
     and the outer trainer. The outer gradients flow through the inner
     ones, through the physics; the outer trainer meta-learns each
     member's initial weights and per-weight adaptation rates."""
-    from nodejax import ttt, reconstruction
+    from nodejax import reconstruction_ttt
 
-    core = (Up(HIDDEN) >> reconstruction
-            >> ttt(RNN(HIDDEN), mse, 0.01) >> Readout(HIDDEN))
-    mix = node_def(lambda input: jnp.mean(input, axis=0), name='mix')
-    controller = serial(norm=Norm(), committee=ensemble(core, n=MEMBERS), mix=mix)
-    fleet = batch(scan(closed_loop(controller >> Motor(DT))))
-    trainer = train_step(fleet, mse, optax.adam(0.02))
+    inner_model = RNN(HIDDEN).parameterize(rng=jax.random.PRNGKey(1)).initialize()
+    core = (Up(HIDDEN)
+            >> reconstruction_ttt(train_step(inner_model, mse, learned_sgd(0.01)))
+            >> Readout(HIDDEN))
+    # the committee CONSTRUCTS its members from the core's def, one
+    # independent draw each: the trainer binding overrides its
+    # constructor, it does not delete it
+    controller = serial(norm=Norm(), committee=ensemble(core.node, n=MEMBERS),
+                        reduce=reduce(jnp.mean))
+    fleet = batch(scanned(closed_loop(controller >> Motor(DT))))
 
     model = fleet.parameterize(rng=jax.random.PRNGKey(0))
     setpoints = jnp.array([0.5, 1.0, -0.5])
     refs = setpoints[:, None] * jnp.ones(T)
     steps = 150
     tile = lambda x: jnp.broadcast_to(x, (steps,) + x.shape)
-    final, losses = trainer.scan(trainer.init(model=model.param),
-                                 Struct(input=tile(refs), target=tile(refs)))
+    trainer = train_step(model.initialize(), mse, optax.adam(0.02))
+    final, aux = trained(trainer).apply(input=tile(refs), target=tile(refs))
 
-    assert jnp.all(jnp.isfinite(losses))
-    assert losses[-1] < 0.3 * losses[0], (losses[0], losses[-1])
+    assert jnp.all(jnp.isfinite(aux.loss))
+    assert aux.loss[-1] < 0.3 * aux.loss[0], (aux.loss[0], aux.loss[-1])

@@ -10,8 +10,8 @@ BenchMotor composes the same electrical motor with the mechanism
 for open-loop physics work: cogging and hysteresis live with the
 motor, stiction with the mechanism.
 
-Capitalized names are units: a def that owns params or state, called to
-get one. Lowercase names are pure of both, either a transform over defs
+Capitalized names are units: a node that owns params or state, called to
+get one. Lowercase names are pure of both, either a transform over nodes
 or a node that is a plain function of its input.
 """
 

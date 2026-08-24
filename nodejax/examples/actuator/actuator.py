@@ -1,17 +1,17 @@
 """The actuator: the per-tick chain from battery to torque."""
 
 from nodejax.struct import Struct
-from nodejax import ambient, composite
+from nodejax import Node, node, ambient, Composite
 
 
-@ambient
-def ActuatorStack(dt, battery, mechanical_est, command_ctrl,
-                  current_ctrl, motor, motor_thermal):
+@node
+def ActuatorStack(battery: Node, mechanical_est: Node, command_ctrl: Node,
+                  current_ctrl: Node, motor: Node, motor_thermal: Node) -> Node:
     """One control tick: battery -> voltage estimation -> command
     controller -> current controller -> electrical motor. Mechanical
     state is an INPUT (integrated at the environment level), torque is
     the output. The factory argument list is the member list; blocks
-    arrive as defs or constructed (bound nodes: their params become
+    arrive as nodes or constructed (bound nodes: their params become
     the stored construction values). The current controller senses the
     bus through its own sensor pipeline ending in an ema member, and
     the init walk threads real values, so that ema BOOTS at the sampled
@@ -19,17 +19,18 @@ def ActuatorStack(dt, battery, mechanical_est, command_ctrl,
     power stage; an EMA booted at 0 V would divide the pwm by its
     epsilon guard and emit unit-norm noise until it converged).
     """
-    members = dict(battery=battery,
+    members = Composite(battery=battery,
                    mechanical_est=mechanical_est, command_ctrl=command_ctrl,
                    current_ctrl=current_ctrl, motor=motor,
                    motor_thermal=motor_thermal)
-
-    def apply(self, mechanical=Struct(position=0.0, velocity=0.0), command=0.0):
+    def apply(self, mechanical, command):
         true_v = self.battery.voltage()                             # method: pure read
         est_mech = self.mechanical_est(mechanical.position)         # encoder >> observer
 
-        target_i = self.command_ctrl(motor=self.param.current_ctrl.motor,
-                                     est_mechanical=est_mech, command=command)
+        target_i = self.command_ctrl(bundle=Struct(
+            command=command,
+            est_mechanical=est_mech,
+            motor=self.param.current_ctrl.motor))
         target_i = self.motor_thermal.derate(target_i)
         pwm = self.current_ctrl(true_i=self.state.motor,           # true electrical state
                                 est_velocity=est_mech.velocity,
@@ -41,4 +42,4 @@ def ActuatorStack(dt, battery, mechanical_est, command_ctrl,
         self.battery(mechanical.velocity * out.torque + p_diss)
         return out.torque
 
-    return composite(apply, members=members, name='actuator_stack')
+    return members(apply)

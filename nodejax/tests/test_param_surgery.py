@@ -1,6 +1,6 @@
 """Named-path parameter surgery.
 
-Struct and Node register KEYED pytree paths, so jax's path-aware tooling —
+Struct and PNode register KEYED pytree paths, so jax's path-aware tooling —
 and therefore optax's — works on nodes with zero framework helpers:
 freeze-by-path, per-subtree optimizers, decay masks are all plain
 jax.tree_util + optax, composing with train_step unchanged.
@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import train_step
+from nodejax import trained, scan, train_step
 from nodejax.struct import Struct
 from nodejax.control import Gain
 
@@ -24,7 +24,7 @@ def test_param_paths_are_named():
     assert [jax.tree_util.keystr(path) for path, _ in leaves] == \
         ['.gain.scale', '.gain_2.scale']
 
-    # and through the Node itself
+    # and through the PNode itself
     leaves = jax.tree_util.tree_flatten_with_path(bound)[0]
     assert [jax.tree_util.keystr(path) for path, _ in leaves] == \
         ['.gain.scale', '.gain_2.scale']
@@ -44,13 +44,13 @@ def test_freeze_by_path_with_plain_optax():
     optimizer = optax.multi_transform(
         {'train': optax.adam(0.1), 'frozen': optax.set_to_zero()}, labels)
 
-    trainer = train_step(pipe, lambda pred, target: (pred - target) ** 2, optimizer)
-    inputs = Struct(input=jnp.full(500, 2.0), target=jnp.full(500, 12.0))
-    final, losses = trainer.scan(trainer.init(model=model.param), inputs)
+    trainer = train_step(model.initialize(),
+                         lambda pred, target: (pred - target) ** 2, optimizer)
+    final, aux = trained(trainer).apply(input=jnp.full(500, 2.0), target=jnp.full(500, 12.0))
 
-    assert final.model.gain_2.scale == 1.0                     # frozen: bit-exact
-    assert jnp.allclose(final.model.gain.scale, 6.0, atol=0.05)  # carried the load
-    assert losses[-1] < 1e-3
+    assert final.param.gain_2.scale == 1.0                     # frozen: bit-exact
+    assert jnp.allclose(final.param.gain.scale, 6.0, atol=0.05)  # carried the load
+    assert aux.loss[-1] < 1e-3
 
 
 def test_replace_by_path():
