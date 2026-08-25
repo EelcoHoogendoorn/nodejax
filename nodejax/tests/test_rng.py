@@ -37,28 +37,35 @@ def test_rng_state_advances():
     assert jnp.allclose(step1, again)            # frozen state -> same draw
 
 
-def test_state_rng_is_keystream():
-    """Repeated self.rng access shares and advances one local stream."""
+def test_state_rng_can_seed_a_local_keystream():
+    """A Leaf can wrap its explicit RNG state for multiple local draws."""
     def param(scale):
         return Struct(scale=jnp.asarray(scale))
 
     def init(rng):
         return Struct(rng=rng)
 
-    def apply(self, state, input):
-        k1 = self.rng.next()
-        k2 = self.rng.next()
-        return state, Struct(value=input + self.scale * (
-            jax.random.normal(k1) + jax.random.normal(k2)), first=k1, second=k2)
+    def apply(param, state, input):
+        rng = KeyStream(state.rng)
+        first_key = rng.next()
+        second_key = rng.next()
+        output = Struct(
+            value=input + param.scale * (
+                jax.random.normal(first_key) + jax.random.normal(second_key)),
+            first=first_key,
+            second=second_key,
+        )
+        return state, output
 
     node = Leaf(apply, param=param, init=init).parameterize(scale=1.0)
-    s0 = node.init(rng=jax.random.PRNGKey(42))
-    s1, out = node.apply(s0, 1.0)
-    _, replay = node.apply(s0, 1.0)
-    assert type(s1.rng) is not KeyStream        # stored state carries raw key, not stream
-    assert not jnp.array_equal(out.first, out.second)
-    assert jnp.array_equal(out.first, replay.first)
-    assert jnp.array_equal(out.second, replay.second)
+    state = node.init(rng=jax.random.PRNGKey(42))
+    successor, output = node.apply(state, 1.0)
+    _, replay = node.apply(state, 1.0)
+    assert type(successor.rng) is not KeyStream
+    assert not jnp.array_equal(successor.rng, state.rng)
+    assert not jnp.array_equal(output.first, output.second)
+    assert jnp.array_equal(output.first, replay.first)
+    assert jnp.array_equal(output.second, replay.second)
 
 
 def test_rng_determinism_across_keys():

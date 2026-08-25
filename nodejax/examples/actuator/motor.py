@@ -114,12 +114,11 @@ def Electrical(dt: float, substeps: int=4) -> Node:
     torque goes out. The torque is everything the MOTOR produces:
     electromagnetic, cogging (position harmonics), and iron hysteresis
     drag; what the mechanism does with it (inertia, bearing friction,
-    stiction) is the mechanism's. Voltage in, torque and current out;
-    `self` is the motor. Param defaults describe a small direct-drive
-    outrunner."""
-    def param(resistance=0.24, inductance_d=2e-4, inductance_q=3e-4,
-              kt=1.2, pole_pairs=16.0, slots=36.0, hysteresis=0.0,
-              cogging=0.8, dedent_offset=0.0):
+    stiction) is the mechanism's. Voltage in, torque and current out.
+    Electrical and geometric constants come from the motor configuration;
+    optional loss effects default to zero."""
+    def param(resistance, inductance_d, inductance_q, kt, pole_pairs, slots,
+              hysteresis=0.0, cogging=0.0, dedent_offset=0.0):
         return Struct(resistance=resistance, inductance_d=inductance_d,
                       inductance_q=inductance_q, kt=kt, pole_pairs=pole_pairs,
                       slots=slots, hysteresis=hysteresis,
@@ -128,16 +127,16 @@ def Electrical(dt: float, substeps: int=4) -> Node:
     def init():
         return DQ(0.0, 0.0)
 
-    def apply(self, state, mechanical, voltage: DQ):
+    def apply(param, state, mechanical, voltage: DQ):
         h = dt / substeps
 
         def substep(_, i):
-            di_dt = current_feedforward(self, voltage, i, mechanical.velocity)
+            di_dt = current_feedforward(param, voltage, i, mechanical.velocity)
             return i + di_dt * h
 
         current = jax.lax.fori_loop(0, substeps, substep, state)
-        tq = (torque(self, current) + _dedent(self, mechanical.position)
-              - self.hysteresis * jnp.sign(mechanical.velocity))
+        tq = (torque(param, current) + _dedent(param, mechanical.position)
+              - param.hysteresis * jnp.sign(mechanical.velocity))
         return current, Struct(torque=tq, current=current)
 
     return Leaf(apply, param=param, init=init,
@@ -156,10 +155,10 @@ def Mechanical(dt: float) -> Node:
     def init(position=0.0):
         return Struct(position=position, velocity=0.0)
 
-    def apply(self, state, torque, load):
-        total = torque - self.friction * state.velocity - load
-        velocity = state.velocity + (total / self.inertia) * dt
-        is_dynamic = jnp.abs(velocity) * self.inertia > self.torque_static * dt
+    def apply(param, state, torque, load):
+        total = torque - param.friction * state.velocity - load
+        velocity = state.velocity + (total / param.inertia) * dt
+        is_dynamic = jnp.abs(velocity) * param.inertia > param.torque_static * dt
         velocity = velocity * is_dynamic
         position = jnp.mod(state.position + velocity * dt, 2.0 * jnp.pi)
         new = Struct(position=position, velocity=velocity)

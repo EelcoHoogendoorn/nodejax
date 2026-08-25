@@ -25,21 +25,36 @@ DT = 1e-3
 
 def stock_stack() -> Node:
     """The full stack, member tree spelled once — at the factories."""
+    motor = Electrical(DT)(
+        resistance=0.24,
+        inductance_d=2e-4,
+        inductance_q=3e-4,
+        kt=1.2,
+        pole_pairs=16.0,
+        slots=36.0,
+        cogging=0.8,
+    )
     return ActuatorStack(
-        battery=Battery(DT)(capacity=100.0),
+        battery=Battery(DT)(
+            voltage_max=48.0, voltage_min=36.0, capacity=100.0),
         mechanical_est=Encoder() >> Observer(DT),
         command_ctrl=torque_command(),
         current_ctrl=CurrentController(
             DT,
-            motor=Electrical(DT)(),
+            motor=motor,
             estimator=ModelEstimator(
                 DT,
                 filter=CurrentSensor() >> EMA(DT, warm=True)(tau=2e-3),
                 model_fn=foc_current_model(DT)),
             controller=PID(DT)(kp=0.5, ki=500.0),
-            fets=FET(DT)(r_th=2.0, c_th=5.0),
-            bus_est=Noisy(0.2) >> EMA(DT, warm=True)(tau=0.01)),
-        motor=Electrical(DT)(),
+            fets=FET(DT)(
+                r_th=2.0, c_th=5.0, limit=80.0, r_dson=0.02),
+            bus_est=Noisy()(noise_std=0.2) >> EMA(DT, warm=True)(tau=0.01),
+        ).parameterize(
+            ff=Struct(r=1.0, bemf=1.0, l=0.0),
+            limit=Struct(limit=100.0),
+        ),
+        motor=motor,
         motor_thermal=DeratingThermal(DT)(r_th=1.5, c_th=40.0, limit=100.0))
 
 

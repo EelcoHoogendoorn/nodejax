@@ -1,10 +1,10 @@
 """nodejax.nn: stock neural blocks with input shapes inferred.
 
-Factories return components that participate in the same shape resolution,
+Factories return Nodes that participate in the same shape resolution,
 composition, and transform APIs whether or not they own params or state.
 
 Organized into modular subfiles:
-- linear: Linear, Reshape, flat
+- linear: Linear, Projection, Reshape, flat
 - activations: gelu, relu, silu, sigmoid, tanh, elu, leaky_relu,
   softplus, softmax, log_softmax, identity
 - norm: LayerNorm, RMSNorm, L2Norm, BatchNorm, Whiten
@@ -18,7 +18,7 @@ Organized into modular subfiles:
 - filtering: EMA
 """
 
-from nodejax.nn.linear import Linear, flat, Reshape
+from nodejax.nn.linear import Linear, Projection, flat, Reshape
 from nodejax.nn.activations import (
     elu, gelu, identity, leaky_relu, log_softmax, relu, sigmoid, silu,
     softmax, softplus, tanh,
@@ -36,7 +36,7 @@ from nodejax.nn.stochastic import Dropout, DropPath, GaussianNoise
 from nodejax.nn.filtering import EMA
 
 __all__ = [
-    'Linear', 'flat', 'Reshape',
+    'Linear', 'Projection', 'flat', 'Reshape',
     'gelu', 'relu', 'silu', 'sigmoid', 'tanh', 'elu', 'leaky_relu',
     'softplus', 'softmax', 'log_softmax', 'identity',
     'LayerNorm', 'RMSNorm', 'L2Norm', 'BatchNorm', 'Whiten',

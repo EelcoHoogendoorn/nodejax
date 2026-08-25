@@ -18,6 +18,13 @@ class AuthorNode:
     def __init__(self, definition: Def):
         self._def = definition
 
+    def __getattr__(self, name: str):
+        """Expose the current definition's methods without binding values."""
+        if name in self._def.methods:
+            return self._def.methods[name]
+        raise AttributeError(
+            f"authored Node {self._def.name!r} has no attribute {name!r}")
+
     @property
     def name(self) -> str:
         return self._def.name

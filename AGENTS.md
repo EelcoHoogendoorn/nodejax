@@ -63,6 +63,10 @@ Use a simple immutable container where it naturally matches the data:
 Do not add custom `__setattr__` machinery, post-init wrappers, defensive-copy
 layers, or proxy types merely to make private mutation impossible.
 
+## Framework terminology
+
+A Node is called a Node. In prose, comments, and docstrings, never substitute “component” merely for variety. Use “component” only when it denotes a genuinely different concept rather than a NodeJAX Node.
+
 ## Polymorphism and type probing
 
 In NodeJAX library code and first-party NodeJAX examples, `hasattr` and
@@ -85,6 +89,14 @@ the same change.
 
 Files under `docs/` are intentional public writing. Edit them only when the
 user explicitly asks for a documentation change.
+
+Do not hard-wrap prose in Markdown files. Keep each paragraph and each list item on one physical line, and let the editor or renderer wrap it. Preserve line structure where Markdown requires it, including headings, tables, lists, quotations, and code blocks.
+
+Use a 100-character line-length target for newly authored code. Do not reflow existing code merely to enforce it.
+
+## Remote Git operations
+
+Never run `git push` without explicit and unambiguous approval to push. A request to prepare a release, work toward a push, create a commit, or perform release checks does not authorize any remote write.
 
 ## Scope and verification
 

@@ -35,7 +35,7 @@ a definition:
 | Level | Intended work | Main interface |
 | :--- | :--- | :--- |
 | T1 | Compose, specialize, bind, transform, and execute existing Nodes. | `nodejax.nn`, `nodejax.control`, stock `transforms`, composition, and the public Node views they produce |
-| T2 | Author leaves, composites, wrappers, and factories with ordinary Python functions. | `@node`, `Leaf`, authored `Composite` and `Wrapper`, and the reserved `node` and `self` arguments |
+| T2 | Author leaves, composites, wrappers, and factories with ordinary Python functions. | `@node`, `Leaf`, authored `Composite` and `Wrapper`, the reserved `node` argument, and the Composite or Wrapper `self` scope |
 | T3 | Author reusable transforms against the complete Node contract. | `@transform`, `Contract`, `Wrapper.roles`, `Composite.roles`, and `nodejax.transform` helpers |
 | T4 | Framework-internal development. | `Def` and its canonical call, capture, and layout records |
 
@@ -58,9 +58,7 @@ A leaf has no members. Its authored functions may
 construct a local parameter pytree, construct or prime a local state pytree,
 and implement arbitrary JAX computation over params, state, and input.
 
-Reserved arguments such as `param`, `state`, `node`, `self`, and `rng` express
-the roles the function uses. NodeJAX lowers that convenient signature once.
-Composition and transforms never inspect it again.
+Reserved arguments such as `param`, `state`, `node`, and `rng` express the roles a leaf function uses. Leaf `apply` returns auxiliary values explicitly and does not receive `self`. NodeJAX lowers the authored signature once. Composition and transforms never inspect it again.
 
 ### `Composite`
 

@@ -35,13 +35,30 @@ Every rival's native component covers only part of the program. NNX ends before
 unrelated containers according to which API owns the loop. The results are not
 competitive with NodeJAX on readability.
 
+Keras does not belong beside PyTorch on compute, and the tower column measures
+the difference. On the JAX backend `keras.layers.RNN` lowers to one `lax.scan`
+and `keras.ops.vectorized_map` is `jax.vmap`, so the time and member axes stay
+vectorized: the traced meta step holds at 427 equations for 2 through 32
+members and compiles in 0.4 s, against PyTorch's 266 s for the same unrolled
+tape. Gradients are JAX's because Keras ships no gradient API, which is its own
+documented advice rather than an escape.
+
+What Keras has no representation for is the member axis. Constructing one
+cannot be mapped: `keras.initializers` reject a traced seed even though
+`keras.random.normal` accepts one, and `add_weight` under a vmap returns
+identical rows instead of failing, so a committee built that way trains as
+three copies of one member. The column builds three towers separately and
+stacks their weights, leaving `trainable_variables` a flat list in which
+nothing records which value is a parameter, which is a running statistic, or
+what a leading axis counts.
+
 The [test-time-training comparison](../nodejax/examples/comparisons/ttt/) makes
 the split exact. NodeJAX composes inner `train_step`, `next_step_ttt`,
 `scanned`, `batch`, outer `train_step`, and `trained`; every result is a Node.
 NNX adds local `TTT`, `Batched`, `TrainStep`, axis, and carry policies around a
 cloned Module. Equinox carries its Module through raw JAX. Haiku and PyTorch
 move fast weights into dictionaries; PyTorch then uses `functional_call` and a
-handwritten update because `torch.optim` cannot update those values—effectively
+handwritten update because `torch.optim` cannot update those values, which is
 pseudo-JAX inside PyTorch.
 
 Fast weights and hidden state advance together, yet rivals route one through

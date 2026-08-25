@@ -42,23 +42,23 @@ def PID(dt, dwrap=None):
         zeros = jax.tree.map(jnp.zeros_like, node.input)
         return Struct(integral=zeros, last_error=zeros)
 
-    def apply(self, state, input):
+    def apply(param, state, input):
         error = input
-        p_term = error * self.kp
+        p_term = error * param.kp
 
-        integral_raw = (state.integral + error * dt) * jnp.exp(-self.decay * dt)
-        i_term = jax.tree.map(lambda x: jnp.clip(x, -self.integral_limit, self.integral_limit),
-                              integral_raw * self.ki)
+        integral_raw = (state.integral + error * dt) * jnp.exp(-param.decay * dt)
+        i_term = jax.tree.map(lambda x: jnp.clip(x, -param.integral_limit, param.integral_limit),
+                              integral_raw * param.ki)
         # back-calculation anti-windup: store the integral the clamped
         # I-term implies (ki=0 keeps the raw integral)
-        safe_ki = jnp.where(self.ki != 0.0, self.ki, 1.0)
-        integral = jax.tree.map(lambda it, ir: jnp.where(self.ki != 0.0, it / safe_ki, ir),
+        safe_ki = jnp.where(param.ki != 0.0, param.ki, 1.0)
+        integral = jax.tree.map(lambda it, ir: jnp.where(param.ki != 0.0, it / safe_ki, ir),
                                  i_term, integral_raw)
 
         diff = error - state.last_error
         if dwrap is not None:
             diff = jax.tree.map(dwrap, diff)
-        d_term = diff * (self.kd / dt)
+        d_term = diff * (param.kd / dt)
 
         output = p_term + i_term + d_term
         return Struct(integral=integral, last_error=error), output

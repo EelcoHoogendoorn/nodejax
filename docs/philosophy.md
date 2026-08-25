@@ -18,8 +18,8 @@ Transformations reinterpret Nodes. Both produce Nodes again.
 
 | | JAX functions | NodeJAX Nodes |
 | :--- | :--- | :--- |
-| Composition | `lambda x: projection(activation(linear(x)))` | `nn.Linear(64) >> nn.gelu >> nn.Linear(10)` |
-| Transform composition | `jax.jit(jax.vmap(jax.grad(loss)))` | `batch(stack(nn.RNN(64), n=4))` |
+| Closure under composition | `f = lambda x: sum(sigmoid(x))` | `node = nn.RNN(64) >> nn.relu` |
+| Closure under transforms | `jax.jit(jax.vmap(f))` | `batch(scanned(ensemble(stack(node))))` |
 
 Python functions compose, and JAX transformations return functions. NodeJAX
 extends that property to Nodes and Node transformations.
@@ -74,25 +74,26 @@ its caller knowing how it was produced?
 Consider a scalar affine unit:
 
 ```python
-def Hyperplane():
+def Projection():
     def param(node, rng):
         width = node.input.shape[-1]
         return Struct(
             w=jax.random.normal(rng.next(), (width,)) / jnp.sqrt(width),
-            b=0.0,
+            b=jnp.zeros(()),
         )
 
     def apply(param, input):
-        return param.w @ input + param.b
+        return input @ param.w + param.b
 
     return Leaf(apply, param=param)
 ```
 
-A vector-valued linear layer can then be written as a population of scalar
-units:
+`Projection` maps one vector to one scalar.
+
+A vector-valued linear layer can then be written as a population of scalar units:
 
 ```python
-linear = ensemble(Hyperplane(), n=3)
+linear = ensemble(Projection(), n=3)
 ```
 
 Stacking the arithmetic is easy. The usual blockers are more mundane: input
@@ -103,12 +104,7 @@ contract so the next Node can consume it. In most frameworks, some of
 that information falls out of the abstraction, and the caller supplies the
 missing glue.
 
-That is the practical meaning of a first-class transform product.
-`ensemble(Hyperplane(), n)` pipes through `>>`, batches under `batch`, trains
-under `train_step`, and accepts further transforms without manually forwarding
-shapes, params, state, or RNG. If transform composition makes writing a useful
-primitive attractive rather than merely possible, composition friction has
-actually been removed.
+That is the practical meaning of a first-class transform product. `ensemble(Projection(), n)` pipes through `>>`, batches under `batch`, trains under `train_step`, and accepts further transforms without manually forwarding shapes, params, state, or RNG. If transform composition makes writing a useful primitive attractive rather than merely possible, composition friction has actually been removed.
 
 ## FOOP gives functional programs object structure
 
@@ -247,14 +243,7 @@ Mathematically, it is another stateful process.
 trainer = train_step(model, loss_fn, optax.adam(1e-3))
 ```
 
-The model's initial weights are params to the training process; its active
-weights and optimizer moments are state. This relative change of lifetime is
-enough to bring training inside the same algebra. JAX already makes a training
-loop a scan. The framework question is whether every loop rewrites its own
-`(params, opt_state, ...)` carry for the umpteenth time, or whether `scan`
-itself is a Node transform. NodeJAX derives the carry from the contract and
-returns another Node, so populations, inner adaptation, and outer optimization
-compose without introducing another execution model.
+The model's initial weights are params to the training process; its active weights and optimizer moments are state. This relative change of lifetime is enough to bring training inside the same algebra. JAX already makes a training loop a scan, but `lax.scan(step, initial, sequence)` combines recurrence declaration and execution by API convention, not functional necessity. Because the Node contract already identifies state and input, NodeJAX can make `scan(step)` itself a transform and bind the initial state and sequence later. The resulting Node derives its carry from the contract, so populations, inner adaptation, and outer optimization compose without introducing another execution model.
 
 This is not limited to neural layers. A controller, its estimator, the plant
 it controls, and the process that tunes them can inhabit the same Node

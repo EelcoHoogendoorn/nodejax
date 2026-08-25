@@ -62,8 +62,8 @@ def RateLimit(dt):
     def init(node, param):
         return jax.tree.map(jnp.zeros_like, node.input)
 
-    def apply(self, state, input):
-        limit = self.max_rate * dt
+    def apply(param, state, input):
+        limit = param.max_rate * dt
         new = jax.tree.map(lambda last, x: last + jnp.clip(x - last, -limit, limit),
                            state, input)
         return new, new
@@ -77,8 +77,8 @@ def Clamp():
     def param(limit):
         return Struct(limit=limit)
 
-    def apply(self, input):
-        return jax.tree.map(lambda x: jnp.clip(x, -self.limit, self.limit), input)
+    def apply(param, input):
+        return jax.tree.map(lambda x: jnp.clip(x, -param.limit, param.limit), input)
 
     return Leaf(apply, param=param)
 
@@ -90,8 +90,8 @@ def ClampNorm():
     def param(limit):
         return Struct(limit=limit)
 
-    def apply(self, input):
-        return input.clamp_norm(self.limit)
+    def apply(param, input):
+        return input.clamp_norm(param.limit)
 
     return Leaf(apply, param=param)
 
@@ -154,8 +154,8 @@ def EMA(dt, warm: bool = False):
     def init_cold(node):
         return jax.tree.map(jnp.zeros_like, node.input)
 
-    def apply(self, state, input):
-        alpha = 1.0 / (self.tau / dt + 1.0)
+    def apply(param, state, input):
+        alpha = 1.0 / (param.tau / dt + 1.0)
         new = jax.tree.map(lambda s, x: s * (1.0 - alpha) + x * alpha, state, input)
         return new, new
 
@@ -203,8 +203,8 @@ def Blend(dt):
     def param(tau):
         return Struct(tau=tau)
 
-    def apply(self, fast, slow):
-        alpha = 1.0 / (self.tau / dt + 1.0)
+    def apply(param, fast, slow):
+        alpha = 1.0 / (param.tau / dt + 1.0)
         return fast * alpha + slow * (1.0 - alpha)
 
     return Leaf(apply, param=param)

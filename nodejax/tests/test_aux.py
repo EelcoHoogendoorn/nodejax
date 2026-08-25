@@ -126,18 +126,17 @@ def test_self_sow_sugar():
     assert aux.activity == 9.0
 
 
-def test_leaf_self_sow_sugar():
-    """Verify self.sow(**kwargs) works symmetrically on leaf nodes declaring `self`."""
-    def LeafSower():
+def test_leaf_returns_explicit_aux():
+    """A Leaf returns its auxiliary values alongside its primary output."""
+    def WatchedLeaf():
         def param(w):
             return Struct(w=jnp.asarray(w))
-        def apply(self, input):
-            y = self.param.w * input
-            self.sow(activity=y ** 2)
-            return y
-        return Leaf(apply, param=param, name='leaf_sower')
+        def apply(param, input):
+            output = param.w * input
+            return output, Aux(activity=output ** 2)
+        return Leaf(apply, param=param, name='watched_leaf')
 
-    node = LeafSower().parameterize(w=3.0)
+    node = WatchedLeaf().parameterize(w=3.0)
     out, aux = node.apply(2.0)
     assert out == 6.0
     assert aux.activity == 36.0

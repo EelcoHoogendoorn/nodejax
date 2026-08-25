@@ -59,19 +59,18 @@ are not runtime subclasses.
 
 * **Leaf construction (`Leaf`)**:
   * Implement raw array math (`apply`), parameter initializers (`param`), and state constructors (`init`).
-  * Receive authored signatures with access to `self.param`, `self.state`, an explicit `rng` argument (`KeyStream`), and `self.sow(...)`.
+  * Name required values explicitly in authored signatures: `param`, `state`, `input`, `node`, and `rng`. A Leaf emits auxiliary values by returning `(output, Aux(...))`; its `apply` does not receive `self`.
   * Contain no child sub-nodes.
 
 * **Composite construction (`Composite`, `serial`, `parallel`, `>>`)**:
-  * Build behavior from registered members. An authored `Composite` may
-    perform arbitrary JAX operations around its member calls.
+  * Build behavior from registered members. An authored `Composite` may perform arbitrary JAX operations around its member calls.
   * Compose member hierarchies across all structural spaces:
     1. **`param`**: Member parameter PyTrees (`param.member_a`, `param.member_b`).
     2. **`state`**: Member state PyTrees (`state.member_a`, `state.member_b`).
     3. **`aux`**: Member auxiliary outputs (`aux.member_a`, `aux.member_b`).
     4. **`statics`**: Member configuration metadata.
 
-> **The Structural Registration Rule**: Every sub-component relationship must be registered as a member (`Composite(**members)`, `serial`, or a wrapper's inner). Closing over sub-nodes in private Python variables prevents parameter collection, state composition, RNG routing, and tree surgery.
+> **The Structural Registration Rule**: Every child Node relationship must be registered as a member (`Composite(**members)`, `serial`, or a wrapper's inner). Closing over Nodes in private Python variables prevents parameter collection, state composition, RNG routing, and tree surgery.
 
 Both forms finish as a `Def`, normally exposed to users through `Node`. Member
 structure and wrapper transparency are definition data, not Python class
@@ -92,6 +91,12 @@ Transforms consume a `Node` and produce a new `Node` by transforming its underly
 | **`scanned(node)`** | Sequence rollout (internalized carry) | Shared across time | Initialized and consumed internally |
 | **`train_step(node, loss, opt)`** | Turns model into a trainer | Initial weights (param) | Weights & opt moments (state) |
 | **`trained(trainer)`** | Runs optimization to completion | Evaluated weights | Returns final trained model + loss aux |
+
+### Why `scan` is a transform
+
+JAX exposes `lax.scan(step, initial, sequence)` as an immediately applied control-flow primitive. That interface combines the declaration of a recurrence with one execution of it. The functional model does not require this coupling: a curried scan could accept `step` first and return a function of `initial` and `sequence`, while retaining the same tracing, lowering, and fixed-carry constraints.
+
+NodeJAX makes that separation explicit because a Node contract already names the state and input roles. `scan(step)` declares a reusable sequence Node whose state remains externally carried. Calling `.scan(sequence)` on a bound Node executes that operation using its bound state and returns its successor. `scanned(step)` declares the alternative lifetime policy: initialize the state for each call, run the sequence, and consume the final state internally. The bound `.scan(sequence)` method is therefore the execution spelling of the `scan(step)` transform, not a separate recurrence mechanism.
 
 Because transforms operate on declared contract roles (`param` vs `state`), they nest seamlessly:
 ```python
@@ -139,16 +144,24 @@ rewrite.
 
 ## 6. Functional Derivation (`derive`) and Methods
 
-NodeJAX replaces classical OOP class inheritance with **functional derivation**:
+`derive` extends an unbound Leaf definition without adding a Composite member:
 
 ```python
-# Derive a new node by overriding specific contract functions:
-base = Linear(64)
-derived = derive(base, apply=custom_apply)
+derived = derive(
+    base,
+    param=extra_param,
+    init=extra_init,
+    methods=method_overrides,
+)
 ```
 
-* `derive` inherits parameter and state constructors from `base` while replacing `apply`.
+* An omitted `param`, `init`, or `apply` role is inherited.
+* If parent and child both define `param` or `init`, their constructor inputs and returned `Struct` fields must be disjoint. Their fragments form one flat parameter or state value.
+* An inherited transition may return only the state fields it updates; NodeJAX preserves the added fields. An explicit replacement transition over merged state must return every state field.
+* Methods form a union in which the child overrides equal names, and tags form a union.
 * **Bound Methods**: Methods declared on nodes bind to `PNode` and `PSNode` instances, receiving the instance's bound parameters and state automatically.
+
+Current limits: an explicit state transition on an intermediate derived Node cannot be extended with another state fragment; define the complete transition on the most-derived Node. Random construction belongs to the derived Node as a whole, so the same root key does not guarantee that an inherited stochastic fragment reproduces its standalone base value after another constructor fragment is added.
 
 ---
 
@@ -252,7 +265,7 @@ def Linear(out_features: int):
 * `input`: The primary input data.
 * `node`: The resolved node metadata (e.g. `node.input.shape`).
 * `rng`: The local `KeyStream` for PRNG draws.
-* `self`: Context object for composite nodes and auxiliary logging (`self.sow(...)`).
+* `self`: The Composite or Wrapper invocation scope. It calls registered members and may collect auxiliary values with `self.sow(...)`. A Leaf `apply` does not accept it.
 
 ---
 
@@ -279,7 +292,14 @@ Inside `apply(self, ...)`, calling `self.member_name(...)` automatically slices 
 
 ## 13. Telemetry and Auxiliary Outputs (`Aux` / `sow`)
 
-To emit intermediate diagnostics or auxiliary losses without altering primary dataflow:
+Leaf code returns an explicit `Aux` beside its primary output:
+```python
+def apply(param, input):
+    output = input @ param.w
+    return output, Aux(activity=jnp.linalg.norm(output))
+```
+
+A Composite or Wrapper may collect values around its member calls with `self.sow(...)`:
 ```python
 def apply(self, input):
     x = self.encoder(input)

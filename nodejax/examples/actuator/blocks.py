@@ -45,10 +45,10 @@ def Observer(dt: float) -> Node:
     def init(param, position=0.0):
         return Struct(position=position, velocity=0.0)
 
-    def apply(self, state, input):
+    def apply(param, state, input):
         measured = input
-        a_pos = 1.0 / (1.0 + self.tau_pos)
-        a_vel = 1.0 / (1.0 + self.tau_vel)
+        a_pos = 1.0 / (1.0 + param.tau_pos)
+        a_vel = 1.0 / (1.0 + param.tau_vel)
 
         predicted = state.position + state.velocity * dt
         position = predicted + a_pos * angle_wrap(measured - predicted)
@@ -62,46 +62,57 @@ def Observer(dt: float) -> Node:
 
 
 @node
-def Encoder(resolution: int=2000, noise_std: float=0.1, phase_offset: float=0.0) -> Node:
-    """Absolute encoder: quantization + count noise; rng as state."""
-    rad_to_counts = resolution / (2.0 * jnp.pi)
+def Encoder() -> Node:
+    """Absolute encoder with calibration params and rng state."""
+    def param(resolution: float=2000.0, noise_std: float=0.1,
+              phase_offset: float=0.0) -> Struct:
+        return Struct(resolution=resolution, noise_std=noise_std,
+                      phase_offset=phase_offset)
 
-    def init(rng):
+    def init(rng) -> Struct:
         return Struct(rng=rng)
 
-    def apply(state, input):
-        counts = (input + phase_offset) * rad_to_counts
-        counts = counts + jax.random.normal(state.rng) * noise_std
-        measured = jnp.round(counts) / rad_to_counts - phase_offset
+    def apply(param, state, input):
+        rad_to_counts = param.resolution / (2.0 * jnp.pi)
+        counts = (input + param.phase_offset) * rad_to_counts
+        counts = counts + jax.random.normal(state.rng) * param.noise_std
+        measured = jnp.round(counts) / rad_to_counts - param.phase_offset
         return state, measured
 
-    return Leaf(apply, init=init)
+    return Leaf(apply, init=init, param=param)
 
 
 @node
-def CurrentSensor(noise_std: float=0.1) -> Node:
-    """DQ current sensor with gaussian noise; rng as state."""
-    def init(rng):
+def CurrentSensor() -> Node:
+    """DQ current sensor with noise scale as param and rng as state."""
+    def param(noise_std: float=0.1) -> Struct:
+        return Struct(noise_std=noise_std)
+
+    def init(rng) -> Struct:
         return Struct(rng=rng)
 
-    def apply(state, input):
-        node, nq = jax.random.normal(state.rng, shape=(2,)) * noise_std
-        return state, input + DQ(node, nq)
+    def apply(param, state, input):
+        noise_d, noise_q = (
+            jax.random.normal(state.rng, shape=(2,)) * param.noise_std)
+        return state, input + DQ(noise_d, noise_q)
 
-    return Leaf(apply, init=init)
+    return Leaf(apply, init=init, param=param)
 
 
 @node
-def Noisy(noise_std: float=0.1) -> Node:
-    """Additive gaussian measurement noise on a scalar; rng as state.
+def Noisy() -> Node:
+    """Scalar gaussian sensor with noise scale as param and rng as state.
     Compose sensors as pipelines: voltage_est = Noisy() >> EMA(dt)."""
-    def init(rng):
+    def param(noise_std: float=0.1) -> Struct:
+        return Struct(noise_std=noise_std)
+
+    def init(rng) -> Struct:
         return Struct(rng=rng)
 
-    def apply(state, input):
-        return state, input + jax.random.normal(state.rng) * noise_std
+    def apply(param, state, input):
+        return state, input + jax.random.normal(state.rng) * param.noise_std
 
-    return Leaf(apply, init=init)
+    return Leaf(apply, init=init, param=param)
 
 
 @node

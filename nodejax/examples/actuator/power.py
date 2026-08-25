@@ -20,7 +20,7 @@ from nodejax.examples.actuator.utils import lerp
 
 @node
 def Battery(dt: float) -> Node:
-    def param(voltage_max=48.0, voltage_min=0.0, capacity=jnp.inf):
+    def param(voltage_max, voltage_min, capacity):
         return Struct(voltage_max=voltage_max,
                       voltage_min=voltage_min,
                       capacity=capacity)
@@ -28,9 +28,9 @@ def Battery(dt: float) -> Node:
     def init(param):
         return 1.0   # charge, [0, 1]
 
-    def apply(self, state, input):
+    def apply(param, state, input):
         # input: power drawn (W); an empty battery stays empty (floor at 0)
-        charge = jnp.maximum(state - input * dt / self.capacity, 0.0)
+        charge = jnp.maximum(state - input * dt / param.capacity, 0.0)
         return charge, charge
 
     def voltage(param, state):
@@ -54,25 +54,31 @@ def Thermal(dt: float) -> Node:
     def init(param):
         return param.ambient
 
-    def apply(self, state, input):
-        t = state + (input - (state - self.ambient) / self.r_th) / self.c_th * dt
-        return t, t
+    def dissipation(param, input):
+        return input
 
-    return Leaf(apply, init=init, param=param)
+    def apply(node, param, state, input):
+        power = node.dissipation(param, input)
+        cooling = (state - param.ambient) / param.r_th
+        temperature = state + (power - cooling) / param.c_th * dt
+        return temperature, temperature
+
+    return Leaf(
+        apply, init=init, param=param,
+        methods=dict(dissipation=dissipation),
+    )
 
 
 @node
 def DeratingThermal(dt: float) -> Node:
     """The thermal model plus the derating story, via derive(): a temperature
-    limit and a sigmoid derating curve as a METHOD — whoever owns this
+    limit and a sigmoid derating curve as a method. Whoever owns this
     node's state derates a current by it (read-then-step). The thermal
     dynamics are inherited untouched."""
     parent = Thermal(dt)
 
-    def param(r_th, c_th, limit, hardness=4.0, ambient=25.0):
-        return parent.parameterize(
-            r_th=r_th, c_th=c_th, ambient=ambient).param.replace(
-            limit=limit, hardness=hardness)
+    def param(limit, hardness=4.0):
+        return Struct(limit=limit, hardness=hardness)
 
     def derate(param, state, current):
         # state is the node's temperature; the name declares the role
@@ -85,18 +91,20 @@ def DeratingThermal(dt: float) -> Node:
 
 @node
 def FET(dt: float) -> Node:
-    """The power stage: derived once more — it owns its conduction losses
-    (r_dson), so apply takes the SQUARED CURRENT magnitude and converts to
-    watts itself; super is the explicit parent apply call."""
+    """A derating thermal model whose input is squared current.
+
+    The added resistance parameter converts that input to dissipated power
+    through the thermal model's method hook.
+    """
     parent = DeratingThermal(dt)
 
-    def param(r_th, c_th, limit=80.0, r_dson=0.02, hardness=4.0, ambient=25.0):
-        return parent.parameterize(
-            r_th=r_th, c_th=c_th, limit=limit,
-            hardness=hardness, ambient=ambient).param.replace(
-            r_dson=r_dson)
+    def param(r_dson):
+        return Struct(r_dson=r_dson)
 
-    def apply(self, state, input):
-        return parent.apply(self.param, state, input * self.r_dson)
+    def dissipation(param, input):
+        return input * param.r_dson
 
-    return derive(parent, param=param, apply=apply, name='fets')
+    return derive(
+        parent, param=param,
+        methods=dict(dissipation=dissipation), name='fets',
+    )

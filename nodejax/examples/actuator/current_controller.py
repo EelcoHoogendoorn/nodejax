@@ -48,9 +48,9 @@ def Feedforward() -> Node:
     def param(r, bemf, l):
         return Struct(r=r, bemf=bemf, l=l)
 
-    def apply(self, resistive, bemf, inductive):
-        return (resistive * self.r + bemf * self.bemf
-                + inductive * self.l)
+    def apply(param, resistive, bemf, inductive):
+        return (resistive * param.r + bemf * param.bemf
+                + inductive * param.l)
 
     return Leaf(apply, param=param)
 
@@ -72,8 +72,7 @@ def CurrentController(dt: float, motor: Node, estimator: Node, controller: Node,
     rest."""
     members = Composite(motor=motor, estimator=estimator, controller=controller,
                    fets=fets, bus_est=bus_est,
-                   ff=Feedforward()(r=1.0, bemf=1.0, l=0.0),
-                   limit=ClampNorm()(limit=100.0),
+                   ff=Feedforward(), limit=ClampNorm(),
                    pwm_prev=Delay().with_input(DQ()), d_dt=Diff(dt))
 
     def apply(self, true_i, est_velocity, true_v, target_i):

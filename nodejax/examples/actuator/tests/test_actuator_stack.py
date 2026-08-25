@@ -13,7 +13,7 @@ apply after).
 import jax
 import jax.numpy as jnp
 
-from nodejax import Node, scan, scanned, Composite, ambient
+from nodejax import Node, PNode, scan, scanned, Composite, ambient, replace_by_path
 from nodejax.types import PyTree
 from nodejax.struct import Struct
 from nodejax.control import EMA, PID
@@ -40,38 +40,45 @@ def Environment(actuator: Node, mechanical: Node) -> Node:
     return members(apply, name='env')
 
 
-def build_env(command_ctrl: Node=None, capacity: float=jnp.inf, model_tau: float=0.0,
-              fet_limit: float=80.0, dt: float=DT) -> Node:
-    """Assemble the full chain — the member tree spelled once, at the
-    factories: blocks arrive as nodes or constructed (bound nodes, their
-    params the stored construction values). dt is AMBIENT: declared
-    eligible at each factory's definition site (@ambient), supplied
-    once here, filled only where a call leaves it unbound — no
-    threading, no registries, explicit always wins."""
+def build_env(command_ctrl = None, dt: float = DT) -> tuple[PNode, PNode]:
+    """Assemble one configured actuator and its mechanical environment."""
     with ambient(dt=dt):
-        motor = Electrical()(cogging=0.0)
-        cc = CurrentController(
-            motor=motor,                           # the controller's model: the same motor def
-            estimator=ModelEstimator(
-                filter=CurrentSensor(noise_std=0.1) >> EMA(warm=True)(tau=2e-4),
-                model_fn=foc_current_model()).parameterize(mix=Struct(tau=model_tau)),
-            controller=PID().parameterize(kp=0.5, ki=200.0, integral_limit=48.0),
-            fets=FET().parameterize(r_th=2.0, c_th=0.5, limit=fet_limit),
-            bus_est=Noisy(0.2) >> EMA(warm=True)(tau=1e-3),
-        ).parameterize(ff=Struct(r=0.5, bemf=0.5, l=0.0), limit=Struct(limit=50.0))
-        command = command_ctrl if command_ctrl is not None else \
-            VelocityCommand(PID().parameterize(kp=1.0, ki=10.0,
-                                                        integral_limit=40.0))
-        actuator = ActuatorStack(
-            battery=Battery().parameterize(voltage_max=48.0, capacity=capacity),
-            mechanical_est=Encoder() >> Observer()(tau_pos=1.0, tau_vel=100.0),
-            command_ctrl=command, current_ctrl=cc,
-            motor=motor,
-            motor_thermal=DeratingThermal().parameterize(
-                r_th=0.5, c_th=50.0, limit=120.0)).parameterize()
-        return Environment(actuator=actuator,
-                       mechanical=Mechanical().parameterize(
-                           inertia=0.1, friction=0.2)).parameterize(), motor
+        motor = Electrical().parameterize(resistance=0.24, inductance_d=2e-4, inductance_q=3e-4, kt=1.2, pole_pairs=16.0, slots=36.0, cogging=0.0)
+
+        current_filter = (
+            CurrentSensor()(noise_std=0.1)
+            >> EMA(warm=True)(tau=2e-4)
+        )
+        current_estimator = ModelEstimator(filter=current_filter, model_fn=foc_current_model()).parameterize(mix=Struct(tau=0.0))
+        feedback_controller = PID().parameterize(kp=0.5, ki=200.0, integral_limit=48.0)
+        power_stage = FET().parameterize(r_th=2.0, c_th=0.5, limit=80.0, r_dson=0.02)
+        bus_estimator = (
+            Noisy()(noise_std=0.2)
+            >> EMA(warm=True)(tau=1e-3)
+        )
+
+        current_controller = (
+            CurrentController(motor=motor, estimator=current_estimator, controller=feedback_controller, fets=power_stage, bus_est=bus_estimator)
+            .parameterize(ff=Struct(r=0.5, bemf=0.5, l=0.0), limit=Struct(limit=50.0))
+        )
+
+        if command_ctrl is None:
+            command_controller = VelocityCommand(PID().parameterize(kp=1.0, ki=10.0, integral_limit=40.0))
+        else:
+            command_controller = command_ctrl
+
+        battery = Battery().parameterize(voltage_max=48.0, voltage_min=36.0, capacity=1.0e6)
+        mechanical_estimator = (
+            Encoder()
+            >> Observer()(tau_pos=1.0, tau_vel=100.0)
+        )
+        motor_thermal = DeratingThermal().parameterize(r_th=0.5, c_th=50.0, limit=120.0)
+
+        actuator = ActuatorStack(battery=battery, mechanical_est=mechanical_estimator, command_ctrl=command_controller, current_ctrl=current_controller, motor=motor, motor_thermal=motor_thermal).parameterize()
+        mechanical = Mechanical().parameterize(inertia=0.1, friction=0.2)
+        environment = Environment(actuator=actuator, mechanical=mechanical).parameterize()
+
+        return environment, motor
 
 
 # a real initial condition: the actuator at rest, no command, no load. Supplying
@@ -149,7 +156,8 @@ def test_pwm_is_normalized():
 def test_battery_sags_and_the_stack_feels_it():
     """Finite capacity: charge drains with drawn power, the sag curve
     lowers the true bus voltage, and the voltage estimator tracks it."""
-    env, _ = build_env(capacity=10.0)
+    env, _ = build_env()
+    env = replace_by_path(env, {'.actuator.battery.capacity': 10.0})
     traj = simulate(env, 4000, command=3.0)
 
     charge = traj.state.actuator.battery
@@ -167,7 +175,8 @@ def test_model_blend_runs():
     The blend's recursion through the previous estimate has loop gain
     (model weight) * L/(R*dt) ~ 8.3 at these motor constants, so model
     weights above ~0.12 DIVERGE. Tested at a provably stable weight."""
-    env, _ = build_env(model_tau=0.05 * DT)
+    env, _ = build_env()
+    env = replace_by_path(env, {'.actuator.current_ctrl.estimator.mix.tau': 0.05 * DT})
     traj = simulate(env, 2000, command=2.0)
 
     assert jnp.all(jnp.isfinite(traj.output))
@@ -184,8 +193,9 @@ def test_thermals_heat_and_derate():
     assert traj.state.actuator.motor_thermal[-1] > 25.5
     assert traj.state.actuator.current_ctrl.fets[-1] > 29.0
 
-    cool, _ = build_env(command_ctrl=torque_command(), fet_limit=200.0)
-    hot, _ = build_env(command_ctrl=torque_command(), fet_limit=35.0)
+    baseline, _ = build_env(command_ctrl=torque_command())
+    cool = replace_by_path(baseline, {'.actuator.current_ctrl.fets.limit': 200.0})
+    hot = replace_by_path(baseline, {'.actuator.current_ctrl.fets.limit': 35.0})
     iq_cool = simulate(cool, 2000, command=30.0).state.actuator.motor.q
     iq_hot = simulate(hot, 2000, command=30.0).state.actuator.motor.q
     assert jnp.mean(jnp.abs(iq_hot[-500:])) < 0.8 * jnp.mean(jnp.abs(iq_cool[-500:]))
@@ -367,7 +377,7 @@ def test_model_mismatch_ensemble_visual():
     Renders the shared four-panel view —
     tests/plots/model_mismatch_ensemble.png."""
     import os
-    from nodejax import ensemble, replace_by_path
+    from nodejax import ensemble
 
     N = 10
     env, _ = build_env(command_ctrl=punchy_command())

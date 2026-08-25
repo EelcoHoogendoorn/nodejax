@@ -109,3 +109,45 @@ def test_authored_struct_runtime_input_is_one_required_value():
     assert output.__keys__ == ('left', 'right')
     assert output.left == 1.0
     assert output.right == 2.0
+
+
+def test_constructors_define_owned_roles_even_when_apply_does_not_read_them():
+    def param(scale):
+        return Struct(scale=jnp.asarray(scale))
+
+    def init(start):
+        return jnp.asarray(start)
+
+    source = Leaf(
+        lambda input: input * 2.0,
+        param=param,
+        init=init,
+        name='owned_roles',
+    )
+
+    assert source.parametric
+    assert source.cyclic
+    bound = source.parameterize(scale=3.0)
+    state = bound.init(start=4.0)
+    next_state, output = bound.apply(state, 5.0)
+    assert next_state == 4.0
+    assert output == 10.0
+
+
+def test_leaf_apply_cannot_name_an_absent_owned_role():
+    with pytest.raises(TypeError, match='no param constructor exists'):
+        Leaf(lambda param, input: input, name='missing_param')
+
+    with pytest.raises(TypeError, match='no initializer exists'):
+        Leaf(lambda state, input: (state, input), name='missing_state')
+
+
+def test_leaf_self_is_not_supported():
+    with pytest.raises(TypeError, match='leaf apply does not accept self'):
+        Leaf(lambda self, input: input, name='self_apply')
+
+    def init(self):
+        return self
+
+    with pytest.raises(TypeError, match='leaf init does not accept self'):
+        Leaf(lambda input: input, init=init, name='self_init')

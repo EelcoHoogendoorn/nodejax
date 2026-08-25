@@ -32,8 +32,8 @@ def feedback(pipe: Node, output_spec: Any = 0.0) -> Node:
     is what closing a loop means, so forward shape propagation never reaches
     it and the loop must declare it. The value is deducible in principle,
     since the register carries the pipe's output and jax.eval_shape derives
-    that exactly; it is passed because resolving a member from the composite
-    that holds it is machinery the framework has not got. See scratch/todo.md.
+    that exactly; it is passed because the framework does not currently
+    resolve a member from the composite that contains it.
 
     Deriving from the pipe instead would flatten it into an opaque leaf,
     taking its members with it: a normalizer inside the loop would then be

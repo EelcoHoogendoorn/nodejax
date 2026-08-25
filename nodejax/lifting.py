@@ -11,7 +11,7 @@ import jax.numpy as jnp
 
 from nodejax.author_view import AuthorNode
 from nodejax.binding import (
-    Aux, _METHOD_CHANNELS, _UNSET, _bundle_spec, _has_rng_field, split_aux,
+    _METHOD_CHANNELS, _bundle_spec, _has_rng_field,
 )
 from nodejax.contract import ApplyCall, CallForm, InitCall, ParamCall
 from nodejax.frozendict import frozendict
@@ -77,48 +77,22 @@ def _signature(fn: Callable, role: str) -> Mapping:
     return params
 
 
-class _LeafStep:
-    """Invocation scope passed as ``self`` to an authored leaf."""
-
-    def __init__(self, definition, param, state):
-        self._def = definition
-        self.param = param
-        self.state = state
-        self._aux = {}
-        self._rng = _UNSET
-
-    def sow(self, **fields):
-        self._aux.update(fields)
-
-    def __getattr__(self, name: str):
-        if name.startswith('_'):
-            raise AttributeError(name)
-        if self.param is not None and name in self.param:
-            return self.param[name]
-        if self.state is not None and name in self.state:
-            value = self.state[name]
-            if name == 'rng':
-                if self._rng is _UNSET:
-                    self._rng = value if type(value) is KeyStream else KeyStream(value)
-                return self._rng
-            return value
-        if name in self._def.methods:
-            from nodejax.binding import _bind_method
-            return _bind_method(
-                self._def.methods[name],
-                param=lambda: self.param,
-                state=lambda: self.state,
-                node=lambda: AuthorNode(self._def),
-            )
-        raise AttributeError(name)
+_APPLY_CHANNELS = frozenset({'param', 'state', 'node'})
 
 
-_OBJECT_NAMES = ('param', 'self')
-_APPLY_CHANNELS = frozenset(_OBJECT_NAMES) | {'state', 'node'}
-
-
-def _compile_apply(fn: Callable) -> ApplyCall:
+def _compile_apply(fn: Callable, *, parametric: bool, cyclic: bool,
+                   owner: str) -> ApplyCall:
     signature = _signature(fn, 'apply')
+    if 'self' in signature:
+        raise TypeError(
+            f'{owner}: leaf apply does not accept self; use explicit param '
+            'and state')
+    if 'param' in signature and not parametric:
+        raise TypeError(
+            f'{owner}: apply names param but no param constructor exists')
+    if 'state' in signature and not cyclic:
+        raise TypeError(
+            f'{owner}: apply names state but no initializer exists')
     fields = [name for name in signature
               if name not in _APPLY_CHANNELS and name != 'rng']
 
@@ -128,18 +102,14 @@ def _compile_apply(fn: Callable) -> ApplyCall:
     takes_rng = 'rng' in declaration
     if takes_rng:
         declaration = declaration.without('rng')
-    obj = next((name for name in signature if name in _OBJECT_NAMES), None)
     has_state = 'state' in signature
     reads_def = 'node' in signature
 
     def impl(definition, param, state, formed_input, rng):
-        scope = _LeafStep(definition, param, state) if obj == 'self' else None
         arguments = {}
         for name in signature:
             if name == 'node':
                 arguments[name] = AuthorNode(definition)
-            elif name == 'self':
-                arguments[name] = scope
             elif name == 'param':
                 arguments[name] = param
             elif name == 'state':
@@ -149,13 +119,6 @@ def _compile_apply(fn: Callable) -> ApplyCall:
             elif name in formed_input:
                 arguments[name] = formed_input[name]
         output = _keys_only(fn(**arguments), f'{definition.name}.apply')
-        if scope is not None and scope._aux:
-            clean, direct = split_aux(output)
-            aux = {}
-            if type(direct) is Aux:
-                aux.update(dict(direct.__items__))
-            aux.update(scope._aux)
-            output = clean, Aux(**aux)
         return output if has_state else (state, output)
 
     if has_state:
@@ -166,14 +129,6 @@ def _compile_apply(fn: Callable) -> ApplyCall:
         input_spec=Struct() if not fields else None,
         takes_rng=takes_rng,
         reads_def=reads_def,
-    )
-
-
-def _apply_channels(fn: Callable) -> tuple[bool, bool]:
-    signature = _signature(fn, 'apply')
-    return (
-        any(name in signature for name in _OBJECT_NAMES),
-        'state' in signature,
     )
 
 
@@ -220,14 +175,19 @@ def _compile_param(fn: Callable) -> ParamCall:
     )
 
 
-def _compile_init(fn: Callable) -> InitCall:
+def _compile_init(fn: Callable, *, owner: str | None = None,
+                  allow_self: bool = True) -> InitCall:
     signature = _signature(fn, 'initializer')
+    if 'self' in signature and not allow_self:
+        raise TypeError(
+            f'{owner}: leaf init does not accept self; use explicit param')
     if ('input' in signature and
             signature['input'].default is not inspect.Parameter.empty):
         raise TypeError('init input is a required priming value or is omitted')
     primes = 'input' in signature
+    object_names = ('param', 'self') if allow_self else ('param',)
     declaration = _bundle_spec(
-        signature, drop=('param', 'self', 'node', 'input', 'state'))
+        signature, drop=object_names + ('node', 'input', 'state'))
     takes_rng = 'rng' in declaration
     if takes_rng:
         declaration = declaration.without('rng')
@@ -235,7 +195,7 @@ def _compile_init(fn: Callable) -> InitCall:
     def arguments(definition, param, formed_input, rng):
         out = {}
         for name in signature:
-            if name in _OBJECT_NAMES:
+            if name in object_names:
                 out[name] = param
             elif name == 'node':
                 out[name] = AuthorNode(definition)
@@ -272,6 +232,7 @@ _RESERVED_METHOD_NAMES = frozenset({
     'initialize', 'reset', 'with_input', 'name', 'generic', 'parametric',
     'cyclic', 'bound', 'resolved', 'node', 'pnode', 'param', 'state',
     'contract', 'members',
+    'input', 'input_spec', 'input_shape',
     'describe', 'tree_view', 'summary', 'statics_by_path',
 })
 

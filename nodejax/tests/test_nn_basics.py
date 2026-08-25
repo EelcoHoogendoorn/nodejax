@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 
-from nodejax import nn
+from nodejax import ensemble, nn
 
 
 def test_activation_blocks_match_jax() -> None:
@@ -27,3 +27,15 @@ def test_one_hot_composes_with_linear() -> None:
 
     assert model.param.linear.w.shape == (5, 3)
     assert model.apply(input).shape == (3,)
+
+
+def test_projection_removes_the_feature_axis_and_ensemble_adds_one() -> None:
+    key = jax.random.PRNGKey(0)
+    projection = nn.Projection().with_input(jnp.zeros(4)).parameterize(rng=key)
+    linear = ensemble(nn.Projection(), n=3).with_input(
+        jnp.zeros(4)).parameterize(rng=key)
+
+    assert projection.param.w.shape == (4,)
+    assert projection.apply(jnp.ones(4)).shape == ()
+    assert linear.param.w.shape == (3, 4)
+    assert linear.apply(jnp.ones(4)).shape == (3,)

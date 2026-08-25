@@ -32,3 +32,19 @@ def Linear(n_out: int):
         return input @ param.w + param.b
 
     return Leaf(apply, param=param)
+
+
+@node
+def Projection():
+    """Affine projection from one vector to one scalar."""
+    def param(node, rng) -> Struct:
+        width = node.input.shape[-1]
+        return Struct(
+            w=jax.random.normal(rng.next(), (width,)) / jnp.sqrt(width),
+            b=jnp.zeros(()),
+        )
+
+    def apply(param, input) -> jax.Array:
+        return input @ param.w + param.b
+
+    return Leaf(apply, param=param)

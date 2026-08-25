@@ -78,8 +78,7 @@ def test_a_slice_reembeds_as_a_finished_capture_and_owes_no_key():
 
 def test_a_tied_alias_refuses_to_slice():
     """A tied alias has no param slot by design, so the slice is
-    member_param's named error. tie-by-tag (scratch/todo.md) would keep
-    the public tree whole and retire this refusal."""
+    member_param's named error."""
     from nodejax import tie
     lm = tie(nn.Embed(7, 4) >> nn.Unembed(7, 4), 'embed', 'unembed')
     node = lm.parameterize(rng=jax.random.PRNGKey(0))
