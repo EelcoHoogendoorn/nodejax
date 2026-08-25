@@ -136,12 +136,19 @@ def Motor(dt: float, resistance: float = 1.0, inductance: float = 0.2,
 @node
 def Filters(dt: float) -> PNode:
 	"""Classical PID filter bank over the scalar error: emits
-	[error, integral, de/dt]. The basis is fixed structure — the network
-	learns only how to mix it, so no filter coefficient is ever exposed
-	to gradient descent. Integral action makes zero steady-state error
-	structurally reachable (holding a velocity needs a carry,
-	plant-dependent voltage); rate feedback damps the light plants. All
-	channels in physical units."""
+	[error, integral, change]. The basis is fixed structure, and the
+	network learns only how to mix it, so no filter coefficient is ever
+	exposed to gradient descent. Integral action makes zero steady-state
+	error structurally reachable (holding a velocity needs a carry,
+	plant-dependent voltage); rate feedback damps the light plants.
+
+	The third channel is the per-step change rather than de/dt. A rate
+	divides by dt, which at dt=0.05 is a 20x gain, and the measured
+	channel then ran to absmax 20.0 where error and integral sat near
+	1.0. Those three share one matrix into a tanh stack, so the rate
+	channel saturated it on every transient. Over 24 seeds that cost 4
+	diverged meta-training runs and a settled error reaching 3.42;
+	dropping the divisor took both to zero and 0.014."""
 
 	def init(node):
 		z = jnp.zeros_like(node.input)
@@ -149,7 +156,7 @@ def Filters(dt: float) -> PNode:
 
 	def apply(state: Struct, input: jax.Array) -> tuple[Struct, jax.Array]:
 		i = state.i + dt * input
-		d = (input - state.prev) / dt
+		d = input - state.prev
 		return Struct(i=i, prev=input), jnp.stack([input, i, d])
 
 	return Leaf(apply, init=init)
@@ -170,7 +177,8 @@ def Up(n_in: int, hidden: int) -> Node:
 	shape walk can carry, so this states it."""
 
 	def param(rng: KeyStream) -> Struct:
-		return Struct(win=0.5 * jax.random.normal(rng.next(), (n_in, hidden)))
+		return Struct(win=0.5 * jax.random.normal(rng.next(), (n_in, hidden))
+		              / jnp.sqrt(n_in))
 
 	def apply(param: Struct, input: jax.Array) -> jax.Array:
 		return input @ param.win
