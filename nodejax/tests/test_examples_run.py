@@ -27,7 +27,7 @@ import nodejax
 # Modules whose imports are not ours to satisfy. The cross-framework
 # comparisons exist to be read beside the nodejax file as much as run, and a
 # missing torch should not fail this suite.
-OPTIONAL = ('torch', 'tensorflow', 'keras', 'haiku')
+OPTIONAL = ('torch', 'tensorflow', 'keras', 'haiku', 'equinox', 'flax')
 
 
 def _all_modules():

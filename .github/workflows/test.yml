@@ -12,4 +12,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e .[test]
-      - run: pytest -q
+      # the suite guards itself against being run whole by accident;
+      # CI is the caller that means it, so it asks.
+      - run: pytest -n auto -q --full

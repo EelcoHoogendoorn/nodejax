@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 dependencies = ["jax", "optax"]
 
 [project.optional-dependencies]
-test = ["pytest", "scikit-learn", "matplotlib"]
+test = ["pytest", "pytest-xdist", "scikit-learn", "matplotlib"]
 comparisons = ["equinox", "flax", "dm-haiku", "torch", "keras"]
 
 [tool.setuptools.packages.find]
