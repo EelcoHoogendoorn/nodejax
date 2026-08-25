@@ -31,6 +31,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
+from nodejax.types import PyTree
 
 VOCAB, HIDDEN = 8, 16
 STREAM, SUPPORT = 192, 128

@@ -45,6 +45,7 @@ import jax.numpy as jnp
 import flax.linen as fnn
 
 from nodejax.examples.comparisons.chunk import chunk_common as task
+from nodejax.types import PyTree
 
 
 class Norm(fnn.Module):

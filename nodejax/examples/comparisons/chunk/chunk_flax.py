@@ -44,6 +44,7 @@ import optax
 from flax import nnx
 
 from nodejax.examples.comparisons.chunk import chunk_common as task
+from nodejax.types import PyTree
 
 # Params broadcast, everything else carries. One annotation, by TYPE, and the
 # only thing either scan has to be told.

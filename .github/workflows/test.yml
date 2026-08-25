@@ -4,8 +4,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # the ends of the supported range: the floor requires-python names, and
+      # the newest release. One job either side catches what a version moves,
+      # which is how the missing imports below got through: 3.14 defers
+      # annotation evaluation and 3.11 does not.
+      fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12']
+        python-version: ['3.11', '3.14']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

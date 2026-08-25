@@ -35,6 +35,7 @@ from flax import nnx
 from nodejax.examples.comparisons.tower.tower_common import (
     HIDDEN, LAYERS, MEMBERS, META_STEPS, INNER_LR, OUTER_LR, MOMENTUM,
     make_tasks)
+from nodejax.types import PyTree
 
 
 # The running statistics are ordinary values in the rollout carry. NNX can

@@ -36,6 +36,7 @@ Two more torch-specific costs that have no analogue in the jax files:
 Run directly:  python -m nodejax.examples.comparisons.chunk.chunk_torch
 """
 
+import jax
 import os
 
 # jax and torch each bring their own OpenMP, and importing both in one process
@@ -47,6 +48,7 @@ import torch
 import torch.nn as nn
 
 from nodejax.examples.comparisons.chunk import chunk_common as task
+from nodejax.types import PyTree
 
 
 def _t(a: jax.Array):

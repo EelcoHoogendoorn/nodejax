@@ -29,6 +29,7 @@ carry left for one to act on.
 Run directly:  python -m nodejax.examples.comparisons.chunk.chunk_nodejax
 """
 
+import jax
 import jax.numpy as jnp
 
 import optax

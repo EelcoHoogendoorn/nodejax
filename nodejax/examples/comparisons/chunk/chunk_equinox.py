@@ -27,6 +27,7 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from nodejax.examples.comparisons.chunk import chunk_common as task
+from nodejax.types import PyTree
 
 
 class Norm(eqx.Module):
