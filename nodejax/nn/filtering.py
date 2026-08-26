@@ -5,8 +5,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from nodejax.ambient import node
-from nodejax.authoring import Leaf
+from nodejax.core.ambient import node
+from nodejax.core.authoring import Leaf
 
 
 @node

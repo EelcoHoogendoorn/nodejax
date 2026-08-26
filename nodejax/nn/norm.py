@@ -5,10 +5,10 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from nodejax.node import Node
+from nodejax.core.node import Node
 from nodejax.struct import Struct
-from nodejax.ambient import node
-from nodejax.authoring import Leaf
+from nodejax.core.ambient import node
+from nodejax.core.authoring import Leaf
 
 
 @node(name='norm')
@@ -71,8 +71,36 @@ def L2Norm(eps: float = 1e-8) -> Node:
     return Leaf(apply)
 
 
+def _reduction_axes(axis) -> tuple[tuple, tuple]:
+    """Split a reduction spec into collective names and positional axes."""
+    axes = axis if type(axis) is tuple else (axis,)
+    return (tuple(a for a in axes if type(a) is str),
+            tuple(a for a in axes if type(a) is int))
+
+
+def _leading_axes(positional: tuple, sample: tuple, who: str) -> tuple:
+    """Resolve positional reduction axes; only leading sample axes qualify."""
+    rank = len(sample)
+    resolved = tuple(a if a >= 0 else a + rank for a in positional)
+    for index in resolved:
+        if not 0 <= index < rank - 1:
+            raise ValueError(
+                f'{who}: positional reduction axis {index} of sample shape '
+                f'{sample} is the last axis, which the running statistics '
+                'are laid out over; only leading axes pool')
+    return resolved
+
+
+def _statistics_shape(sample: tuple, reduced: tuple) -> tuple:
+    """The sample shape with the reduced axes kept at extent one."""
+    kept = set(reduced)
+    return tuple(1 if index in kept else extent
+                 for index, extent in enumerate(sample))
+
+
 @node
-def BatchNorm(momentum: float, eps: float = 1e-5, axis: str = 'batch',
+def BatchNorm(momentum: float, eps: float = 1e-5,
+              axis: str | int | tuple = 'batch',
               train: bool = True):
     r"""Batch normalization over a named batch axis with running statistics.
 
@@ -89,8 +117,10 @@ def BatchNorm(momentum: float, eps: float = 1e-5, axis: str = 'batch',
         EMA factor for updating running mean and variance.
     eps : float, default=1e-5
         Constant added to variance for numerical stability.
-    axis : str, default='batch'
-        Named collective axis over which batch moments are pooled.
+    axis : str, int, or tuple of these, default='batch'
+        Axes over which batch moments are pooled. A name reaches across the
+        enclosing map that binds it; an int selects a leading axis of the
+        sample itself.
     train : bool, default=True
         Whether to compute batch moments and update running statistics.
 
@@ -111,20 +141,47 @@ def BatchNorm(momentum: float, eps: float = 1e-5, axis: str = 'batch',
     - `train` is a static constructor argument rather than mutable state.
       Switching a trained model to evaluation mode is done functionally by
       rebuilding the tree via `model.specialize(**{'*.train': False})`.
+
+    Statistics reduce over exactly the listed axes. A name reaches across
+    the enclosing map that binds it; an int selects a leading axis of the
+    sample itself and stays in the running statistics at extent one. What
+    is not listed is not pooled: unlisted leading axes keep one running
+    moment per position, with state bound to the extents it was
+    initialized for. Naming an axis the moments do not pool fails loudly
+    at trace time: the shared running state is only consistent across
+    pooled axes.
+
+    Over sequences, for example, these spellings are the published
+    treatments: per-position statistics under a plain `batch()` is
+    recurrent batch normalization (Cooijmans et al. 2017), while listing
+    the time axis, `axis=('batch', 0)`, pools it and matches torch's
+    BatchNorm1d over (N, C, L), as does binding it to a name with an inner
+    `batch(norm, axis='stream')` and listing that name.
     """
     def param(node) -> Struct:
         width = node.input.shape[-1]
         return Struct(gamma=jnp.ones(width), beta=jnp.zeros(width))
 
-    def init(param) -> Struct:
-        return Struct(mean=jnp.zeros_like(param.beta), var=jnp.ones_like(param.gamma))
+    names, positional = _reduction_axes(axis)
+
+    def init(node, param) -> Struct:
+        sample = node.input.shape
+        kept = _statistics_shape(
+            sample, _leading_axes(positional, sample, 'batch_norm'))
+        return Struct(mean=jnp.zeros(kept, dtype=param.beta.dtype),
+                      var=jnp.ones(kept, dtype=param.gamma.dtype))
 
     def apply(param, state, input) -> tuple[Struct, jax.Array]:
         out = (input - state.mean) / jnp.sqrt(state.var + eps) * param.gamma + param.beta
         if not train:                       # eval build: read, never write
             return state, out
-        m = jax.lax.pmean(input, axis)
-        v = jax.lax.pmean((input - m) ** 2, axis)
+        reduced = _leading_axes(positional, input.shape, 'batch_norm')
+        m = jnp.mean(input, reduced, keepdims=True)
+        if names:
+            m = jax.lax.pmean(m, names)
+        v = jnp.mean((input - m) ** 2, reduced, keepdims=True)
+        if names:
+            v = jax.lax.pmean(v, names)
         new = Struct(mean=(1 - momentum) * state.mean + momentum * m,
                      var=(1 - momentum) * state.var + momentum * v)
         return new, out
@@ -134,7 +191,8 @@ def BatchNorm(momentum: float, eps: float = 1e-5, axis: str = 'batch',
 
 
 @node
-def Whiten(momentum: float = 0.1, eps: float = 1e-2, axis: str = 'batch',
+def Whiten(momentum: float = 0.1, eps: float = 1e-2,
+           axis: str | int | tuple = 'batch',
            train: bool = True):
     r"""ZCA input whitening over a named batch axis with running statistics.
 
@@ -152,8 +210,10 @@ def Whiten(momentum: float = 0.1, eps: float = 1e-2, axis: str = 'batch',
         EMA factor for updating running mean and covariance.
     eps : float, default=1e-2
         Small ridge regularization constant added to eigenvalues before inversion.
-    axis : str, default='batch'
-        Named collective axis over which batch moments are pooled.
+    axis : str, int, or tuple of these, default='batch'
+        Axes over which batch moments are pooled. A name reaches across the
+        enclosing map that binds it; an int selects a leading axis of the
+        sample itself.
     train : bool, default=True
         Whether to compute batch moments and update running statistics.
 
@@ -163,22 +223,42 @@ def Whiten(momentum: float = 0.1, eps: float = 1e-2, axis: str = 'batch',
     the `batch()` transform. Batch covariance is computed collectively via
     `lax.pmean` across `axis='batch'`, updating pure functional running state
     identically across the batch without mutable global state.
+
+    As with `BatchNorm`, moments reduce over exactly the listed axes: a
+    name reaches across the enclosing map that binds it, an int selects a
+    leading axis of the sample itself and stays in the running moments at
+    extent one, and unlisted leading axes keep one moment per position.
     """
+    names, positional = _reduction_axes(axis)
+
     def init(node) -> Struct:
         features = node.input
-        return Struct(mean=jnp.zeros_like(features),
-                      cov=jnp.eye(features.shape[-1], dtype=features.dtype))
+        sample = features.shape
+        width = sample[-1]
+        kept = _statistics_shape(
+            sample, _leading_axes(positional, sample, 'whiten'))
+        eye = jnp.eye(width, dtype=features.dtype)
+        return Struct(mean=jnp.zeros(kept, dtype=features.dtype),
+                      cov=jnp.broadcast_to(eye, kept[:-1] + (width, width)))
 
     def apply(state, input) -> tuple[Struct, jax.Array]:
         eigvals, eigvecs = jnp.linalg.eigh(state.cov)
-        inv_sqrt = (eigvecs * (1.0 / jnp.sqrt(jnp.maximum(eigvals, 0.0) + eps))) @ eigvecs.T
-        whitened = (input - state.mean) @ inv_sqrt
+        scale = 1.0 / jnp.sqrt(jnp.maximum(eigvals, 0.0) + eps)
+        inv_sqrt = (eigvecs * scale[..., None, :]) @ jnp.swapaxes(eigvecs, -1, -2)
+        whitened = jnp.einsum('...i,...ij->...j', input - state.mean, inv_sqrt)
 
         if not train:                       # eval build: read, never write
             return state, whitened
-        m = jax.lax.pmean(input, axis)
+        reduced = _leading_axes(positional, input.shape, 'whiten')
+        m = jnp.mean(input, reduced, keepdims=True)
+        if names:
+            m = jax.lax.pmean(m, names)
         centered = input - m
-        cov = jax.lax.pmean(jnp.outer(centered, centered), axis)
+        cov = jnp.mean(
+            jnp.einsum('...i,...j->...ij', centered, centered),
+            reduced, keepdims=True)
+        if names:
+            cov = jax.lax.pmean(cov, names)
         new = Struct(mean=(1 - momentum) * state.mean + momentum * m,
                      cov=(1 - momentum) * state.cov + momentum * cov)
         return new, whitened

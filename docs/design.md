@@ -36,7 +36,7 @@ a definition:
 | :--- | :--- | :--- |
 | T1 | Compose, specialize, bind, transform, and execute existing Nodes. | `nodejax.nn`, `nodejax.control`, stock `transforms`, composition, and the public Node views they produce |
 | T2 | Author leaves, composites, wrappers, and factories with ordinary Python functions. | `@node`, `Leaf`, authored `Composite` and `Wrapper`, the reserved `node` argument, and the Composite or Wrapper `self` scope |
-| T3 | Author reusable transforms against the complete Node contract. | `@transform`, `Contract`, `Wrapper.roles`, `Composite.roles`, and `nodejax.transform` helpers |
+| T3 | Author reusable transforms against the complete Node contract. | `@transform`, `Contract`, `Wrapper.roles`, `Composite.roles`, and `nodejax.transforms.transform` helpers |
 | T4 | Framework-internal development. | `Def` and its canonical call, capture, and layout records |
 
 These levels are design targets, not an access-control system. Application
@@ -118,7 +118,7 @@ what becomes carry, how RNG is split, and which bindings remain valid. The
 transform does not inspect function signatures, infer roles from values, or
 dispatch over concrete Node classes.
 
-[`ensemble`](../nodejax/transforms/ensemble.py) is the direct example. It maps
+[`ensemble`](../nodejax/transforms/axes/ensemble.py) is the direct example. It maps
 params and state over a new axis, broadcasts runtime input, stacks outputs, and
 splits role RNG when required. The common vmap helpers handle absent roles and
 call formation. `Wrapper.roles` turns those role functions into another
@@ -141,7 +141,7 @@ optimizer state become trainer state. Preserving that relationship for
 unbound, bound, input-dependent, stochastic, and transformed models requires
 the trainer to retain the model's exact parameter construction form.
 
-The current [`tie`](../nodejax/transforms/tie.py) also works at T4. It removes
+The current [`tie`](../nodejax/transforms/structure/tie.py) also works at T4. It removes
 alias fields from the stored public parameter tree, expands the source value
 into the fixed member-shaped tree used during execution, and records sparse
 ownership in the definition layout. Its path-based rewrite is not a general
@@ -206,17 +206,17 @@ of composition, not a mutation of the child definition.
 
 ## Where the implementation lives
 
-- [`definition.py`](../nodejax/definition.py) defines `Def`, construction
+- [`definition.py`](../nodejax/core/definition.py) defines `Def`, construction
   records, captures, and layout.
-- [`contract.py`](../nodejax/contract.py) defines the canonical roles and the
+- [`contract.py`](../nodejax/core/contract.py) defines the canonical roles and the
   transform-facing `Contract`.
-- [`lifting.py`](../nodejax/lifting.py) and
-  [`authoring.py`](../nodejax/authoring.py) lower Node authoring into
+- [`lifting.py`](../nodejax/core/lifting.py) and
+  [`authoring.py`](../nodejax/core/authoring.py) lower Node authoring into
   definitions.
-- [`composite.py`](../nodejax/composite.py),
-  [`compose.py`](../nodejax/compose.py), and
-  [`wrapper.py`](../nodejax/wrapper.py) build structured definitions.
-- [`node.py`](../nodejax/node.py), [`pnode.py`](../nodejax/pnode.py), and
-  [`psnode.py`](../nodejax/psnode.py) provide the public views.
-- [`transform.py`](../nodejax/transform.py) defines the supported transform
+- [`composite.py`](../nodejax/core/composite.py),
+  [`compose.py`](../nodejax/core/compose.py), and
+  [`wrapper.py`](../nodejax/core/wrapper.py) build structured definitions.
+- [`node.py`](../nodejax/core/node.py), [`pnode.py`](../nodejax/core/pnode.py), and
+  [`psnode.py`](../nodejax/core/psnode.py) provide the public views.
+- [`transform.py`](../nodejax/transforms/transform.py) defines the supported transform
   authoring interface.

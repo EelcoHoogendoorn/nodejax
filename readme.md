@@ -25,7 +25,7 @@ final, aux = trained(trainer).apply(input, target)
 
 A committee of residual GRU stacks drives a simulated motor in closed loop. Recurrent carry, plant state, active weights, and optimizer moments all use the same explicit state contract.
 
-This is abridged from the executable [`test_motor_control.py`](nodejax/tests/test_motor_control.py).
+This is abridged from the executable [`test_motor_control.py`](examples/test_motor_control.py).
 
 ## The idea
 
@@ -54,15 +54,15 @@ Anything you can do with JAX, you can do within this contract. Composition and v
 
 ## See it working
 
-- [`test_train_loop.py`](nodejax/examples/test_train_loop.py) trains one `nn.Linear` Node and shows an ordinary compiled training loop with host-side logging and early stopping.
-- [`actuator.py`](nodejax/examples/actuator/actuator.py) demonstrates a non-neural physics simulation. NodeJAX is designed to extend beyond neural networks.
-- [`test_nn_vit.py`](nodejax/examples/test_nn_vit.py) builds a small image classifier entirely from stock `nodejax.nn` blocks, then batches and trains it on handwritten digits.
-- [`test_kv_cache.py`](nodejax/examples/test_kv_cache.py) treats a decoder cache as ordinary state, including branched decoding and batched users with shared params.
-- [`test_maml_composed.py`](nodejax/examples/test_maml_composed.py) expresses MAML by placing an adapting trainer inside an outer trainer.
-- [`test_gan.py`](nodejax/examples/test_gan.py) represents both sides of a GAN and their optimizers inside one differentiable program.
-- [`examples/comparisons/`](nodejax/examples/comparisons/) contains runnable NodeJAX, JAX, Equinox, Flax, Haiku, and PyTorch formulations of the same problems.
+- [`test_train_loop.py`](examples/test_train_loop.py) trains one `nn.Linear` Node and shows an ordinary compiled training loop with host-side logging and early stopping.
+- [`actuator.py`](examples/actuator/actuator.py) demonstrates a non-neural physics simulation. NodeJAX is designed to extend beyond neural networks.
+- [`test_nn_vit.py`](examples/test_nn_vit.py) builds a small image classifier entirely from stock `nodejax.nn` blocks, then batches and trains it on handwritten digits.
+- [`test_kv_cache.py`](examples/test_kv_cache.py) treats a decoder cache as ordinary state, including branched decoding and batched users with shared params.
+- [`test_maml_composed.py`](examples/test_maml_composed.py) expresses MAML by placing an adapting trainer inside an outer trainer.
+- [`test_gan.py`](examples/test_gan.py) represents both sides of a GAN and their optimizers inside one differentiable program.
+- [`examples/comparisons/`](examples/comparisons/) contains runnable NodeJAX, JAX, Equinox, Flax, Haiku, and PyTorch formulations of the same problems.
 
-The complete gallery lives in [`nodejax/examples/`](nodejax/examples/).
+The complete gallery lives in [`examples/`](examples/).
 
 ## Read next
 

@@ -7,33 +7,34 @@ compose those contracts without exposing their storage machinery here.
 """
 
 from nodejax.struct import Struct
-from nodejax.types import (PyTree, Param, State, Input, Output,
+from nodejax.core.types import (PyTree, Param, State, Input, Output,
                                  ParamFn, InitFn, ApplyFn, LossFn, StaticTree)
-from nodejax.binding import Aux, REQUIRED, split_aux
-from nodejax.rng import KeyStream
-from nodejax.composite import Composite
-from nodejax.node import BaseNode, Node
-from nodejax.generic import (Generic, is_generic)
-from nodejax.pnode import (PNode)
-from nodejax.psnode import (PSNode)
-from nodejax.wrapper import (Wrapper)
-from nodejax.authoring import Leaf, derive
+from nodejax.core.binding import Aux, REQUIRED, split_aux
+from nodejax.core.rng import KeyStream
+from nodejax.core.composite import Composite
+from nodejax.core.node import BaseNode, Node
+from nodejax.core.generic import (Generic, is_generic)
+from nodejax.core.pnode import (PNode)
+from nodejax.core.psnode import (PSNode)
+from nodejax.core.wrapper import (Wrapper)
+from nodejax.core.authoring import Leaf, derive
 from nodejax.paths import replace_by_path, set_by_path
 from nodejax.transforms import (
     batch, unbatched, ensemble, reduce, stack, drop_aux, remat, repeat, scan, scanned, carried,
     trained, residual, train_step, supervised_ttt, next_step_ttt, reconstruction_ttt, finetune,
     taps, tie, externalize, parallel, at, reconstruction, next_step, freeze, tree_freeze, detach,
-    tree_detach, tree_filter, map_members, tile
+    tree_detach, sum_junction, state_reinit,
 )
-from nodejax.printing import (
+from nodejax.transforms.structure import map_members, tree_filter
+from nodejax.tree import tile
+from nodejax.core.printing import (
     statics_by_path, describe, tree_view, print_tree, summary, print_summary
 )
-from nodejax.transforms import sum_junction, state_reinit
-from nodejax.ambient import ambient, node
-from nodejax.compose import serial
+from nodejax.core.ambient import ambient, node
+from nodejax.core.compose import serial
 from nodejax import control
 from nodejax.control import closed_loop, observed_loop
-from nodejax.spec import spec, spec_of, materialize, meta
+from nodejax.core.spec import spec, spec_of, materialize, meta
 
 __all__ = [
     'Struct',

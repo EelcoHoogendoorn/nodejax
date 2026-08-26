@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from nodejax.types import PyTree
+from nodejax.core.types import PyTree
 
 import jax
 

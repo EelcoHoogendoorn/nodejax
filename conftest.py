@@ -6,8 +6,8 @@ not the extra targeted run, so a broad collection without ``--full`` stops
 here rather than costing that time.
 
 Breadth is measured by how many tests were collected, not by how the target
-was spelled, so ``pytest``, ``pytest nodejax`` and ``pytest nodejax/tests``
-are all caught the same way.
+was spelled, so broad collections across ``nodejax`` and ``examples`` are
+caught the same way.
 """
 
 import pytest
@@ -32,6 +32,6 @@ def pytest_collection_modifyitems(session, config, items):
         f'{len(items)} tests collected: this is the full suite, which takes '
         'minutes.\n'
         'While iterating, run the files you touched:\n'
-        '    pytest nodejax/tests/test_thing.py\n'
+        '    pytest nodejax/nn/tests/test_norm.py\n'
         'Before a commit, ask for it and run it in parallel:\n'
         '    pytest -n 8 -q --full')

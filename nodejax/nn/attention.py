@@ -5,12 +5,12 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from nodejax.node import Node
+from nodejax.core.node import Node
 from nodejax.struct import Struct
-from nodejax.ambient import node
-from nodejax.authoring import Leaf
-from nodejax.compose import serial
-from nodejax.transforms.residual import residual
+from nodejax.core.ambient import node
+from nodejax.core.authoring import Leaf
+from nodejax.core.compose import serial
+from nodejax.transforms.wiring.residual import residual
 from nodejax.nn.norm import LayerNorm
 from nodejax.nn.mlp import MLP
 

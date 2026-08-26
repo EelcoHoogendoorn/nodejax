@@ -6,10 +6,10 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax.ambient import node
-from nodejax.authoring import Leaf
-from nodejax.node import Node
-from nodejax.types import PyTree
+from nodejax.core.ambient import node
+from nodejax.core.authoring import Leaf
+from nodejax.core.node import Node
+from nodejax.core.types import PyTree
 
 
 @node

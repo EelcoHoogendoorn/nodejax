@@ -1,44 +1,60 @@
-"""Node transforms, written once against the contract.
+"""Semantic transform families with one flat public import surface."""
 
-Each transform consumes and produces nodes (closure), so they compose freely
-with each other and with pipes. Param-preserving transforms (batch, scan,
-repeat, residual, finetune) also accept bound Nodes and rebind;
-param-rewriting ones (ensemble, stack) require nodes. All lift over the
-static stage: applied to a generic they defer, commuting with
-specialization.
+from nodejax.transforms.axes import batch, ensemble, reduce, unbatched
+from nodejax.transforms.iteration import carried, repeat, scan, scanned, stack
+from nodejax.transforms.learning import (
+    finetune,
+    next_step,
+    next_step_ttt,
+    reconstruction,
+    reconstruction_ttt,
+    supervised_ttt,
+    trained,
+    train_step,
+)
+from nodejax.transforms.policy import (
+    detach,
+    drop_aux,
+    freeze,
+    remat,
+    state_reinit,
+    taps,
+    tree_detach,
+    tree_freeze,
+)
+from nodejax.transforms.structure import externalize, tie
+from nodejax.transforms.wiring import at, parallel, residual, sum_junction
 
-One file per transform; shared lifting helpers in common.py.
-"""
-
-from nodejax.transforms.batch import batch, unbatched
-from nodejax.transforms.ensemble import ensemble, reduce
-from nodejax.transforms.stack import stack
-from nodejax.transforms.drop_aux import drop_aux
-from nodejax.transforms.remat import remat
-from nodejax.transforms.repeat import repeat
-from nodejax.transforms.scan import scan, scanned, carried
-from nodejax.transforms.residual import residual
-from nodejax.transforms.train_step import train_step, trained
-from nodejax.transforms.ttt import (supervised_ttt, next_step_ttt,
-                                    reconstruction_ttt, next_step, reconstruction)
-from nodejax.transforms.finetune import finetune
-from nodejax.transforms.tie import tie
-from nodejax.transforms.taps import taps
-from nodejax.transforms.externalize import externalize
-from nodejax.transforms.parallel import parallel
-from nodejax.transforms.sum_junction import sum_junction
-from nodejax.transforms.boundary import state_reinit
-from nodejax.transforms.at import at
-from nodejax.transforms.freeze import freeze, tree_freeze, detach, tree_detach
-from nodejax.transforms.tree_utils import (
-    map_members, tile, tree_filter)
-from nodejax.printing import (
-    describe, statics_by_path, tree_view, print_tree, summary, print_summary)
-
-__all__ = ['batch', 'unbatched', 'ensemble', 'reduce', 'stack', 'drop_aux', 'remat', 'repeat',
-           'scan', 'scanned', 'carried', 'residual',
-           'train_step', 'trained', 'supervised_ttt', 'next_step_ttt', 'reconstruction_ttt',
-           'next_step', 'reconstruction', 'finetune', 'tie', 'taps', 'externalize',
-           'parallel', 'sum_junction', 'state_reinit', 'at', 'freeze', 'tree_freeze', 'detach',
-           'tree_detach', 'tree_filter', 'map_members', 'statics_by_path', 'describe', 'tile',
-           'tree_view', 'print_tree', 'summary', 'print_summary']
+__all__ = [
+    'batch',
+    'unbatched',
+    'ensemble',
+    'reduce',
+    'stack',
+    'repeat',
+    'scan',
+    'scanned',
+    'carried',
+    'train_step',
+    'trained',
+    'supervised_ttt',
+    'next_step_ttt',
+    'reconstruction_ttt',
+    'finetune',
+    'next_step',
+    'reconstruction',
+    'remat',
+    'freeze',
+    'tree_freeze',
+    'detach',
+    'tree_detach',
+    'state_reinit',
+    'taps',
+    'drop_aux',
+    'tie',
+    'externalize',
+    'at',
+    'residual',
+    'parallel',
+    'sum_junction',
+]

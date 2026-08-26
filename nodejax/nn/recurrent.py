@@ -5,10 +5,10 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from nodejax.node import Node
+from nodejax.core.node import Node
 from nodejax.struct import Struct
-from nodejax.ambient import node
-from nodejax.authoring import Leaf
+from nodejax.core.ambient import node
+from nodejax.core.authoring import Leaf
 
 
 @node
@@ -77,6 +77,46 @@ def GRU(hidden: int) -> Node:
         candidate = jnp.tanh(
             candidate_input @ param.candidate_weight + param.candidate_bias)
         hidden_value = (1.0 - update) * candidate + update * state
+        return hidden_value, hidden_value
+
+    return Leaf(apply, init=init, param=param)
+
+
+@node
+def MinGRU(hidden: int) -> Node:
+    """Minimal gated recurrent unit (Feng et al. 2024) with an inferred
+    input width.
+
+    Both the update gate and the candidate read only the current input,
+    never the state, so the state transition is linear and diagonal with
+    decay factors sigmoid-bounded inside (0, 1): transport along time is
+    contractive at any horizon. Curvature must come from blocks placed
+    around the cell.
+    """
+    def param(node, rng) -> Struct:
+        input_width = node.input.shape[-1]
+
+        def weight() -> jax.Array:
+            return (0.4 * jax.random.normal(rng.next(), (input_width, hidden))
+                    / jnp.sqrt(input_width))
+
+        return Struct(
+            update_weight=weight(),
+            update_bias=jnp.zeros(hidden),
+            candidate_weight=weight(),
+            candidate_bias=jnp.zeros(hidden),
+        )
+
+    def init(node, param) -> jax.Array:
+        return jnp.zeros(
+            node.input.shape[:-1] + (hidden,),
+            dtype=param.update_bias.dtype)
+
+    def apply(param, state, input) -> tuple[jax.Array, jax.Array]:
+        update = jax.nn.sigmoid(
+            input @ param.update_weight + param.update_bias)
+        candidate = input @ param.candidate_weight + param.candidate_bias
+        hidden_value = (1.0 - update) * state + update * candidate
         return hidden_value, hidden_value
 
     return Leaf(apply, init=init, param=param)

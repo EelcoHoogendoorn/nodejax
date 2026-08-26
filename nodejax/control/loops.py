@@ -8,12 +8,12 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax.ambient import node
-from nodejax.composite import (Composite)
-from nodejax.node import (Node)
-from nodejax.compose import composite
+from nodejax.core.ambient import node
+from nodejax.core.composite import (Composite)
+from nodejax.core.node import (Node)
+from nodejax.core.compose import composite
 from nodejax.control.blocks import Delay
-from nodejax.transforms import state_reinit
+from nodejax.transforms.policy import state_reinit
 
 
 

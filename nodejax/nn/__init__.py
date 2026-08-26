@@ -13,7 +13,7 @@ Organized into modular subfiles:
 - attention: Attention, TransformerBlock, PosEmbed, tokens
 - mlp: MLP, SwiGLU, MoE
 - embeddings: OneHot, Embed, Unembed
-- recurrent: RNN, GRU, LSTM
+- recurrent: RNN, GRU, MinGRU, LSTM
 - stochastic: Dropout, DropPath, GaussianNoise
 - filtering: EMA
 """
@@ -31,7 +31,7 @@ from nodejax.nn.spatial import (
 from nodejax.nn.attention import Attention, TransformerBlock, tokens, PosEmbed
 from nodejax.nn.mlp import MLP, SwiGLU, MoE
 from nodejax.nn.embeddings import OneHot, Embed, Unembed
-from nodejax.nn.recurrent import RNN, GRU, LSTM
+from nodejax.nn.recurrent import RNN, GRU, MinGRU, LSTM
 from nodejax.nn.stochastic import Dropout, DropPath, GaussianNoise
 from nodejax.nn.filtering import EMA
 
@@ -45,7 +45,7 @@ __all__ = [
     'Attention', 'TransformerBlock', 'tokens', 'PosEmbed',
     'MLP', 'SwiGLU', 'MoE',
     'OneHot', 'Embed', 'Unembed',
-    'RNN', 'GRU', 'LSTM',
+    'RNN', 'GRU', 'MinGRU', 'LSTM',
     'Dropout', 'DropPath', 'GaussianNoise',
     'EMA',
 ]

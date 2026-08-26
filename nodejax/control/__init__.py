@@ -12,7 +12,7 @@ Organized into modular subfiles:
 """
 
 from nodejax.control.pid import PID, PD
-from nodejax.transforms import sum_junction        # block-diagram vocabulary
+from nodejax.transforms.wiring import sum_junction        # block-diagram vocabulary
 from nodejax.control.loops import feedback, closed_loop, observed_loop
 from nodejax.control.blocks import (
     Quantize, Deadband, RateLimit, Clamp, ClampNorm, Delay, Diff, EMA,

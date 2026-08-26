@@ -6,8 +6,8 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax.ambient import node
-from nodejax.authoring import Leaf
+from nodejax.core.ambient import node
+from nodejax.core.authoring import Leaf
 
 
 flat = Leaf(lambda input: input.reshape(-1), name='flat')

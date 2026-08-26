@@ -1,11 +1,11 @@
 # Framework comparison
 
-[`nodejax/examples/comparisons/`](../nodejax/examples/comparisons/) compares
+[`examples/comparisons/`](../examples/comparisons/) compares
 NodeJAX with Flax NNX, Equinox, Flax Linen, Haiku, PyTorch, and Keras.
 
 ## Complex composition
 
-The [composition stress test](../nodejax/examples/comparisons/tower/) probes
+The [composition stress test](../examples/comparisons/tower/) probes
 whether transformed components remain composable when transforms become the
 architecture. It combines a residual recurrent depth stack, an ensemble, time
 recurrence, task-local adaptation, second-order MAML, and outer Adam training.
@@ -52,7 +52,7 @@ stacks their weights, leaving `trainable_variables` a flat list in which
 nothing records which value is a parameter, which is a running statistic, or
 what a leading axis counts.
 
-The [test-time-training comparison](../nodejax/examples/comparisons/ttt/) makes
+The [test-time-training comparison](../examples/comparisons/ttt/) makes
 the split exact. NodeJAX composes inner `train_step`, `next_step_ttt`,
 `scanned`, `batch`, outer `train_step`, and `trained`; every result is a Node.
 NNX adds local `TTT`, `Batched`, `TrainStep`, axis, and carry policies around a
@@ -67,7 +67,7 @@ one component state contract consumed unchanged by every enclosing transform.
 
 ## Chunked recurrence: control over state lifetime
 
-The [`chunk`](../nodejax/examples/comparisons/chunk/) comparison nests samples,
+The [`chunk`](../examples/comparisons/chunk/) comparison nests samples,
 chunks, and recordings to test whether state lifetime belongs to its component
 or leaks into control flow. Hidden state, normalization, and optimizer state
 each live across a different boundary.
@@ -100,40 +100,19 @@ The competing code must be audited, not read: omitting a reset still produces
 a valid program with wrong semantics. Only in NodeJAX is control over state
 lifetime not a leaky abstraction.
 
-## Reusable component transforms
+## Reusable transforms
 
-The [`residual`](../nodejax/examples/comparisons/residual/) comparison asks for
-exact compositionality in the smallest case: one wrapper that accepts every
-tested member, publishes its exact contract, and accepts its own output.
+The [`residual`](../examples/comparisons/residual/) comparison asks for compositionality in the smallest case: `input + body(input)`. NodeJAX, NNX, and Equinox can all implement and self-compose that unary case. The earlier NNX and Equinox RNG failures were mistakes in the comparison wrappers, not framework limits.
 
-The arithmetic is only `input + body(input)`. The complete NodeJAX transform is
-six lines and says exactly that; param, state, RNG, input, and aux behavior
-propagate through `self.body(input)`.
+The limit appears when residual must accept arbitrary framework-native members. NNX graph `Variable` state and explicit functional `Carry` use different calls and initialization interfaces. Equinox native `StatefulLayer` and `State` work through residual, while the returned-successor convention needed by the lifted-stack comparison is a different protocol again. A wrapper cannot infer which argument is the signal, where the output lives, how state starts, or which member methods an enclosing API requires.
 
-NNX and Equinox wrap this addition in protocol machinery. NNX's native `sow`
-and `capture` handle aux, but its wrapper inspects signatures and branches on
-RNG forwarding. Equinox also defines state and aux return conventions and
-reconstructs successor modules. Both mistake a nested deterministic residual
-for a stochastic component. A transform that rejects its own output is not
-compositional.
+The [lifted-stack comparison](../examples/comparisons/lift/) makes the consequence concrete: a state mechanism that composes through one transform may not compose through the next. Supporting each form requires another adapter for construction, state, RNG, aux, call binding, and member interfaces.
 
-The [stacked-component comparison](../nodejax/examples/comparisons/lift/) adds
-independent construction, sequential state, RNG splitting, optional aux, and
-strict RNG errors. NNX keeps its Module but locally defines axis, RNG, and
-Variable-class policy. Equinox partitions its Module into arrays and statics,
-reconstructs each layer inside `lax.scan`, then partitions and rebuilds every
-successor. Params and running state occupy one tree, so `filter_grad`
-differentiates both. [NodeJAX `stack`](../nodejax/transforms/stack.py) reads all
-of these roles from the contract.
-
-The result is not close. NodeJAX handles all five contexts, nests, and
-differentiates only params. NNX handles five but does not nest; Equinox handles
-four, does not nest, and differentiates running state. Both bury the stack
-under protocol machinery yet produce incomplete transforms.
+A truly set-and-forget residual therefore needs something close to NodeJAX's Def and Contract machinery. The six-line NodeJAX transform is small because those facts already have one representation, not because forwarding them is intrinsically simple. Its own apply remains explicitly unary; supporting additional runtime arguments would still require the transform to declare which field is the residual signal.
 
 ## Generic construction
 
-The [`generics`](../nodejax/examples/comparisons/generics/) comparison leaves
+The [`generics`](../examples/comparisons/generics/) comparison leaves
 width, depth, ensemble size, and nested temperature unresolved. NodeJAX keeps
 that unfinished architecture composable and specializes it by tree path.
 
@@ -154,7 +133,7 @@ architectural statics.
 
 ## IMU: setup and input propagation
 
-The [`imu`](../nodejax/examples/comparisons/imu/) pipeline combines derivatives
+The [`imu`](../examples/comparisons/imu/) pipeline combines derivatives
 requiring priming values, additive noise, drifting random bias, and
 quantization to test whether composition also propagates setup.
 
@@ -170,7 +149,7 @@ RNG in `IMU.__init__`; Equinox repeats the topology in `IMUState`, `init`, and
 
 ## Parameter sharing
 
-The [`tie`](../nodejax/examples/comparisons/tie/) comparison isolates how each
+The [`tie`](../examples/comparisons/tie/) comparison isolates how each
 framework represents one shared parameter. NNX and PyTorch reuse one object;
 Haiku reuses a parameter path; Equinox uses `eqx.nn.Shared`; NodeJAX stores one
 parameter value and explicitly routes it to both uses.
@@ -189,9 +168,7 @@ route.
    training procedures.
 2. NodeJAX wins state-lifetime composition. Lifetime policy stays attached to
    the stateful Node while enclosing scans and trainers change.
-3. NodeJAX wins reusable transform authoring. Its checked transforms preserve
-   one contract and accept their own products; the checked NNX and Equinox
-   wrappers require local protocols and fail exact closure.
+3. NodeJAX wins reusable transform authoring. Its transforms preserve one common contract. NNX and Equinox compose within selected local protocols, but transparent reuse across construction, initialization, calls, state, aux, and member interfaces requires protocol-specific adapters that collectively recreate such a contract.
 4. NodeJAX wins generic construction and composed setup. Unresolved statics,
    priming, parameter construction, and RNG routing remain in program
    composition instead of constructor plumbing.

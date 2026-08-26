@@ -5,7 +5,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from nodejax.authoring import Leaf
+from nodejax.core.authoring import Leaf
 
 
 gelu = Leaf(lambda input: jax.nn.gelu(input), name='gelu')
