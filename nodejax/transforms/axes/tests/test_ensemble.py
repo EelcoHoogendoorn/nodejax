@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from nodejax import Composite, Leaf, ensemble, nn
+from nodejax import Composite, Leaf, ensemble, nn, reduce, split_aux
 from nodejax.struct import Struct
 
 
@@ -21,7 +21,7 @@ def test_ensemble_of_resolved_pipe():
     assert population.apply(X).shape == (4, 32, 1)
 
 
-def test_ensemble_of_composite_with_nonparametric_first_member():
+def test_ensemble_of_composite_with_nonparametric_first_member() -> None:
     identity = Leaf(lambda input: input).node
     members = Composite(
         identity=identity,
@@ -36,7 +36,15 @@ def test_ensemble_of_composite_with_nonparametric_first_member():
         jnp.zeros(4),
     ).parameterize(rng=jax.random.PRNGKey(0))
 
-    assert population.apply(jnp.ones(4)).shape == (3, 2)
+    assert jax.jit(population.apply)(jnp.ones(4)).shape == (3, 2)
+
+
+def test_reduce_returns_the_mean_and_retains_the_population() -> None:
+    reducer = reduce(jnp.mean).with_input(jnp.zeros(3)).parameterize()
+    output, aux = split_aux(reducer.apply(jnp.asarray((1.0, 4.0, 10.0))))
+
+    assert output == 5.0
+    assert jnp.array_equal(aux.population, jnp.asarray((1.0, 4.0, 10.0)))
 
 
 def test_the_declared_size_is_the_size():
