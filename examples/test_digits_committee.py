@@ -39,7 +39,7 @@ import optax
 from sklearn.datasets import load_digits
 
 from nodejax import (Node, Leaf, serial, ensemble, stack, scan, scanned, trained, residual,
-                     batch, train_step, tree_freeze, tree_filter, ambient, nn)
+                     batch, train_step, tree_filter, ambient, nn)
 from nodejax.struct import Struct
 
 HIDDEN, MEMBERS, LAYERS = 24, 3, 2
@@ -146,15 +146,12 @@ def test_trains_on_real_digits():
     _, logits_b = final(input=X_train[:BATCH], rng=jax.random.PRNGKey(3))
     assert not jnp.allclose(logits_a, logits_b)
 
-    # MODE SWITCH, on one object: specialize rebuilds the dropout leaves
+    # MODE SWITCH, on one object: eval_mode rebuilds the dropout leaves
     # as identities (their mask streams pruned from the carried state),
-    # tree_freeze pins the whitening moments it holds, the same params
-    # ride. Nothing stochastic and nothing accumulating remains, so the
-    # evaluator is NON-CYCLIC: a plain function of the images.
-    eval_node = final.specialize(**{'*.train': False})
-    evaluator = tree_freeze(
-        eval_node.bind(final.param, state=final.state),
-        tag='running_stats')
+    # pins the whitening moments, and rebinds the same params. Nothing
+    # stochastic and nothing accumulating remains, so the evaluator is
+    # NON-CYCLIC: a plain function of the images.
+    evaluator = nn.eval_mode(final)
     assert not evaluator.cyclic and evaluator.state == ()
 
     _, logits1 = evaluator(X_test)

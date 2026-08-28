@@ -16,6 +16,7 @@ Organized into modular subfiles:
 - recurrent: RNN, GRU, MinGRU, LSTM
 - stochastic: Dropout, DropPath, GaussianNoise
 - filtering: EMA
+- mode: eval_mode
 """
 
 from nodejax.nn.linear import Linear, Projection, flat, Reshape
@@ -34,6 +35,7 @@ from nodejax.nn.embeddings import OneHot, Embed, Unembed
 from nodejax.nn.recurrent import RNN, GRU, MinGRU, LSTM
 from nodejax.nn.stochastic import Dropout, DropPath, GaussianNoise
 from nodejax.nn.filtering import EMA
+from nodejax.nn.mode import eval_mode
 
 __all__ = [
     'Linear', 'Projection', 'flat', 'Reshape',
@@ -48,4 +50,5 @@ __all__ = [
     'RNN', 'GRU', 'MinGRU', 'LSTM',
     'Dropout', 'DropPath', 'GaussianNoise',
     'EMA',
+    'eval_mode',
 ]

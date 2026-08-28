@@ -39,3 +39,21 @@ def test_projection_removes_the_feature_axis_and_ensemble_adds_one() -> None:
     assert projection.apply(jnp.ones(4)).shape == ()
     assert linear.param.w.shape == (3, 4)
     assert linear.apply(jnp.ones(4)).shape == (3,)
+
+
+def test_linear_and_projection_accept_parameter_initializers() -> None:
+    key = jax.random.PRNGKey(0)
+    linear = nn.Linear(
+        3,
+        weight_init=jax.nn.initializers.zeros,
+        bias_init=jax.nn.initializers.ones,
+    ).with_input(jnp.zeros(4)).parameterize(rng=key)
+    projection = nn.Projection(
+        weight_init=jax.nn.initializers.zeros,
+        bias_init=jax.nn.initializers.ones,
+    ).with_input(jnp.zeros(4)).parameterize(rng=key)
+
+    assert jnp.array_equal(linear.param.w, jnp.zeros((4, 3)))
+    assert jnp.array_equal(linear.param.b, jnp.ones(3))
+    assert jnp.array_equal(projection.param.w, jnp.zeros(4))
+    assert jnp.array_equal(projection.param.b, jnp.ones(()))
