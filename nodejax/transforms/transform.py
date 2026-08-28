@@ -20,8 +20,9 @@ from nodejax.core.node import Node, _is_node
 from nodejax.core.pnode import PNode
 from nodejax.core.psnode import PSNode
 from nodejax.core.rng import MaybeKeyStream
-from nodejax.core.spec import add_axis, axis_count, element_spec, tree_first
+from nodejax.core.spec import add_axis, axis_count, element_spec
 from nodejax.struct import Struct
+from nodejax.tree import tree_first
 
 
 _NO_STATE = object()
@@ -152,7 +153,11 @@ def _record_state(output, state, name):
     return clean, Aux(**fields, state=state)
 
 
-def scan_inputs(step: Contract, input: Struct) -> Struct:
+def scan_inputs(
+    step: Contract,
+    input: Struct,
+    length: int | None = None,
+) -> Struct:
     """Validate that every input field carries one common sequence axis."""
     leaves = jax.tree.leaves(input)
     if not leaves:
@@ -166,14 +171,18 @@ def scan_inputs(step: Contract, input: Struct) -> Struct:
     count = jnp.shape(leaves[0])[0]
     if any(jnp.shape(leaf)[0] != count for leaf in leaves[1:]):
         raise TypeError(f'scan({step.name}) input axes have unequal lengths')
+    if length is not None and count != length:
+        raise TypeError(
+            f'scan({step.name}) input axis has {count} steps; '
+            f'expected n={length}')
 
     return input
 
 
 def scan_steps(step: Contract, param, state, inputs, rng: MaybeKeyStream, *,
-               record: bool = False):
+               record: bool = False, length: int | None = None):
     """Run one stateful node over a sequence with per-step RNG streams."""
-    inputs = scan_inputs(step, inputs)
+    inputs = scan_inputs(step, inputs, length)
     leaves = jax.tree.leaves(inputs)
     if step.apply_takes_rng and not leaves:
         raise TypeError(
@@ -190,7 +199,7 @@ def scan_steps(step: Contract, param, state, inputs, rng: MaybeKeyStream, *,
                    if record else output)
         return successor, emitted
 
-    return jax.lax.scan(body, state, (inputs, rngs))
+    return jax.lax.scan(body, state, (inputs, rngs), length=length)
 
 
 def _preserved_roles(preserves) -> tuple[str, ...]:

@@ -118,13 +118,18 @@ class Wrapped:
         self.operand = operand
 
     def roles(self, *, param=None, init=None, prime=None, apply=None,
-              name=None, param_takes_rng=None, init_takes_rng=None,
+              name=None, requires_input=None,
+              param_takes_rng=None, init_takes_rng=None,
               apply_takes_rng=None, input_spec=_KEEP,
               apply_fields=None, open: bool = False,
               tags=None, boundary: Mapping = _EMPTY_MAPPING,
               methods: Mapping = _EMPTY_MAPPING,
               destructurable=True, destructurable_state=True):
-        """Build a wrapper by replacing roles with ordinary T3 functions."""
+        """Build a wrapper by replacing roles with ordinary T3 functions.
+
+        ``requires_input`` can promote an inherited init into a prime, or
+        demote a prime into an init, when that replacement role is supplied.
+        """
         if not _is_node(self.operand):
             raise TypeError('Wrapper.roles requires a complete member Node')
         member_name = self.member_name
@@ -141,6 +146,7 @@ class Wrapped:
         )
         calls = definition.contract._roles(
             param=param, init=init, prime=prime, apply=apply,
+            requires_input=requires_input,
             param_takes_rng=param_takes_rng,
             init_takes_rng=init_takes_rng,
             apply_takes_rng=apply_takes_rng,
@@ -149,7 +155,8 @@ class Wrapped:
         )
         options = dict(
             param=param, init=init, prime=prime, apply=apply,
-            name=name, param_takes_rng=param_takes_rng,
+            name=name, requires_input=requires_input,
+            param_takes_rng=param_takes_rng,
             init_takes_rng=init_takes_rng,
             apply_takes_rng=apply_takes_rng,
             input_spec=input_spec,

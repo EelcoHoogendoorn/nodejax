@@ -156,9 +156,18 @@ def _contains_axis(spec: Any) -> bool:
 
 def _counts_unknown(spec: Any) -> bool:
     """Whether any fixed axis still lacks its extent."""
-    return any(type(leaf) is AxisSpec and leaf.fixed and leaf.count is None
-               for leaf in jax.tree.leaves(
-                   spec, is_leaf=lambda x: type(x) is AxisSpec))
+    axes = jax.tree.leaves(
+        spec,
+        is_leaf=lambda value: type(value) is AxisSpec,
+    )
+    return any(
+        type(axis) is AxisSpec
+        and (
+            (axis.fixed and axis.count is None)
+            or _counts_unknown(axis.element)
+        )
+        for axis in axes
+    )
 
 
 def _bind_axis(declared: Any, got: Any) -> Any:
@@ -172,14 +181,20 @@ def _bind_axis(declared: Any, got: Any) -> Any:
             count = declared.count
             if declared.fixed and count is None:
                 count = got.count
-            return declared.replace(element=got.element, count=count)
+            return declared.replace(
+                element=_bind_axis(declared.element, got.element),
+                count=count,
+            )
         leaves = jax.tree.leaves(got)
         count = leaves[0].shape[0] if leaves and leaves[0].shape else None
         element = jax.tree.map(
             lambda l: jax.ShapeDtypeStruct(l.shape[1:], l.dtype), got)
+        bound_count = declared.count
+        if declared.fixed and bound_count is None:
+            bound_count = count
         return declared.replace(
-            element=element,
-            count=count if declared.fixed else declared.count,
+            element=_bind_axis(declared.element, element),
+            count=bound_count,
         )
     if (issubclass(type(declared), Struct)
             and issubclass(type(got), Struct)):
@@ -297,13 +312,15 @@ def _validate_spec(where: str, spec: Any, got: Any) -> None:
 
     RNG is not represented here: public binding has already converted the raw
     key into a separate invocation capability."""
+    if spec is REQUIRED:
+        return
     if type(spec) is AxisSpec:
         if type(got) is AxisSpec:
             if (spec.fixed and spec.count is not None and got.count is not None
                     and spec.count != got.count):
                 raise TypeError(f'{where}: axis of {got.count} conflicts '
                                 f'with the declared count {spec.count}')
-            _validate_spec(where, spec.element, got.element)
+            _validate_spec(f'{where}.element', spec.element, got.element)
             return
         from nodejax.core.spec import spec_of
         gleaves = jax.tree.leaves(spec_of(got))
@@ -323,11 +340,7 @@ def _validate_spec(where: str, spec: Any, got: Any) -> None:
                             f'the declared count {spec.count}')
         element = jax.tree.map(
             lambda l: jax.ShapeDtypeStruct(l.shape[1:], l.dtype), spec_of(got))
-        if _spec_sig(spec.element) != _spec_sig(element):
-            raise TypeError(
-                f'{where}: input with axis over element {_spec_sig(element)[1]} '
-                f'conflicts with the declared element '
-                f'{_spec_sig(spec.element)[1]}')
+        _validate_spec(f'{where}.element', spec.element, element)
         return
     if (issubclass(type(spec), Struct)
             and issubclass(type(got), Struct)):

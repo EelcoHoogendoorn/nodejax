@@ -4,19 +4,29 @@ from nodejax.core.binding import split_aux
 from nodejax.core.contract import Contract
 from nodejax.core.node import Node
 from nodejax.core.pnode import PNode
-from nodejax.core.spec import add_axis, element_spec, tree_first
+from nodejax.core.spec import add_axis, element_spec
 from nodejax.struct import Struct
+from nodejax.tree import tree_first
 from nodejax.transforms.transform import scan_inputs, scan_steps, transform
 from nodejax.core.wrapper import Wrapper
 
 
-def _sequence_spec(inner: Contract):
-    """Lift a step input specification over a variable-length time axis."""
-    step = inner.input_spec
-    if step is None:
+def _sequence_spec(inner: Contract, n: int | None = None):
+    """Lift a step input specification over one sequence axis."""
+    step = inner._def.calls.apply.input_spec
+    if (
+        step is None
+        and n is not None
+        and inner.apply_fields
+        and not inner._apply_form.open
+    ):
+        step = inner._apply_form.declaration
+    if step is None or (issubclass(type(step), Struct) and not step):
         return None
     return Struct(**{
-        k: add_axis(v, fixed=False) for k, v in step.__items__})
+        key: add_axis(value, n, fixed=n is not None)
+        for key, value in step.__items__
+    })
 
 
 def _state_at_first_step(inner: Contract, param, state_input, data, rng, *,
@@ -32,13 +42,6 @@ def _state_at_first_step(inner: Contract, param, state_input, data, rng, *,
     if bundled:
         element = inner.intake(element)
     return inner.prime(param, state_input, element, rng)
-
-
-def _prime_from_first_element(contract, param, state_input, input, rng):
-    """Prime the step's state from the sequence's first real element."""
-    current = contract.members.step
-    return _state_at_first_step(
-        current, param, state_input, input, rng, bundled=False)
 
 
 def _element_initialize(contract, param, state_input, rng):
@@ -89,21 +92,32 @@ def _check_claim(inner: Contract, boundary):
 
 @transform(preserves='param,state')
 def scan(step: Node, record: bool = False,
-         boundary: str | None = None) -> Node | PNode:
+         boundary: str | None = None,
+         n: int | None = None) -> Node | PNode:
     """Run ``step`` over a sequence while keeping its state external.
 
     The supplied state becomes the initial carry and the returned state can be
     passed to another call, making this form suitable for chunks or open-ended
     streams. ``boundary`` may reinitialize matching state slots at the start
     of each call. ``record=True`` adds the state trajectory to the auxiliary
-    output.
+    output. ``n`` declares and enforces a fixed sequence length; without it,
+    the sequence length may change between calls.
     """
     if not step.cyclic:
         raise TypeError(f'scan requires a cyclic node, got {step!r}')
+    if n is not None and (type(n) is not int or n < 1):
+        raise TypeError(f'scan n must be a positive int, got {n!r}')
     _check_claim(step.contract, boundary)
+
+    def prime_fn(contract, param, state_input, input, rng):
+        current = contract.members.step
+        input = scan_inputs(current, input, n)
+        return _state_at_first_step(
+            current, param, state_input, input, rng, bundled=False)
 
     def apply_fn(contract, param, state, input, rng):
         current = contract.members.step
+        input = scan_inputs(current, input, n)
         start = state
         if boundary is not None:
             start = current.merge_boundary(
@@ -118,14 +132,21 @@ def scan(step: Node, record: bool = False,
                 ),
                 boundary)
         return scan_steps(
-            current, param, start, input, rng, record=record)
+            current,
+            param,
+            start,
+            input,
+            rng,
+            record=record,
+            length=n,
+        )
 
-    sequence_spec = _sequence_spec(step.contract)
+    sequence_spec = _sequence_spec(step.contract, n)
     return Wrapper(step=step).roles(
         name=f'scan({step.name})',
         param=_sequence_parameterize('step'),
         init=_element_initialize,
-        prime=_prime_from_first_element,
+        prime=prime_fn,
         apply=apply_fn,
         input_spec=sequence_spec,
         apply_takes_rng=(

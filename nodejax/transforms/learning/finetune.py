@@ -3,8 +3,9 @@ from __future__ import annotations
 from nodejax.core.ambient import node
 from nodejax.core.node import BaseNode, Node
 from nodejax.core.pnode import PNode
-from nodejax.core.spec import add_axis, element_spec, tree_first
+from nodejax.core.spec import add_axis, element_spec
 from nodejax.struct import Struct
+from nodejax.tree import tree_first
 from nodejax.transforms.transform import scan_steps
 from nodejax.transforms.learning.train_step import _require_train_step
 from nodejax.core.wrapper import Wrapper

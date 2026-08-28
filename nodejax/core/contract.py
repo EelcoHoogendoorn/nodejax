@@ -329,12 +329,9 @@ def _definition_slots(definition, value: Any, role: str, *,
         raise TypeError(
             f'{path or definition.name}: composite {role} must be a Struct')
 
-    unknown = set(supplied.__keys__) - set(definition.members.__keys__)
-    if unknown:
-        raise TypeError(
-            f'{path or definition.name}: unknown {role} members '
-            f'{sorted(unknown)}')
-
+    # An overcomplete record binds: the definition selects the members it
+    # names and extra record members fall away. A misnamed member still
+    # fails loudly, through the missing slot it leaves behind.
     values = {}
     param_members = definition.layout.param_members
     for name, member in definition.members.__items__:
@@ -534,6 +531,7 @@ class Contract:
         return self._def.tags
 
     def _roles(self, *, param=None, init=None, prime=None, apply=None,
+               requires_input=None,
                param_takes_rng=None, init_takes_rng=None,
                apply_takes_rng=None, input_spec=_KEEP,
                apply_fields=None, open: bool = False):
@@ -545,23 +543,41 @@ class Contract:
         as ``input``. Prime receives the real runtime value under the same
         name. This contract decides which roles exist, whether init or prime
         applies, their call forms, and their public RNG requirements.
-        ``init=False`` removes state from the result. ``apply_fields`` declares
-        a replacement required-field form; ``open`` also permits undeclared
-        side fields.
+        ``requires_input`` may explicitly switch an existing initializer
+        between those forms when the corresponding replacement is supplied.
+        ``init=False`` removes state from the result. ``apply_fields``
+        declares a replacement required-field form; ``open`` also permits
+        undeclared side fields.
         """
         calls = self._def.calls
+        if requires_input is not None:
+            if type(requires_input) is not bool:
+                raise TypeError('requires_input must be a bool or None')
+            if calls.init is None:
+                raise TypeError(
+                    'requires_input cannot describe an absent init role')
         if calls.param is not None and param is not None:
             calls = calls.copy(param=_lower_param(param, calls.param))
         if init is False:
-            if prime is not None:
-                raise TypeError('init=False cannot be combined with prime=')
+            if prime is not None or requires_input is not None:
+                raise TypeError(
+                    'init=False cannot be combined with prime= or '
+                    'requires_input=')
             calls = calls.copy(init=None)
         elif calls.init is not None:
-            initializer = prime if calls.init.requires_input else init
+            primes = (
+                calls.init.requires_input
+                if requires_input is None else requires_input
+            )
+            initializer = prime if primes else init
             if initializer is not None:
                 calls = calls.copy(init=_lower_init(
                     initializer, calls.init,
-                    primes=calls.init.requires_input))
+                    primes=primes))
+            elif primes != calls.init.requires_input:
+                role = 'prime' if primes else 'init'
+                raise TypeError(
+                    f'requires_input changes the init role; supply {role}=')
         if apply is not None:
             calls = calls.copy(apply=_lower_apply(apply, calls.apply))
 
@@ -650,8 +666,8 @@ class Contract:
                      bundled: bool = False):
         """Resolve one wire, or an explicitly formed bundle when requested."""
         from nodejax.core.binding import (
-            _bind_axis, _contains_axis, _counts_unknown, _spec_resolved,
-            _validate_spec, validate_input_spec,
+            _bind_axis, _contains_axis, _counts_unknown, _validate_spec,
+            validate_input_spec,
         )
         from nodejax.core.spec import spec_of
 
@@ -666,7 +682,7 @@ class Contract:
             validate_input_spec(self._def, got)
             if not _counts_unknown(declared):
                 return self._def
-        elif _contains_axis(declared) and _spec_resolved(declared):
+        elif _contains_axis(declared):
             _validate_spec(self._def.name, declared, got)
         resolved = _bind_axis(declared, got)
         return self._def.copy(

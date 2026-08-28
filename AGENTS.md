@@ -67,6 +67,8 @@ layers, or proxy types merely to make private mutation impossible.
 
 A Node is called a Node. In prose, comments, and docstrings, never substitute “component” merely for variety. Use “component” only when it denotes a genuinely different concept rather than a NodeJAX Node.
 
+Inside an `@node` factory, do not repeat the factory's snake-case name in the returned `Leaf`, `Wrapper`, or `Composite`. Leave `name` unset and let `@node` assign it. Supply `name` only when the Node intentionally needs a different public name.
+
 ## Polymorphism and type probing
 
 In NodeJAX library code and first-party NodeJAX examples, `hasattr` and

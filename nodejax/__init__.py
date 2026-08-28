@@ -26,7 +26,9 @@ from nodejax.transforms import (
     tree_detach, sum_junction, state_reinit,
 )
 from nodejax.transforms.structure import map_members, tree_filter
-from nodejax.tree import tile
+from nodejax.tree import (
+    tile, tree_first, tree_last, tree_stop_gradient,
+)
 from nodejax.core.printing import (
     statics_by_path, describe, tree_view, print_tree, summary, print_summary
 )
@@ -54,7 +56,7 @@ __all__ = [
     'batch', 'unbatched', 'ensemble', 'reduce', 'stack', 'drop_aux', 'remat', 'repeat', 'scan', 'scanned', 'carried', 'residual', 'train_step', 'trained', 'supervised_ttt', 'next_step_ttt', 'reconstruction_ttt',
     'finetune', 'tie', 'taps', 'externalize', 'parallel', 'sum_junction', 'state_reinit', 'at',
     'next_step', 'reconstruction',
-    'freeze', 'tree_freeze', 'detach', 'tree_detach', 'tree_filter', 'map_members', 'statics_by_path', 'describe', 'tile', 'set_by_path', 'replace_by_path', 'closed_loop', 'observed_loop',
+    'freeze', 'tree_freeze', 'detach', 'tree_detach', 'tree_filter', 'map_members', 'statics_by_path', 'describe', 'tile', 'tree_first', 'tree_last', 'tree_stop_gradient', 'set_by_path', 'replace_by_path', 'closed_loop', 'observed_loop',
     'tree_view', 'print_tree', 'summary', 'print_summary',
     # composition
     'serial',

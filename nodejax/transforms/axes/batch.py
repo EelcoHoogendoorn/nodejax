@@ -5,8 +5,9 @@ import jax.numpy as jnp
 
 from nodejax.core.contract import Contract
 from nodejax.core.node import Node
-from nodejax.core.spec import element_spec, add_axis, axis_count, tree_first
+from nodejax.core.spec import element_spec, add_axis, axis_count
 from nodejax.struct import Struct
+from nodejax.tree import tree_first
 from nodejax.transforms.transform import transform, vmap_apply, vmap_prime
 from nodejax.core.wrapper import Wrapper
 

@@ -69,7 +69,7 @@ def materialize(tree: PyTree) -> PyTree:
                     f'{l!r}; bind an input, or construct with the count')
             return jax.tree.map(
                 lambda e: jnp.zeros((l.count, *e.shape), e.dtype),
-                spec_of(l.element))
+                spec_of(materialize(l.element)))
         return (jnp.zeros(l.shape, l.dtype)
                 if type(l) is jax.ShapeDtypeStruct else l)
     return jax.tree.map(leaf, tree, is_leaf=lambda x: type(x) is AxisSpec)
@@ -87,18 +87,22 @@ def add_axis(spec: PyTree, n: int | None = None, *,
 
 
 def axis_count(spec: PyTree) -> int | None:
-    """The declared axis extent of a bundle spec: the first field's count
-    (every field declaring one shares the axis), or the leading data axis
-    of a resolved spec without one. None when nothing says."""
+    """The declared axis extent of a bundle spec: the first populated field's
+    count (every field declaring one shares the axis), or the leading data
+    axis of a resolved spec without one. None when nothing says."""
     def lead(tree):
-        leaves = jax.tree.leaves(tree)
-        return leaves[0].shape[0] if leaves and leaves[0].shape else None
+        leaves = jax.tree.leaves(
+            tree,
+            is_leaf=lambda value: type(value) is AxisSpec,
+        )
+        if not leaves:
+            return None
+        leaf = leaves[0]
+        if type(leaf) is AxisSpec:
+            return leaf.count
+        return leaf.shape[0] if leaf.shape else None
 
     if spec is None:
-        return None
-    if issubclass(type(spec), Struct):
-        for _, v in spec.__items__:
-            return v.count if type(v) is AxisSpec else lead(v)
         return None
     return spec.count if type(spec) is AxisSpec else lead(spec)
 
@@ -114,11 +118,6 @@ def element_spec(spec: PyTree) -> PyTree:
             spec, is_leaf=lambda x: type(x) is AxisSpec)
     return jax.tree.map(
         lambda leaf: jax.ShapeDtypeStruct(leaf.shape[1:], leaf.dtype), spec_of(spec))
-
-
-def tree_first(tree: PyTree) -> PyTree:
-    """Take the first element from every leaf of an axis-carrying value."""
-    return jax.tree.map(lambda leaf: leaf[0], tree)
 
 
 def meta(pnode: PNode, input_spec: PyTree | None = None,

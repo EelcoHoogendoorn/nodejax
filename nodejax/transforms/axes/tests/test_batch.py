@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from nodejax import batch, Leaf, nn, stack
+from nodejax import batch, Leaf, materialize, nn, stack
 from nodejax.struct import Struct
 from nodejax.control import Gain, Integrator
 
@@ -13,6 +13,50 @@ def test_batch():
     b = batch(Gain()).parameterize(scale=jnp.array(2.0))
     out = b.apply(jnp.array([1.0, 2.0, 4.0]))
     assert jnp.allclose(out, jnp.array([2.0, 4.0, 8.0]))
+
+
+def test_batch_of_batch_accepts_a_nested_struct_input():
+    input_spec = Struct(
+        state=Struct(
+            angle=jnp.zeros(()),
+            velocity=jnp.zeros(()),
+        ),
+        memory=jnp.zeros(4),
+    )
+
+    def parameterize():
+        return jnp.asarray(2.0)
+
+    def apply(param, input):
+        return param * (
+            input.state.angle
+            + input.state.velocity
+            + jnp.sum(input.memory)
+        )
+
+    critic = Leaf(
+        apply,
+        param=parameterize,
+        apply_input_spec=input_spec,
+        name='critic',
+    )
+    model = batch(batch(critic, n=3), n=2).parameterize()
+    angle = jnp.arange(6.0).reshape(2, 3)
+    input = Struct(
+        state=Struct(
+            angle=angle,
+            velocity=jnp.ones((2, 3)),
+        ),
+        memory=jnp.ones((2, 3, 4)),
+    )
+    output = jax.jit(model.apply)(input)
+    declared = materialize(model.contract.input_spec).input
+
+    assert output.shape == (2, 3)
+    assert jnp.allclose(output, 2.0 * (angle + 5.0))
+    assert declared.state.angle.shape == (2, 3)
+    assert declared.state.velocity.shape == (2, 3)
+    assert declared.memory.shape == (2, 3, 4)
 
 
 def test_batch_cyclic():

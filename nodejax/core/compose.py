@@ -27,8 +27,9 @@ from nodejax.core.generic import Generic, is_generic
 from nodejax.core.lifting import _compile_init, _compile_param, _keys_only
 from nodejax.core.node import BaseNode, Node, _is_node, _view
 from nodejax.core.rng import MaybeKeyStream, _reject_no_rng
-from nodejax.core.spec import materialize, spec_of, tree_first
+from nodejax.core.spec import materialize, spec_of
 from nodejax.struct import Struct
+from nodejax.tree import tree_first
 from nodejax.core.wiring import (
     _BuildingWired, _InitWired, _Member, _authored, _wrap_apply,
 )

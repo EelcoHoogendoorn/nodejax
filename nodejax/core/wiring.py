@@ -91,6 +91,12 @@ class _Wired:
         for k, v in kwargs.items():
             self._aux[k] = v
 
+    @property
+    def __items__(self):
+        """Member handles as (name, handle) pairs, mirroring Struct."""
+        return tuple((name, self.__getattr__(name))
+                     for name in self._members.__keys__)
+
     def __getattr__(self, name):
         if name.startswith('_'):
             raise AttributeError(name)
@@ -310,6 +316,12 @@ class _InitWired:
             self._build(name, _NO_INPUT)
         return self._work[name]
 
+    @property
+    def __items__(self):
+        """Member handles as (name, handle) pairs, mirroring Struct."""
+        return tuple((name, self.__getattr__(name))
+                     for name in self._defs.__keys__)
+
     def __getattr__(self, name):
         if name.startswith('_'):
             raise AttributeError(name)
@@ -513,6 +525,12 @@ class _BuildingWired:
                     self._rng.child(d.contract.param_takes_rng),
                     input_spec=self._specs.get(name), bundled=True)
         return Struct(**out)
+
+    @property
+    def __items__(self):
+        """Member handles as (name, handle) pairs, mirroring Struct."""
+        return tuple((name, self.__getattr__(name))
+                     for name in self._defs.__keys__)
 
     def __getattr__(self, name):
         if name.startswith('_'):

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Callable
 
-import jax
-
 from nodejax.core.node import Node
 from nodejax.struct import Struct
+from nodejax.tree import tree_stop_gradient
 from nodejax.transforms.transform import transform
 from nodejax.core.wrapper import Wrapper
 
@@ -20,7 +19,7 @@ def detach(inner: Node) -> Node:
 
     def apply_fn(contract, param, state, input, rng):
         return contract.members.inner.apply(
-            jax.lax.stop_gradient(param), state, input, rng)
+            tree_stop_gradient(param), state, input, rng)
 
     return Wrapper(inner=inner).roles(
         name=f'detach({inner.name})',

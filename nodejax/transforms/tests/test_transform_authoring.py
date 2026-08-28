@@ -118,3 +118,74 @@ def test_authored_wrapper_preserves_resolved_member_input():
 
     assert output == 5.0
     assert successor.state == 1.0
+
+
+def test_wrapper_roles_can_promote_init_to_runtime_priming():
+    source = nx.control.Integrator()
+
+    def prime(input):
+        return input
+
+    promoted = nx.Wrapper(inner=source).roles(
+        prime=prime,
+        requires_input=True,
+    )
+    assert promoted.contract.init_requires_input
+
+    bound = promoted.parameterize(decay=0.0).initialize(
+        input=jnp.asarray(3.0),
+    )
+    successor, output = bound.apply(jnp.asarray(2.0))
+
+    assert output == 5.0
+    assert successor.state == 5.0
+
+
+def test_wrapper_roles_can_demote_priming_to_plain_init():
+    def prime(input):
+        return input
+
+    source = nx.Leaf(
+        lambda state, input: (state + input, state + input),
+        init=prime,
+    )
+
+    def init():
+        return jnp.asarray(3.0)
+
+    demoted = nx.Wrapper(inner=source).roles(
+        init=init,
+        requires_input=False,
+    )
+    assert not demoted.contract.init_requires_input
+
+    bound = demoted.initialize()
+    successor, output = bound.apply(jnp.asarray(2.0))
+
+    assert output == 5.0
+    assert successor.state == 5.0
+
+
+def test_wrapper_roles_requires_a_matching_initializer_when_promoted():
+    source = nx.control.Integrator()
+
+    with pytest.raises(TypeError, match='supply prime='):
+        nx.Wrapper(inner=source).roles(requires_input=True)
+
+    with pytest.raises(TypeError, match='must be a bool'):
+        nx.Wrapper(inner=source).roles(
+            prime=lambda input: input,
+            requires_input='yes',
+        )
+
+    with pytest.raises(TypeError, match='absent init role'):
+        nx.Wrapper(inner=nx.control.Gain()).roles(
+            prime=lambda input: input,
+            requires_input=True,
+        )
+
+    with pytest.raises(TypeError, match='cannot be combined'):
+        nx.Wrapper(inner=source).roles(
+            init=False,
+            requires_input=True,
+        )

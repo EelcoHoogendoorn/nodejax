@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from nodejax import Node, batch, nn
+from nodejax import Leaf, Node, Struct, batch, nn, scan
 from nodejax.core.binding import (AxisSpec)
 from nodejax.control import Integrator
 from nodejax.core.spec import element_spec, materialize
@@ -84,6 +84,120 @@ def test_scan_extent_is_variable_across_calls():
     assert second.shape == (7,)
     assert model.contract.input_spec.input.fixed is False
     assert model.contract.input_spec.input.count is None
+
+
+def test_nested_variable_axes_bind_and_remain_variable() -> None:
+    values = jnp.ones((2, 3))
+    nested = scan(
+        scan(Integrator().with_input(jnp.zeros(()))),
+    ).with_input(values)
+
+    outer = nested.contract.input_spec.input
+    assert type(outer) is AxisSpec
+    assert outer.fixed is False
+    assert outer.count is None
+    assert type(outer.element) is AxisSpec
+    assert outer.element.fixed is False
+    assert outer.element.count is None
+
+    model = nested.parameterize().initialize(input=values)
+    output = model.apply(values)[1]
+    assert output.shape == (2, 3)
+
+    rebound = nested.with_input(jnp.ones((5, 7)))
+    assert rebound.contract.input_spec.input.count is None
+    assert rebound.contract.input_spec.input.element.count is None
+
+
+def test_variable_axis_binds_a_fixed_axis_beneath_it() -> None:
+    values = jnp.ones((2, 3))
+    nested = scan(
+        batch(Integrator().with_input(jnp.zeros(()))),
+    ).with_input(values)
+    outer = nested.contract.input_spec.input
+
+    assert outer.fixed is False
+    assert outer.count is None
+    assert outer.element.fixed is True
+    assert outer.element.count == 3
+
+    model = nested.parameterize().initialize(input=values)
+    assert model.state.shape == (3,)
+    assert model.apply(values)[1].shape == (2, 3)
+
+    nested.with_input(jnp.ones((5, 3)))
+    with pytest.raises(TypeError, match='axis of 4.*declared count 3'):
+        nested.with_input(jnp.ones((5, 4)))
+
+
+def test_nested_axis_element_conflict_is_named() -> None:
+    nested = scan(scan(Integrator().with_input(jnp.zeros(()))))
+    with pytest.raises(TypeError, match='element'):
+        nested.with_input(jnp.ones((2, 3, 4)))
+
+
+def test_scan_can_declare_and_enforce_a_fixed_extent() -> None:
+    fixed = scan(
+        Integrator().with_input(jnp.zeros(())),
+        n=3,
+    )
+    declared = fixed.contract.input_spec.input
+    assert declared.fixed is True
+    assert declared.count == 3
+    assert materialize(fixed.contract.input_spec).input.shape == (3,)
+
+    nested = scan(fixed).with_input(jnp.ones((2, 3)))
+    assert nested.contract.input_spec.input.element.count == 3
+    with pytest.raises(TypeError, match='axis of 4.*declared count 3'):
+        nested.with_input(jnp.ones((2, 4)))
+
+    values = jnp.ones(3)
+    model = fixed.parameterize().initialize(input=values)
+    output = model.apply(values)[1]
+    assert output.shape == (3,)
+
+    with pytest.raises(TypeError, match='axis of 4.*declared count 3'):
+        fixed.with_input(jnp.ones(4))
+
+    deferred = scan(Integrator(), n=3)
+    with pytest.raises(TypeError, match='axis of 4.*declared count 3'):
+        deferred.with_input(jnp.ones(4))
+    deferred = deferred.with_input(values)
+    assert deferred.contract.input_spec.input.count == 3
+    deferred = deferred.parameterize().initialize(input=values)
+    with pytest.raises(TypeError, match='expected n=3'):
+        deferred.apply(jnp.ones(4))
+
+
+def test_nested_fixed_scans_bind_a_deferred_multi_field_call() -> None:
+    def Step() -> Node:
+        def apply(state, left, right):
+            successor = state + left + right
+            return successor, successor
+
+        return Leaf(apply, init=lambda: jnp.zeros(())).node
+
+    values = Struct(
+        left=jnp.ones((2, 3)),
+        right=2.0 * jnp.ones((2, 3)),
+    )
+    nested = scan(scan(Step(), n=3), n=2).with_input(bundle=values)
+
+    left = nested.contract.input_spec.left
+    right = nested.contract.input_spec.right
+    assert left.count == right.count == 2
+    assert left.element.count == right.element.count == 3
+
+    model = nested.parameterize().initialize(input=values)
+    assert model.apply(bundle=values)[1].shape == (2, 3)
+
+
+@pytest.mark.parametrize('count', (0, -1, 2.0))
+def test_scan_fixed_extent_must_be_a_positive_int(
+    count: int | float,
+) -> None:
+    with pytest.raises(TypeError, match='positive int'):
+        scan(Integrator(), n=count)
 
 
 def test_wrong_element_fails_named():
