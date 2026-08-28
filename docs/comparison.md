@@ -100,6 +100,54 @@ The competing code must be audited, not read: omitting a reset still produces
 a valid program with wrong semantics. Only in NodeJAX is control over state
 lifetime not a leaky abstraction.
 
+## Recurrent PPO: where the abstraction stops
+
+[`examples/rl/`](../examples/rl/) holds a recurrent PPO on a weakly
+actuated pendulum. The reference point is brax's
+[`ppo/train.py`](https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py),
+which is careful raw JAX with Flax Linen networks and worth reading
+alongside.
+
+In brax, Linen's involvement ends at the networks. The training file
+manages its own `TrainingState` dataclass of params, optimizer state,
+and normalizer statistics; splits and threads its own keys; scans over
+tuple carries of training state, environment state, and key; and folds
+termination flags into its advantage recursion by hand. None of this
+is a shortcoming of brax: the `TrainState` pattern is Flax's own
+documented exit from the module system, and everything past that door
+is the user's raw JAX by design.
+
+The NodeJAX implementation keeps those responsibilities inside nodes.
+Next to the same algorithm in raw JAX, its file contains no anonymous
+carry tuples, no manual key splitting, no done arithmetic (episode
+boundaries are declared, never multiplied into carries), no
+`stop_gradient` calls (the differentiation boundary is the trainer's),
+no training-state dataclass (the trainer's carry is one value), no
+buffer arrays with write cursors (the rollout's outputs are the
+buffer, and the recurrent-state trajectory is one `record=True`), and
+no static or donated argument bookkeeping around jit. What remains is
+statements about pendulums, policies, and PPO.
+
+Feature coverage differs in both directions, so this comparison is
+about placement, not throughput. brax brings device parallelism,
+thousands of hardware-accelerated environments, observation
+normalization, and an evaluation harness; the example brings none of
+that. The example brings recurrence; stock brax PPO does not. Its
+networks are feed-forward, and a recurrent policy there means
+rewriting the unroll, the training state, and the minibatching by
+hand, because the hidden-state buffer is exactly the machinery the
+module system does not reach. Here the same learner accepts a
+feed-forward or a GRU policy, replayed chunks resume from stored
+state read back as data, and a test checks that replay reproduces the
+rollout's log-probabilities exactly.
+
+Two costs summarize the difference. Adding recurrence to this PPO was
+the default; adding it to brax's is a rewrite. Adding a second
+training paradigm here was another example over the same plant,
+policy, and step (the SHAC example differentiates through the same
+pendulum the PPO samples); brax ships analytic-gradient training as a
+separate agent with its own loop and its own state conventions.
+
 ## Reusable transforms
 
 The [`residual`](../examples/comparisons/residual/) comparison asks for compositionality in the smallest case: `input + body(input)`. NodeJAX, NNX, and Equinox can all implement and self-compose that unary case. The earlier NNX and Equinox RNG failures were mistakes in the comparison wrappers, not framework limits.
