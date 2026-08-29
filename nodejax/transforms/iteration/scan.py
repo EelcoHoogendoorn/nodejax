@@ -162,13 +162,14 @@ def scanned(step: Node, record: bool = False) -> Node | PNode:
     The first sequence element initializes the state, the per-step outputs are
     returned, and the final state is discarded. ``record=True`` adds the state
     trajectory to the auxiliary output without changing the ordinary output.
+    An acyclic step has unit state, so this is its ordinary sequence map.
     """
-    if not step.cyclic:
-        raise TypeError(f'scanned requires a cyclic node, got {step!r}')
-
     def apply_fn(contract, param, input, rng):
         current = contract.members.step
-        initial = _fresh_step_state(current, param, input, rng)
+        initial = (
+            _fresh_step_state(current, param, input, rng)
+            if current.cyclic else ()
+        )
         _, outputs = scan_steps(
             current, param, initial, input, rng, record=record)
         return outputs

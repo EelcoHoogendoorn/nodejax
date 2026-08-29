@@ -24,8 +24,8 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from nodejax import (Node, trained, Leaf, derive, scan, scanned, train_step,
-                     Composite, Wrapper, serial)
+from nodejax import (Node, trained, Leaf, derive, node, scan, scanned,
+                     train_step, Composite, Wrapper, serial)
 from nodejax.struct import Struct
 from nodejax.core.binding import (Aux)
 
@@ -765,3 +765,43 @@ def test_a_nonparametric_pipe_nests_in_a_pipe():
 
     state, _ = nested.apply(state, jnp.ones(()))
     assert float(state.inner.a) == 1.0          # the pipe threads as it always did
+
+
+def test_authored_composite_methods_are_available_through_members():
+    identity = Leaf(lambda input: input, name='identity')
+
+    def inner_apply(self, input):
+        return self.identity(input)
+
+    def doubled(input):
+        return 2.0 * input
+
+    inner = Composite(identity=identity)(
+        inner_apply,
+        methods={'doubled': doubled},
+    )
+
+    def outer_apply(self, input):
+        return self.inner.doubled(self.inner(input))
+
+    outer = Composite(inner=inner)(outer_apply)
+    assert inner.doubled(3.0) == 6.0
+    assert outer.apply(3.0) == 6.0
+
+
+def test_authored_composite_methods_survive_generic_specialization():
+    @node
+    def Scale(factor: float) -> Node:
+        return Leaf(lambda input: factor * input)
+
+    def apply(self, input):
+        return self.scale(input)
+
+    generic = Composite(scale=Scale())(
+        apply,
+        methods={'doubled': lambda input: 2.0 * input},
+    )
+    complete = generic.specialize(**{'scale.factor': 3.0}).parameterize()
+
+    assert complete.apply(2.0) == 6.0
+    assert complete.doubled(2.0) == 4.0

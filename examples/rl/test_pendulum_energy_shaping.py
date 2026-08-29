@@ -15,8 +15,8 @@ import jax
 import jax.numpy as jnp
 
 from nodejax import Leaf, Node, PNode, Struct, batch, node, scanned, tile, tree_last
+from examples.rl.control import ControlledStep
 from examples.rl.pendulum import (
-    ControlledStep,
     Pendulum,
     downward_starts,
     overlay_trajectories,

@@ -1,9 +1,9 @@
-"""drop_aux: the sown channel stops at a boundary you name."""
+"""drop_aux stops Aux at a Node boundary or runtime value."""
 
 import jax
 import jax.numpy as jnp
 
-from nodejax import Node, Leaf, serial, drop_aux, split_aux, Aux
+from nodejax import Aux, Leaf, Node, drop_aux, node, serial, split_aux
 from nodejax.struct import Struct
 
 
@@ -38,9 +38,29 @@ def test_only_the_nodes_own_emission_is_dropped():
 
     quiet = drop_aux(node)
     assert quiet.apply(1.0) == 6.0                   # same signal
-    assert split_aux(quiet.apply(1.0))[1] is None    # nothing sown out
+    assert split_aux(quiet.apply(1.0))[1] is None    # no Aux remains
 
 
 def test_a_node_that_sows_nothing_is_unchanged():
     plain = Leaf(lambda input: input * 2.0, name='plain')
     assert drop_aux(plain).apply(3.0) == 6.0
+
+
+def test_runtime_output_is_cleaned_directly():
+    output = 3.0, Aux(activity=4.0)
+    assert drop_aux(output) == 3.0
+    plain = Struct(left=1.0, right=2.0)
+    assert drop_aux(plain) is plain
+
+
+def test_generic_node_remains_a_transformable_node():
+    @node
+    def Scaled(factor: float) -> Node:
+        return Leaf(lambda input: factor * input)
+
+    deferred = drop_aux(Scaled())
+    assert deferred.generic
+    assert deferred.name == 'drop_aux'
+
+    complete = deferred.specialize(**{'inner.factor': 3.0}).parameterize()
+    assert complete.apply(2.0) == 6.0

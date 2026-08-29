@@ -25,6 +25,34 @@ def test_scan_transform():
     assert jnp.allclose(outs, jnp.array([1.0, 3.0, 6.0]))
 
 
+def test_scanned_maps_an_acyclic_stochastic_step():
+    """Unit state needs no special topology: scanned is the sequence map."""
+    def Draw():
+        def apply(input, rng):
+            return input + jax.random.normal(rng.next())
+
+        return Leaf(apply, name='draw')
+
+    sequence = scanned(Draw())
+    assert not sequence.cyclic
+    first = sequence.apply(
+        jnp.zeros(5),
+        rng=jax.random.PRNGKey(0),
+    )
+    second = sequence.apply(
+        jnp.zeros(5),
+        rng=jax.random.PRNGKey(0),
+    )
+    assert jnp.all(first == second)
+    assert len({float(value) for value in first}) == 5
+
+
+def test_scanned_maps_an_empty_acyclic_sequence():
+    sequence = scanned(Leaf(lambda input: input + 1.0, name='increment'))
+    output = sequence.apply(jnp.zeros((0,)))
+    assert output.shape == (0,)
+
+
 def test_scanned_apply_reads_the_current_step_member():
     """Replacing the wrapped step changes the sequence execution."""
     def Counter(scale):

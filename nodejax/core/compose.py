@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import inspect
 import re
 from functools import wraps
@@ -24,7 +25,9 @@ from nodejax.core.contract import (
 from nodejax.core.definition import Captures, Construction, Def, Layout
 from nodejax.frozendict import frozendict
 from nodejax.core.generic import Generic, is_generic
-from nodejax.core.lifting import _compile_init, _compile_param, _keys_only
+from nodejax.core.lifting import (
+    _check_methods, _compile_init, _compile_param, _keys_only,
+)
 from nodejax.core.node import BaseNode, Node, _is_node, _view
 from nodejax.core.rng import MaybeKeyStream, _reject_no_rng
 from nodejax.core.spec import materialize, spec_of
@@ -33,6 +36,9 @@ from nodejax.tree import tree_first
 from nodejax.core.wiring import (
     _BuildingWired, _InitWired, _Member, _authored, _wrap_apply,
 )
+
+
+_EMPTY_MAPPING = frozendict()
 
 
 def apply_call(impl: Callable, form: CallForm, *, input_spec=None,
@@ -509,7 +515,8 @@ def _checked_init(call: InitCall, members, name):
 
 @node
 def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
-              init=None, apply_input_spec=None, name=None):
+              init=None, apply_input_spec=None, name=None,
+              methods: Mapping = _EMPTY_MAPPING):
     definitions, captures = _promote_members(members)
     reserved = {'param', 'state'} & set(definitions.__keys__)
     if reserved:
@@ -608,6 +615,7 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
             CallForm.from_values(Struct(), open=True))
     input_spec = (None if apply_input_spec is None else
                   form.feed(apply_input_spec))
+    checked_methods = _check_methods(methods)
     definition = Def(
         name=name or f'composite({", ".join(definitions.__keys__)})',
         calls=ContractCalls(
@@ -620,6 +628,7 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
         ),
         members=definitions,
         captures=captures,
+        methods=checked_methods,
         layout=Layout(kind='composite'),
     )
 
@@ -628,7 +637,7 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
             apply, members={field: Node(child)
                             for field, child in replacements.__items__},
             param=param, init=init, apply_input_spec=apply_input_spec,
-            name=name)
+            name=name, methods=checked_methods)
         return rebuilt._def
 
     return _view(definition.copy(tree=bind))
@@ -636,23 +645,23 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
 
 def _defer_wrapper(build):
     @wraps(build)
-    def entry(apply, operand, *, member, name=None, rng_from=None):
+    def entry(apply, operand, *, member, init=None, name=None, rng_from=None):
         if is_generic(operand):
             return Generic(
                 name or f'wrapper({operand.name})',
                 lambda **filled: entry(
                     apply, filled[member], member=member,
-                    name=name, rng_from=rng_from),
+                    init=init, name=name, rng_from=rng_from),
                 Struct(**{member: operand}),
             )
         return build(apply, operand, member=member,
-                     name=name, rng_from=rng_from)
+                     init=init, name=name, rng_from=rng_from)
     return entry
 
 
 @_defer_wrapper
 @node
-def _wrap_build(apply, operand: BaseNode, *, member, name=None,
+def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
                 rng_from: bool | None = None):
     from nodejax.core.wrapper import Wrapper, _transparent_calls
 
@@ -703,6 +712,14 @@ def _wrap_build(apply, operand: BaseNode, *, member, name=None,
     calls = _transparent_calls(member, child).with_apply(
         impl=impl, form=CallForm.from_values(data), input_spec=declared,
         takes_rng=takes_rng)
+    if init is not None:
+        if child.calls.init is None:
+            raise TypeError('authored Wrapper init requires a cyclic member')
+        calls = calls.copy(init=_compile_init(
+            init,
+            owner=f'wrapper({child.name})',
+            allow_self=False,
+        ))
     product = Wrapper(**{member: operand})(
         name=name or f'wrapper({child.name})', contract=calls,
         tags=child.tags, methods=child.methods)
@@ -710,7 +727,7 @@ def _wrap_build(apply, operand: BaseNode, *, member, name=None,
     def bind(replacements):
         rebuilt = _wrap_build(
             apply, Node(replacements[member]), member=member,
-            name=name, rng_from=rng_from)
+            init=init, name=name, rng_from=rng_from)
         return rebuilt._def
 
     definition = product._def.copy(tree=bind)

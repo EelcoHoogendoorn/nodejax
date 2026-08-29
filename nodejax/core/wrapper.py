@@ -172,7 +172,7 @@ class Wrapped:
 
         return _view(definition.copy(calls=calls, tree=bind))
 
-    def __call__(self, apply=None, *, name=None, contract=None,
+    def __call__(self, apply=None, *, init=None, name=None, contract=None,
                  tags=None, boundary: Mapping = _EMPTY_MAPPING,
                  methods: Mapping = _EMPTY_MAPPING,
                  destructurable=True, destructurable_state=True,
@@ -184,7 +184,9 @@ class Wrapped:
             from nodejax.core.compose import _wrap_build
             return _wrap_build(
                 apply, self.operand, member=self.member_name,
-                name=name, rng_from=rng_from)
+                init=init, name=name, rng_from=rng_from)
+        if init is not None:
+            raise TypeError('authored Wrapper init requires apply behavior')
         if rng_from is not None:
             raise TypeError('rng_from belongs to authored Wrapper behavior')
         if not _is_node(self.operand):

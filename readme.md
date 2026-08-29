@@ -60,6 +60,8 @@ Anything you can do with JAX, you can do within this contract. Composition and v
 - [`test_kv_cache.py`](examples/test_kv_cache.py) treats a decoder cache as ordinary state, including branched decoding and batched users with shared params.
 - [`test_maml_composed.py`](examples/test_maml_composed.py) expresses MAML by placing an adapting trainer inside an outer trainer.
 - [`test_gan.py`](examples/test_gan.py) represents both sides of a GAN and their optimizers inside one differentiable program.
+- [`test_ppo_pendulum.py`](examples/rl/test_ppo_pendulum.py) trains a recurrent PPO policy and replays each chunk from the policy state recorded during collection.
+- [`test_pendulum_shac.py`](examples/rl/test_pendulum_shac.py) composes short-horizon actor-critic training over feed-forward and recurrent policy ensembles.
 - [`examples/comparisons/`](examples/comparisons/) contains runnable NodeJAX, JAX, Equinox, Flax, Haiku, and PyTorch formulations of the same problems.
 
 The complete gallery lives in [`examples/`](examples/).

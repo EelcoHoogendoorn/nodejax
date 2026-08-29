@@ -16,6 +16,7 @@ from nodejax.struct import Struct
 
 
 _DEFAULT = object()
+_EMPTY_MAPPING = frozendict()
 
 
 def _construction_form(value: Struct, role: str) -> CallForm:
@@ -270,8 +271,10 @@ class Members(Mapping):
 
     def __call__(self, apply=None, *, param=None, init=None,
                  apply_input_spec=None, name=None,
+                 methods: Mapping = _EMPTY_MAPPING,
                  contract: ContractCalls | None = None):
         members = dict(self._members.__items__)
+        methods = frozendict(methods)
         if any(is_generic(member) for member in members.values()):
             if contract is not None:
                 raise TypeError('a contract requires complete member definitions')
@@ -279,7 +282,8 @@ class Members(Mapping):
             def build(**resolved):
                 return Members(resolved)(
                     apply, param=param, init=init,
-                    apply_input_spec=apply_input_spec, name=name)
+                    apply_input_spec=apply_input_spec, name=name,
+                    methods=methods)
 
             return Generic(name or 'composite', build, Struct(**members))
 
@@ -289,11 +293,14 @@ class Members(Mapping):
             from nodejax.core.compose import composite
             return composite(
                 apply, members=members, param=param, init=init,
-                apply_input_spec=apply_input_spec, name=name)
+                apply_input_spec=apply_input_spec, name=name,
+                methods=methods)
 
         if any(value is not None
                for value in (param, init, apply_input_spec)):
             raise TypeError('low-level Composite accepts contract= and name=')
+        if methods:
+            raise TypeError('methods require authored Composite behavior')
         if contract is None:
             raise TypeError('supply authored apply or contract=')
         definitions, captures = _promote_members(members)

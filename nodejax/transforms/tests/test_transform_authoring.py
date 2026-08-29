@@ -120,6 +120,31 @@ def test_authored_wrapper_preserves_resolved_member_input():
     assert successor.state == 1.0
 
 
+def test_authored_wrapper_can_replace_member_priming():
+    def source_init(input):
+        return input
+
+    def source_apply(state, input):
+        return state + input, state + input
+
+    source = nx.Leaf(source_apply, init=source_init, name='source')
+
+    def apply(self, input, initial):
+        return self.source(input)
+
+    def init(input):
+        return input.initial
+
+    wrapped = nx.Wrapper(source=source)(apply, init=init)
+    first = nx.Struct(input=jnp.asarray(2.0), initial=jnp.asarray(5.0))
+    bound = wrapped.parameterize().initialize(input=first)
+    successor, output = bound.apply(bundle=first)
+
+    assert bound.state == 5.0
+    assert output == 7.0
+    assert successor.state == 7.0
+
+
 def test_wrapper_roles_can_promote_init_to_runtime_priming():
     source = nx.control.Integrator()
 

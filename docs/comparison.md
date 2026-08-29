@@ -102,51 +102,26 @@ lifetime not a leaky abstraction.
 
 ## Recurrent PPO: where the abstraction stops
 
-[`examples/rl/`](../examples/rl/) holds a recurrent PPO on a weakly
-actuated pendulum. The reference point is brax's
-[`ppo/train.py`](https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py),
-which is careful raw JAX with Flax Linen networks and worth reading
-alongside.
+[`ppo.py`](../examples/rl/ppo.py) implements recurrent PPO. [`distributions.py`](../examples/rl/distributions.py) supplies the learned Gaussian policy Node, and [`ppo_pendulum.py`](../examples/rl/ppo_pendulum.py) supplies the domain policy, value, data, and evaluation Nodes. [`test_ppo_pendulum.py`](../examples/rl/test_ppo_pendulum.py) assembles them over a weakly actuated pendulum with either a feed-forward or a GRU policy. The reference point is brax's [`ppo/train.py`](https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py). This is a comparison of authoring boundaries, not throughput or feature count.
 
-In brax, Linen's involvement ends at the networks. The training file
-manages its own `TrainingState` dataclass of params, optimizer state,
-and normalizer statistics; splits and threads its own keys; scans over
-tuple carries of training state, environment state, and key; and folds
-termination flags into its advantage recursion by hand. None of this
-is a shortcoming of brax: the `TrainState` pattern is Flax's own
-documented exit from the module system, and everything past that door
-is the user's raw JAX by design.
+Brax's network abstraction ends at feed-forward policy and value calls. Its `train` function then constructs and operates the learning system: optimizer, normalizer, environment rollout, minibatches, nested updates, device coordination, evaluation, and checkpointing. Its nested `minibatch_step`, `sgd_step`, `training_step`, and `training_epoch` functions share dependencies through closure capture. `TrainingState` names only part of the program state: the outer training scan still carries `(TrainingState, environment state, key)`, while the optimization scan carries `(optimizer state, params, key)`. One host-side function owns nearly every lifecycle, and a new concern cuts across its private carries and conventions.
 
-The NodeJAX implementation keeps those responsibilities inside nodes.
-Next to the same algorithm in raw JAX, its file contains no anonymous
-carry tuples, no manual key splitting, no done arithmetic (episode
-boundaries are declared, never multiplied into carries), no
-`stop_gradient` calls (the differentiation boundary is the trainer's),
-no training-state dataclass (the trainer's carry is one value), no
-buffer arrays with write cursors (the rollout's outputs are the
-buffer, and the recurrent-state trajectory is one `record=True`), and
-no static or donated argument bookkeeping around jit. What remains is
-statements about pendulums, policies, and PPO.
+The NodeJAX example leaves PPO explicit: generalized advantage estimation, chunking, shuffling, clipping, and the actor and critic schedules remain statements about the algorithm. Node contracts remove a different class of authoring work:
 
-Feature coverage differs in both directions, so this comparison is
-about placement, not throughput. brax brings device parallelism,
-thousands of hardware-accelerated environments, observation
-normalization, and an evaluation harness; the example brings none of
-that. The example brings recurrence; stock brax PPO does not. Its
-networks are feed-forward, and a recurrent policy there means
-rewriting the unroll, the training state, and the minibatching by
-hand, because the hidden-state buffer is exactly the machinery the
-module system does not reach. Here the same learner accepts a
-feed-forward or a GRU policy, replayed chunks resume from stored
-state read back as data, and a test checks that replay reproduces the
-rollout's log-probabilities exactly.
+- no anonymous carry tuples
+- no towers of nested transformed functions
+- no manual RNG splitting or RNG keys in scan carries
+- no recurrent state threaded through policy calls or trainer state
+- no hand-authored training-state dataclass
+- no separately maintained recurrent-state buffer: the scanned Node records its state alongside the rollout
 
-Two costs summarize the difference. Adding recurrence to this PPO was
-the default; adding it to brax's is a rewrite. Adding a second
-training paradigm here was another example over the same plant,
-policy, and step (the SHAC example differentiates through the same
-pendulum the PPO samples); brax ships analytic-gradient training as a
-separate agent with its own loop and its own state conventions.
+One `PPO` Node owns the actor and critic trainers. Scans around those trainer Nodes express minibatches, epochs, and critic passes. `ppo_program` composes the training-data Node with `carried(PPO(...))`, so one jitted Node application runs every training iteration and returns the trained policy and value. Both optimizer states are ordinary Node state rather than locals in one host-side training function.
+
+The policy exposes the same contract with identity or GRU memory. The PPO author still chooses sequence chunks and selects the recorded state at each chunk boundary, because those are PPO decisions. Replay then initializes a fresh scan from that ordinary data, and a test verifies that every chunk reproduces the log-probabilities observed during collection.
+
+Stock brax PPO can be made recurrent, but recurrence crosses its acting, rollout, reset, storage, minibatching, loss, and evaluation interfaces because the network abstraction does not represent state lifecycle. In NodeJAX it crosses the places where PPO genuinely cares about sequence boundaries; state transport remains the responsibility of the Node and its transforms. Brax implements more production features, but adding features to that training function does not improve its authoring boundary.
+
+The same separation holds for SHAC: [`shac.py`](../examples/rl/shac.py) contains the injected learner and training program, while [`shac_pendulum.py`](../examples/rl/shac_pendulum.py) contains its domain Nodes. The PPO and SHAC assemblies share the `Pendulum` plant and use `ControlledStep` for deterministic closed-loop rollouts. Their policy and value Nodes remain algorithm-specific.
 
 ## Reusable transforms
 
