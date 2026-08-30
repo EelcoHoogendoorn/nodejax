@@ -42,19 +42,19 @@ from nodejax import (
 
 
 @node
-def SamplingStep(policy: Node, plant: BaseNode) -> Node:
+def SamplingStep(policy: Node, plant: Node) -> Node:
     """One on-policy transition: sample, act, record what replay needs."""
     members = Composite(policy=policy, plant=plant)
 
     def apply(self, disturbance, initial_state, rng):
         observation = self.plant.observe()
         proposal = self.policy(observation)
-        command = self.policy.sample(proposal, rng=rng.next())
-        output = self.plant(command=command, disturbance=disturbance)
+        drawn = self.policy.sample(proposal, rng=rng.next())
+        output = self.plant(command=drawn.command, disturbance=disturbance)
         return Struct(
             observation=observation,
-            command=command,
-            logprob=self.policy.logprob(proposal, command),
+            command=drawn.command,
+            logprob=drawn.logprob,
             cost=output.cost,
             next_observation=self.plant.observe(),
         )
@@ -227,8 +227,7 @@ def PPO(
     minibatch_chunks = chunks // minibatches
 
     # Resolve both model contracts from the plant's real observation shape.
-    plant_state = plant.initialize().state
-    observation = plant.observe(state=plant_state)
+    observation = plant.initialize().observe()
     policy = policy.with_input(observation)
     value = value.with_input(observation)
 
@@ -255,9 +254,11 @@ def PPO(
         n=epochs,
     )
 
-    world_value = batch(value, n=worlds)
-    chunk_value = batch(world_value, n=chunk, axis='time')
-    trajectory_value = batch(chunk_value, n=chunks, axis='chunk')
+    trajectory_value = batch(
+        batch(batch(value, n=worlds), n=chunk, axis='time'),
+        n=chunks,
+        axis='chunk',
+    )
     terminal_value = batch(value, n=worlds)
     critic_step = train_step(
         trajectory_value,

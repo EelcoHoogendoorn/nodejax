@@ -118,10 +118,14 @@ def test_learned_gaussian_owns_joint_distribution() -> None:
         StateIndependentLogStd(initial=INITIAL_LOG_STD),
     ).with_input(jnp.zeros(3)).parameterize()
     proposal = policy.apply(jnp.zeros(3))
-    command = policy.sample(proposal, rng=jax.random.PRNGKey(0))
+    drawn = policy.sample(proposal, rng=jax.random.PRNGKey(0))
 
-    assert command.shape == (3,)
-    assert policy.logprob(proposal, command).shape == ()
+    assert drawn.command.shape == (3,)
+    assert drawn.logprob.shape == ()
+    assert jnp.allclose(
+        drawn.logprob,
+        policy.logprob(proposal, drawn.command),
+    )
     assert policy.entropy(proposal).shape == ()
     assert jnp.allclose(
         policy.entropy(proposal),
@@ -154,7 +158,7 @@ def test_replay_reproduces_the_rollout() -> None:
         scan(batch(SamplingStep(policy, plant), n=WORLDS), n=CHUNK),
         record=True,
     )
-    observation = plant.observe(state=plant.initialize().state)
+    observation = plant.initialize().observe()
     weights = policy.with_input(observation).parameterize(
         rng=jax.random.PRNGKey(0),
     ).param
