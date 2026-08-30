@@ -1,7 +1,8 @@
 """Semantic transform families with one flat public import surface."""
 
 from nodejax.transforms.axes import batch, ensemble, reduce, unbatched
-from nodejax.transforms.iteration import carried, repeat, scan, scanned, stack
+from nodejax.transforms.iteration import (carried, iterated, repeat, scan,
+                                           scanned, stack)
 from nodejax.transforms.learning import (
     finetune,
     next_step,

@@ -728,13 +728,13 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
     calls = _transparent_calls(member, child).with_apply(
         impl=impl, form=CallForm.from_values(data), input_spec=declared,
         takes_rng=takes_rng)
-    if init is not None:
-        if child.calls.init is None:
-            raise TypeError('authored Wrapper init requires a cyclic member')
+    if init is not None and child.calls.init is not None:
+        # Over a stateless member the declared init is vacuous: the empty
+        # state is the only state such a subtree has, so the declaration
+        # drops and callers need not fork on the member's lifecycle.
         calls = calls.copy(init=_compile_init(
             init,
             owner=f'wrapper({child.name})',
-            allow_self=False,
         ))
     product = Wrapper(**{member: operand})(
         name=name or f'wrapper({child.name})', contract=calls,

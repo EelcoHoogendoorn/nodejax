@@ -27,6 +27,11 @@ def tree_last(tree: PyTree) -> PyTree:
     return jax.tree.map(lambda leaf: leaf[-1], tree)
 
 
+def tree_tail(tree: PyTree) -> PyTree:
+    """Drop the first leading-axis element from every leaf."""
+    return jax.tree.map(lambda leaf: leaf[1:], tree)
+
+
 def tree_len(tree: PyTree) -> int:
     """Return the common leading-axis length of a non-empty pytree."""
     leaves = jax.tree.leaves(tree)
@@ -47,6 +52,19 @@ def tree_reshape(tree: PyTree, shape: tuple, axes: int = 1) -> PyTree:
         lambda leaf: leaf.reshape(shape + jnp.shape(leaf)[axes:]),
         tree,
     )
+
+
+def tree_swap_axes(tree: PyTree, axis_a: int, axis_b: int) -> PyTree:
+    """Swap two axes of every leaf."""
+    return jax.tree.map(
+        lambda leaf: jnp.swapaxes(leaf, axis_a, axis_b),
+        tree,
+    )
+
+
+def tree_take(tree: PyTree, indices) -> PyTree:
+    """Gather rows of every leaf's leading axis by an index array."""
+    return jax.tree.map(lambda leaf: leaf[indices], tree)
 
 
 def tree_broadcast_axis(tree: PyTree, count: int, axis: int) -> PyTree:

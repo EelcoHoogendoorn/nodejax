@@ -175,28 +175,41 @@ def _compile_param(fn: Callable) -> ParamCall:
     )
 
 
-def _compile_init(fn: Callable, *, owner: str | None = None,
-                  allow_self: bool = True) -> InitCall:
+def _compile_init(fn: Callable, *, owner: str | None = None) -> InitCall:
     signature = _signature(fn, 'initializer')
-    if 'self' in signature and not allow_self:
+    if 'self' in signature:
         raise TypeError(
-            f'{owner}: leaf init does not accept self; use explicit param')
+            f'{owner}: authored init takes (param, input); '
+            'self is the wired apply view')
     if ('input' in signature and
             signature['input'].default is not inspect.Parameter.empty):
         raise TypeError('init input is a required priming value or is omitted')
     primes = 'input' in signature
-    object_names = ('param', 'self') if allow_self else ('param',)
+    object_names = ('param',)
     declaration = _bundle_spec(
         signature, drop=object_names + ('node', 'input', 'state'))
     takes_rng = 'rng' in declaration
     if takes_rng:
         declaration = declaration.without('rng')
 
+    def filled(definition, param):
+        """The init param names every declared member: a member
+        without parameters answers the empty slot, so authored inits
+        need not fork on a member's parametricity."""
+        members = definition.members
+        if not tuple(members.__keys__):
+            return param
+        held = tuple(param.__keys__) if type(param) is Struct else ()
+        return Struct(**{
+            name: (param[name] if name in held else ())
+            for name in members.__keys__
+        })
+
     def arguments(definition, param, formed_input, rng):
         out = {}
         for name in signature:
             if name in object_names:
-                out[name] = param
+                out[name] = filled(definition, param)
             elif name == 'node':
                 out[name] = AuthorNode(definition)
             elif name == 'rng':

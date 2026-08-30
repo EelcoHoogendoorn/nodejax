@@ -20,7 +20,7 @@ from nodejax.core.wrapper import (Wrapper)
 from nodejax.core.authoring import Leaf, derive
 from nodejax.paths import replace_by_path, set_by_path
 from nodejax.transforms import (
-    batch, unbatched, ensemble, reduce, stack, drop_aux, remat, repeat, scan, scanned, carried,
+    batch, unbatched, ensemble, reduce, stack, drop_aux, remat, repeat, iterated, scan, scanned, carried,
     trained, residual, train_step, supervised_ttt, next_step_ttt, reconstruction_ttt, finetune,
     taps, tie, externalize, parallel, at, reconstruction, next_step, freeze, tree_freeze, detach,
     tree_detach, sum_junction, state_reinit,
@@ -28,6 +28,8 @@ from nodejax.transforms import (
 from nodejax.transforms.structure import map_members, tree_filter
 from nodejax.tree import (
     tile, tree_broadcast_axis, tree_first, tree_last, tree_len, tree_reshape,
+    tree_tail,
+    tree_swap_axes, tree_take,
     tree_stop_gradient,
 )
 from nodejax.core.printing import (
@@ -54,10 +56,10 @@ __all__ = [
     # submodules
     'control',
     # transforms
-    'batch', 'unbatched', 'ensemble', 'reduce', 'stack', 'drop_aux', 'remat', 'repeat', 'scan', 'scanned', 'carried', 'residual', 'train_step', 'trained', 'supervised_ttt', 'next_step_ttt', 'reconstruction_ttt',
+    'batch', 'unbatched', 'ensemble', 'reduce', 'stack', 'drop_aux', 'remat', 'repeat', 'iterated', 'scan', 'scanned', 'carried', 'residual', 'train_step', 'trained', 'supervised_ttt', 'next_step_ttt', 'reconstruction_ttt',
     'finetune', 'tie', 'taps', 'externalize', 'parallel', 'sum_junction', 'state_reinit', 'at',
     'next_step', 'reconstruction',
-    'freeze', 'tree_freeze', 'detach', 'tree_detach', 'tree_filter', 'map_members', 'statics_by_path', 'describe', 'tile', 'tree_broadcast_axis', 'tree_first', 'tree_last', 'tree_len', 'tree_reshape', 'tree_stop_gradient', 'set_by_path', 'replace_by_path', 'closed_loop', 'observed_loop',
+    'freeze', 'tree_freeze', 'detach', 'tree_detach', 'tree_filter', 'map_members', 'statics_by_path', 'describe', 'tile', 'tree_broadcast_axis', 'tree_first', 'tree_last', 'tree_len', 'tree_reshape', 'tree_swap_axes', 'tree_take', 'tree_tail', 'tree_stop_gradient', 'set_by_path', 'replace_by_path', 'closed_loop', 'observed_loop',
     'tree_view', 'print_tree', 'summary', 'print_summary',
     # composition
     'serial',

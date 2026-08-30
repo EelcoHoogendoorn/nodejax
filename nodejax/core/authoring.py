@@ -189,7 +189,7 @@ def Leaf(apply: Callable | None = None, *, param=None, init=None,
     definition_name = name or apply.__name__
     param_call = _compile_param(param) if param is not None else None
     init_call = (_compile_init(
-        init, owner=definition_name, allow_self=False)
+        init, owner=definition_name)
                  if init is not None else None)
     apply_call = _compile_apply(
         apply,
@@ -245,7 +245,7 @@ def derive(parent: BaseNode, *, apply: Callable | None = None,
 
     parent_init = parent._def.calls.init
     child_init = (_compile_init(
-        init, owner=definition_name, allow_self=False)
+        init, owner=definition_name)
                   if init is not None else None)
     if parent_init is None:
         init_call = child_init

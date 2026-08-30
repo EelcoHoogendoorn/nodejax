@@ -818,7 +818,7 @@ def test_authored_init_accepts_an_empty_slot_for_a_stateless_member():
         def apply(self, input):
             return self.register(self.gain(input))
 
-        def init(self, input):
+        def init(param, input):
             return Struct(
                 register=jnp.zeros(()),
                 gain=gain.parameterize().init(),
@@ -844,3 +844,53 @@ def test_authored_init_accepts_an_empty_slot_for_a_stateless_member():
     held, output = held.apply(3.0)
     assert output == 0.0
     assert held.state.register == 6.0
+
+
+def test_wrapper_init_over_a_stateless_member_is_vacuous():
+    """An adopt-this-field init may be declared unconditionally: over a
+    stateless member the declaration is vacuous, because the empty state
+    is the only state such a subtree has. Callers therefore never fork on
+    the member's lifecycle."""
+    def Double() -> Node:
+        return Leaf(lambda input: 2.0 * input, name='double').node
+
+    def apply(self, input, initial):
+        return self.double(input)
+
+    def init(input):
+        return input.initial
+
+    adopted = Wrapper(double=Double())(apply, init=init).parameterize()
+
+    assert not adopted.cyclic
+    assert adopted.apply(3.0, initial=()) == 6.0
+
+
+def test_authored_self_names_a_parameterless_member_as_empty():
+    """The authored self answers the empty slot for a declared member
+    without parameters, the param-side mirror of the empty state slot, so
+    authored inits never fork on a member's parametricity."""
+    def Register() -> Node:
+        return Leaf(
+            lambda state, input: (input, state),
+            init=lambda: jnp.zeros(()),
+            name='register',
+        ).node
+
+    def Gain() -> Node:
+        return Leaf(lambda input: 2.0 * input, name='gain').node
+
+    def apply(self, input):
+        return self.register(self.gain(input))
+
+    def init(param, input):
+        return Struct(
+            register=jnp.asarray(1.0),
+            gain=param.gain,
+        )
+
+    held = Composite(register=Register(), gain=Gain())(
+        apply, init=init,
+    ).parameterize().initialize(input=jnp.zeros(()))
+
+    assert held.state.register == 1.0

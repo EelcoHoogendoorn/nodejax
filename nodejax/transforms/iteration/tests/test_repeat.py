@@ -69,3 +69,22 @@ def test_stack_init_walks_the_positions():
 
     state = repeat(Register(), n=3).parameterize().init(input=jnp.array(1.0))
     assert jnp.shape(state) == () and jnp.allclose(state, 1.0)
+
+
+def test_iterated_applies_one_node_to_the_same_input_n_times():
+    """Function iteration on the state: the input stays constant, unlike
+    repeat's output chaining. The last output returns; aux stacks."""
+    from nodejax import iterated
+
+    def Accumulator() -> Node:
+        def apply(state, input):
+            total = state + input
+            return total, total
+
+        return Leaf(apply, init=lambda: jnp.zeros(()), name='accumulator').node
+
+    threefold = iterated(Accumulator(), n=3).parameterize().initialize()
+    threefold, output = threefold.apply(2.0)
+
+    assert output == 6.0                       # 0 + 2 + 2 + 2, last output
+    assert threefold.state == 6.0              # state threaded through
