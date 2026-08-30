@@ -22,7 +22,8 @@ def test_the_clean_signal_alone_comes_out():
     dropped = drop_aux(node)
     out = dropped.apply(3.0)
     assert out == 6.0
-    assert split_aux(out)[1] is None                 # and now it does not
+    value, aux = split_aux(out)
+    assert aux is None                               # and now it does not
 
 
 def test_only_the_nodes_own_emission_is_dropped():
@@ -38,7 +39,8 @@ def test_only_the_nodes_own_emission_is_dropped():
 
     quiet = drop_aux(node)
     assert quiet.apply(1.0) == 6.0                   # same signal
-    assert split_aux(quiet.apply(1.0))[1] is None    # no Aux remains
+    value, aux = split_aux(quiet.apply(1.0))
+    assert aux is None                               # no Aux remains
 
 
 def test_a_node_that_sows_nothing_is_unchanged():

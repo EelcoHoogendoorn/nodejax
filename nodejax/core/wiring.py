@@ -342,7 +342,8 @@ class _InitWired:
                 (getattr(self._param, name) if d.parametric else ()),
                 self._work[name], x, child)
             self._work[name] = new_state
-            return split_aux(out)[0]
+            value, aux = split_aux(out)
+            return value
 
         return _Member(
                        call, d,
@@ -501,7 +502,8 @@ class _BuildingWired:
         except Exception as e:
             raise TypeError(f"walk failed at member '{name}': {e}") from e
         self._states[name] = new_state
-        return split_aux(out)[0]
+        value, aux = split_aux(out)
+        return value
 
     def parameters(self) -> Struct:
         """The params, built OUTSIDE the walk.

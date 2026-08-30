@@ -58,6 +58,12 @@ class PNode(BaseNode):
         if type(bundle) is not Struct:
             raise TypeError('init expects a Struct or loose fields')
         validate_state_input(self, bundle)
+        if not self.cyclic:
+            # A stateless node initializes to the empty state. A priming
+            # input is vacuous data and accepted; a claimed state field
+            # already raised above, and an unconsumed key stays a leak.
+            _bind_rng(False, key, f'{self.name}: init')
+            return ()
         rng = _bind_rng(
             self.contract.init_takes_rng, key, f'{self.name}: init')
         if input is _UNSET:

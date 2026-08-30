@@ -103,11 +103,29 @@ def scan(step: Node, record: bool = False,
     output. ``n`` declares and enforces a fixed sequence length; without it,
     the sequence length may change between calls.
     """
-    if not step.cyclic:
-        raise TypeError(f'scan requires a cyclic node, got {step!r}')
     if n is not None and (type(n) is not int or n < 1):
         raise TypeError(f'scan n must be a positive int, got {n!r}')
     _check_claim(step.contract, boundary)
+
+    if not step.cyclic:
+        # An acyclic step has unit carry, so scanning it is its ordinary
+        # sequence map; the boundary claim above already rejects a
+        # boundary= that nothing beneath declares.
+        def map_fn(contract, param, input, rng):
+            current = contract.members.step
+            input = scan_inputs(current, input, n)
+            _, outputs = scan_steps(
+                current, param, (), input, rng, record=record, length=n)
+            return outputs
+
+        return Wrapper(step=step).roles(
+            name=f'scan({step.name})',
+            param=_sequence_parameterize('step'),
+            init=False,
+            apply=map_fn,
+            input_spec=_sequence_spec(step.contract, n),
+            apply_takes_rng=step.contract.apply_takes_rng,
+        )
 
     def prime_fn(contract, param, state_input, input, rng):
         current = contract.members.step

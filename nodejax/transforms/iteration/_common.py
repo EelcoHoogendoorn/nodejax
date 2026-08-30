@@ -109,7 +109,8 @@ def scanned_initialize(inner: Contract,
         _, stepped = contract.apply(
             row, state, inner.feed(layer_input),
             at(apply_rngs, index))
-        return split_aux(stepped)[0], state
+        output, aux = split_aux(stepped)
+        return output, state
 
     value, prefix_states = jax.lax.scan(
         initialize_and_step,

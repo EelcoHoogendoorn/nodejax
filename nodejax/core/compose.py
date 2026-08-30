@@ -213,7 +213,8 @@ def _step_priming_carry(member, param, state, carry, name, rng):
             formed_input, rng)
     except Exception as error:
         raise TypeError(f"walk failed at member '{name}': {error}") from error
-    return split_aux(output)[0]
+    value, aux = split_aux(output)
+    return value
 
 
 def _step_spec(member, param, state, spec, name):
@@ -232,7 +233,8 @@ def _step_spec(member, param, state, spec, name):
         )
     except Exception as error:
         raise TypeError(f"spec walk failed at member '{name}': {error}") from error
-    return split_aux(output)[0]
+    value, aux = split_aux(output)
+    return value
 
 
 def _member_param(name, member, sub_bundle, rng, input_spec=None, *,
@@ -494,14 +496,28 @@ def _member_init(members, apply, param, evidence, rng, inputs, *,
 
 def _checked_init(call: InitCall, members, name):
     def validate(state):
+        from nodejax.core.contract import _empty
         expected = {
             field for field, member in members.__items__ if member.cyclic}
-        got = (set(state.__keys__)
-               if issubclass(type(state), Struct) else set())
+        entries = (dict(state.__items__)
+                   if issubclass(type(state), Struct) else {})
+        # An explicit empty slot for a stateless member is permitted and
+        # stripped here, so authored inits need not fork on member
+        # lifecycles while the stored state stays canonically sparse.
+        vacuous = {
+            field for field, value in entries.items()
+            if field not in expected
+            and field in set(members.__keys__)
+            and _empty(value)}
+        got = set(entries) - vacuous
         if got != expected:
             raise TypeError(
                 f'{name or "composite"}: init state keys {sorted(got)}; '
                 f'expected {sorted(expected)}')
+        if vacuous:
+            return Struct(**{
+                field: value for field, value in entries.items()
+                if field not in vacuous})
         return state
     if call.requires_input:
         def impl(definition, param, formed_input, input, rng):

@@ -16,7 +16,8 @@ def _drop_aux_node(inner: Node) -> Node:
     def apply_fn(contract, param, state, input, rng):
         new_state, out = contract.members.inner.apply(
             param, state, input, rng)
-        return new_state, split_aux(out)[0]
+        value, aux = split_aux(out)
+        return new_state, value
 
     return Wrapper(inner=inner).roles(
         name=f'drop_aux({inner.name})',
@@ -30,4 +31,5 @@ def drop_aux(value):
         return Generic('drop_aux', _drop_aux_node, Struct(inner=value))
     if _is_node(value):
         return _drop_aux_node(value)
-    return split_aux(value)[0]
+    output, aux = split_aux(value)
+    return output

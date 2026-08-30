@@ -12,11 +12,13 @@ def mse(output: jax.Array, target: jax.Array) -> jax.Array:
 
 def ensemble_mse(output: PyTree, target: jax.Array) -> jax.Array:
     """Fit every value retained by ``ensemble(...) >> reduce(mean)``."""
-    population = split_aux(output)[1].reduce_mean.population
+    value, aux = split_aux(output)
+    population = aux.reduce_mean.population
     return jnp.mean((population - target[..., None]) ** 2)
 
 
 def ensemble_min_mse(output: PyTree, target: jax.Array) -> jax.Array:
     """Fit every value retained by ``ensemble(...) >> reduce(min)``."""
-    population = split_aux(output)[1].reduce_min.population
+    value, aux = split_aux(output)
+    population = aux.reduce_min.population
     return jnp.mean((population - target[..., None]) ** 2)

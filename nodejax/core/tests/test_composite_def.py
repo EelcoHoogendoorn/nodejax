@@ -805,3 +805,42 @@ def test_authored_composite_methods_survive_generic_specialization():
 
     assert complete.apply(2.0) == 6.0
     assert complete.doubled(2.0) == 4.0
+
+
+def test_authored_init_accepts_an_empty_slot_for_a_stateless_member():
+    """An authored init may name every member uniformly: an explicit empty
+    slot for a stateless member is accepted and stripped, so the stored
+    state stays canonically sparse; a non-empty claim stays a loud error."""
+    @node
+    def Held(register: Node, gain: Node) -> Node:
+        members = Composite(register=register, gain=gain)
+
+        def apply(self, input):
+            return self.register(self.gain(input))
+
+        def init(self, input):
+            return Struct(
+                register=jnp.zeros(()),
+                gain=gain.parameterize().init(),
+            )
+
+        return members(apply, init=init)
+
+    def Register() -> Node:
+        return Leaf(
+            lambda state, input: (input, state),
+            init=lambda: jnp.zeros(()),
+            name='register',
+        ).node
+
+    def Gain() -> Node:
+        return Leaf(lambda input: 2.0 * input, name='gain').node
+
+    held = Held(Register(), Gain()).parameterize().initialize(
+        input=jnp.zeros(()),
+    )
+    assert set(held.state.__keys__) == {'register'}
+
+    held, output = held.apply(3.0)
+    assert output == 0.0
+    assert held.state.register == 6.0

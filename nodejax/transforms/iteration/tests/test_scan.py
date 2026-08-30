@@ -312,3 +312,23 @@ def test_a_resolved_step_transfers_under_the_map():
     spec = scan(step).contract.input_spec
     assert type(spec.input) is AxisSpec and spec.input.count is None
     assert element_spec(spec).input.shape == (3,)
+
+
+def test_scan_of_an_acyclic_step_is_its_sequence_map():
+    """An acyclic step has unit carry, so scanning it runs it per element,
+    the same rule scanned already follows. A claimed boundary stays loud,
+    since nothing beneath declares one, and carried keeps refusing: a final
+    empty state is a caller mistake worth catching."""
+    def Double() -> Node:
+        return Leaf(lambda input: 2.0 * input, name='double').node
+
+    sequence = jnp.arange(6.0).reshape(3, 2)
+    mapped = scan(Double(), n=3).parameterize()
+    assert not mapped.cyclic
+    assert jnp.allclose(mapped.apply(sequence), 2.0 * sequence)
+
+    with pytest.raises(TypeError):
+        scan(Double(), boundary='episode')
+    from nodejax import carried
+    with pytest.raises(TypeError):
+        carried(Double())

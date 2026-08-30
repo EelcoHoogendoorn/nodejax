@@ -223,3 +223,18 @@ def test_unbound_surface_mirrors_the_bound_one():
     assert out == 5.0
     _, traj = scan(idef).apply(q, s, jnp.ones(3))   # unbound: param first
     assert jnp.allclose(traj, jnp.array([1.0, 2.0, 3.0]))
+
+
+def test_stateless_init_answers_the_empty_state():
+    """A stateless node initializes to the empty state. A priming input is
+    vacuous and accepted, so callers need not fork on cyclicity; a claimed
+    state field stays a loud error."""
+    d = Gain()
+    p = _param(d, Struct(scale=2.0))
+    bound = d.bind(p)
+
+    assert bound.init() == ()
+    assert bound.init(input=1.0) == ()
+    assert d.init(p) == ()
+    with pytest.raises(TypeError):
+        bound.init(hidden=0.0)

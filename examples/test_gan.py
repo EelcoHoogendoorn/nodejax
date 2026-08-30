@@ -112,7 +112,7 @@ def test_gan_learns_a_gaussian():
         # how many
         game, output = game.scan(rng=jax.random.PRNGKey(10 + chunk),
                                  tick=jnp.zeros(500))
-        losses = split_aux(output)[1]
+        samples_output, losses = split_aux(output)
 
         samples = generator.apply(game.state.generator.opt.params,
                                   rng=jax.random.PRNGKey(99))
@@ -147,7 +147,7 @@ def test_gan_population_by_ensemble():
     for chunk in range(4):
         tournament, output = tournament.scan(rng=jax.random.PRNGKey(50 + chunk),
                                              tick=jnp.zeros(500))
-    losses = split_aux(output)[1]
+    output, losses = split_aux(output)
     assert losses.discriminator.loss.shape == (500, 4)   # per-round, per-member
 
     means = jax.vmap(
