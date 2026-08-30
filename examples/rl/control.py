@@ -27,10 +27,9 @@ def ControlledStep(policy: BaseNode, plant: PNode) -> Node:
         """Adopt caller state and initialize policy state from observation.
 
         ``initial_state`` shares the apply call because a scan primes from its
-        first real element. It is ignored by later transitions.
+        first real element. It is ignored by later transitions. A stateless
+        policy contributes the empty slot: no fork on its lifecycle.
         """
-        if not policy.cyclic:
-            return Struct(plant=input.initial_state)
         observation = plant.observe(state=input.initial_state)
         weights = self.policy if policy.parametric else ()
         return Struct(

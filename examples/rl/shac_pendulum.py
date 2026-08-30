@@ -99,28 +99,28 @@ def PendulumCritic(residual: Node) -> Node:
 @node
 def PendulumTrainingData(
     *,
-    episodes: int,
-    chunks: int,
-    horizon: int,
-    worlds: int,
+    n_episodes: int,
+    n_chunks_per_episode: int,
+    n_steps_per_chunk: int,
+    n_worlds: int,
     disturbance_scale: float,
 ) -> PNode:
     """Independent episodes split into short gradient chunks."""
     def apply(rng):
         disturbance = disturbance_scale * jax.random.normal(
             rng.next(),
-            (episodes, chunks, horizon, worlds),
+            (n_episodes, n_chunks_per_episode, n_steps_per_chunk, n_worlds),
         )
         initial = Struct(
             angle=jax.random.uniform(
                 rng.next(),
-                (episodes, worlds),
+                (n_episodes, n_worlds),
                 minval=-jnp.pi,
                 maxval=jnp.pi,
             ),
             velocity=jax.random.uniform(
                 rng.next(),
-                (episodes, worlds),
+                (n_episodes, n_worlds),
                 minval=-VELOCITY_SCALE,
                 maxval=VELOCITY_SCALE,
             ),
@@ -130,7 +130,7 @@ def PendulumTrainingData(
         initial_state = jax.tree.map(
             lambda value: jnp.broadcast_to(
                 value[:, None, None],
-                (episodes, chunks, horizon) + value.shape[1:],
+                (n_episodes, n_chunks_per_episode, n_steps_per_chunk) + value.shape[1:],
             ),
             initial,
         )
@@ -149,14 +149,14 @@ def policy_trajectory(
     steps: int,
 ) -> Struct:
     """Evaluate from fresh state while preserving recurrent carry."""
-    worlds = tree_len(initial_state)
+    n_worlds = tree_len(initial_state)
     input = Struct(
-        disturbance=jnp.zeros((steps, worlds)),
+        disturbance=jnp.zeros((steps, n_worlds)),
         initial_state=tile(initial_state, steps),
     )
     world = batch(
         ControlledStep(drop_aux(policy), plant),
-        n=worlds,
+        n=n_worlds,
     ).parameterize()
     rollout = world.initialize(input=tree_first(input))
     _, trajectory = rollout.scan(bundle=input)
@@ -205,14 +205,14 @@ def plot_phase_space(
 
     grid_state = phase_grid()
     flat_state = jax.tree.map(lambda value: value.reshape(-1), grid_state)
-    worlds = tree_len(flat_state)
+    n_worlds = tree_len(flat_state)
 
     # A recurrent policy has no state-only flow field. This is its first
     # action from freshly initialized member states; the overlaid trajectories
     # below are the real closed-loop paths with memory carried through time.
     action = policy_trajectory(policy, plant, flat_state, steps=1).action[0]
     actions = action.reshape(grid_state.angle.shape)
-    value = batch(terminal_value, n=worlds).apply(flat_state)
+    value = batch(terminal_value, n=n_worlds).apply(flat_state)
     terminal_cost = drop_aux(value).reshape(grid_state.angle.shape)
 
     figure, (axis, cost_axis) = plt.subplots(

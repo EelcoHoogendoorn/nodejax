@@ -22,9 +22,11 @@ from nodejax import (
     PyTree,
     Struct,
     batch,
+    carried,
     drop_aux,
     scan,
     scanned,
+    serial,
     tree_broadcast_axis,
     tree_first,
     tree_len,
@@ -37,12 +39,12 @@ from examples.rl.distributions import (
 from examples.rl.losses import mse
 from examples.rl.pendulum import Pendulum
 from examples.rl.ppo import (
+    PPO,
     ReplayStep,
     SamplingStep,
     chunk_starts,
     clipped_surrogate,
     collect,
-    ppo_program,
     ppo_training,
 )
 from examples.rl.ppo_pendulum import (
@@ -56,12 +58,13 @@ from examples.rl.ppo_pendulum import (
 
 HIDDEN = 64
 MEMORY = 32
-WORLDS = 32
-HORIZON = 128
-CHUNK = 16
-EPOCHS = 4
-MINIBATCHES = 4
-CRITIC_PASSES = 4
+N_WORLDS = 32
+N_STEPS_PER_CHUNK = 16
+N_EPOCHS = 4
+N_MINIBATCHES_PER_EPOCH = 4
+N_CHUNKS_PER_MINIBATCH = 2
+N_CHUNKS_PER_EPOCH = N_MINIBATCHES_PER_EPOCH * N_CHUNKS_PER_MINIBATCH
+N_CRITIC_PASSES = 4
 CLIP = 0.2
 DISCOUNT = 0.97
 TRACE = 0.95
@@ -69,7 +72,7 @@ ENTROPY_WEIGHT = 1e-3
 ACTOR_RATE = 1e-3
 CRITIC_RATE = 1e-3
 INITIAL_LOG_STD = -0.5
-EVALUATION_STEPS = 300
+N_EVALUATION_STEPS = 300
 
 
 def pendulum_policy(memory: BaseNode) -> Node:
@@ -79,21 +82,16 @@ def pendulum_policy(memory: BaseNode) -> Node:
     return LearnedGaussian(mean, log_std)
 
 
-def pendulum_training_program(policy: Node, iterations: int) -> Node:
-    """Assemble every Pendulum and PPO choice at the example boundary."""
-    data = PendulumTrainingData(
-        iterations,
-        worlds=WORLDS,
-        horizon=HORIZON,
-        chunk=CHUNK,
-    )
+def pendulum_training_program(policy: Node, iterations: int) -> Struct:
+    """Assemble every Pendulum and PPO choice at the example boundary.
+
+    The iteration consumes every one of its own knobs; the program layer
+    composes built Nodes."""
     value = PendulumValue(hidden=HIDDEN)
-    plant = Pendulum()
-    return ppo_program(
+    iteration = PPO(
         policy,
         value,
-        plant,
-        data,
+        Pendulum(),
         actor_loss=clipped_surrogate(
             clip=CLIP,
             entropy_weight=ENTROPY_WEIGHT,
@@ -101,14 +99,25 @@ def pendulum_training_program(policy: Node, iterations: int) -> Node:
         critic_loss=mse,
         actor_optimizer=optax.adam(ACTOR_RATE),
         critic_optimizer=optax.adam(CRITIC_RATE),
-        worlds=WORLDS,
-        horizon=HORIZON,
-        chunk=CHUNK,
-        epochs=EPOCHS,
-        minibatches=MINIBATCHES,
-        critic_passes=CRITIC_PASSES,
+        n_worlds=N_WORLDS,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+        n_epochs=N_EPOCHS,
+        n_minibatches_per_epoch=N_MINIBATCHES_PER_EPOCH,
+        n_chunks_per_minibatch=N_CHUNKS_PER_MINIBATCH,
+        n_critic_passes=N_CRITIC_PASSES,
         discount=DISCOUNT,
         trace=TRACE,
+    )
+    data = PendulumTrainingData(
+        iterations,
+        n_worlds=N_WORLDS,
+        n_chunks_per_epoch=N_CHUNKS_PER_EPOCH,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+    )
+    return Struct(
+        program=serial(data=data, training=carried(iteration)),
+        policy=policy,
+        value=value,
     )
 
 
@@ -155,7 +164,7 @@ def test_replay_reproduces_the_rollout() -> None:
     policy = pendulum_policy(nn.GRU(MEMORY))
     plant = Pendulum()
     sampler = scanned(
-        scan(batch(SamplingStep(policy, plant), n=WORLDS), n=CHUNK),
+        scan(batch(SamplingStep(policy, plant), n=N_WORLDS), n=N_STEPS_PER_CHUNK),
         record=True,
     )
     observation = plant.initialize().observe()
@@ -178,12 +187,11 @@ def test_replay_reproduces_the_rollout() -> None:
         ),
     )
 
-    count = HORIZON // CHUNK
     data = PendulumTrainingData(
         1,
-        worlds=WORLDS,
-        horizon=HORIZON,
-        chunk=CHUNK,
+        n_worlds=N_WORLDS,
+        n_chunks_per_epoch=N_CHUNKS_PER_EPOCH,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
     ).apply(rng=jax.random.PRNGKey(3))
     initial_state = tree_first(data.initial_state)
     disturbance = tree_first(data.disturbance)
@@ -193,24 +201,26 @@ def test_replay_reproduces_the_rollout() -> None:
         initial_state,
         disturbance,
         jax.random.PRNGKey(1),
+        n_chunks_per_epoch=N_CHUNKS_PER_EPOCH,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
     )
     starts = chunk_starts(
         policy,
         weights,
         record.observation,
         states,
-        WORLDS,
+        N_WORLDS,
     )
     replay = batch(
-        scanned(batch(ReplayStep(policy), n=WORLDS)),
-        n=count,
+        scanned(batch(ReplayStep(policy), n=N_WORLDS)),
+        n=N_CHUNKS_PER_EPOCH,
     ).bind(weights)
 
     def replayed_logprob(policy_state: PyTree) -> jax.Array:
         bundle = Struct(
             observation=record.observation,
             command=record.command,
-            initial=tree_broadcast_axis(policy_state, CHUNK, axis=1),
+            initial=tree_broadcast_axis(policy_state, N_STEPS_PER_CHUNK, axis=1),
         )
         return drop_aux(replay.apply(bundle=bundle)).logprob
 
@@ -246,7 +256,7 @@ def swing_up() -> None:
         result.policy,
         Pendulum(),
         starts,
-        steps=EVALUATION_STEPS,
+        steps=N_EVALUATION_STEPS,
     )
     print(
         f'training cost {history[0]:.3f} -> {history[-1]:.3f} | '
@@ -269,7 +279,7 @@ def swing_up() -> None:
         result.policy,
         Pendulum(),
         starts,
-        jnp.zeros((EVALUATION_STEPS, tree_len(starts))),
+        jnp.zeros((N_EVALUATION_STEPS, tree_len(starts))),
     )
     overlay_trajectories(axis, rollouts.state)
     axis.set_title(

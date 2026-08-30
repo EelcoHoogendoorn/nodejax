@@ -28,18 +28,17 @@ from nodejax import (
     Struct,
     Wrapper,
     batch,
-    carried,
     drop_aux,
     node,
     scan,
     scanned,
-    serial,
     split_aux,
     tile,
     tree_last,
     tree_reshape,
     train_step,
 )
+from nodejax import nn
 from examples.rl.replay import Buffer
 
 
@@ -84,14 +83,20 @@ def SampledCommand(policy: Node) -> Node:
 
 @node
 def Temperature(initial: float) -> Node:
-    """A learned entropy temperature, stored as its logarithm."""
+    """A learned entropy temperature, stored as its logarithm.
+
+    ``value`` reads the temperature back from any weights, so callers
+    holding trained parameters never touch the stored representation."""
     def param():
         return jnp.log(jnp.asarray(initial))
 
-    def apply(param, input):
+    def value(param) -> jax.Array:
         return jnp.exp(param)
 
-    return Leaf(apply, param=param)
+    def apply(param, input):
+        return value(param)
+
+    return Leaf(apply, param=param, methods={'value': value})
 
 
 def temperature_loss(target_entropy: float) -> Callable:
@@ -111,28 +116,40 @@ def temperature_loss(target_entropy: float) -> Callable:
 def SACUpdate(
     policy: Node,
     critic: Node,
-    target: BaseNode,
     *,
+    transition: PyTree,
     critic_loss: Callable,
     actor_optimizer,
     critic_optimizer,
     temperature_optimizer,
-    minibatch: int,
+    n_transitions_per_minibatch: int,
     discount: float,
+    target_decay: float,
     target_entropy: float,
     initial_temperature: float,
 ) -> Node:
     """One SAC gradient update consuming one replayed minibatch.
 
-    The Bellman target bootstraps from the injected slow target Node applied
-    to the online critic parameters, plus the entropy contribution of a
-    fresh policy sample at the next observation. ``critic_loss`` accepts
-    ``(output, target)`` and may inspect Aux, so an ensemble critic can fit
-    every member while exposing one pessimistic value to the backup.
+    ``transition`` resolves the policy and critic contracts. The Bellman
+    target bootstraps from a slow critic, an EMA over the online critic
+    parameters advanced once per update, plus the entropy contribution of
+    a fresh policy sample at the next observation. The EMA is constructed
+    here because the update's warm start assumes its state layout; only
+    its decay is a caller's choice. ``critic_loss`` accepts ``(output,
+    target)`` and may inspect Aux, so an ensemble critic can fit every
+    member while exposing one pessimistic value to the backup.
     """
-    fresh = batch(SampledCommand(policy), n=minibatch)
-    value = batch(drop_aux(critic), n=minibatch)
-    fitted = batch(critic, n=minibatch)
+    policy = policy.with_input(transition.observation)
+    critic = critic.with_input(
+        Struct(
+            observation=transition.observation,
+            command=transition.command,
+        ),
+    )
+    target = nn.EMA(tau=target_decay, warm=True)
+    fresh = batch(SampledCommand(policy), n=n_transitions_per_minibatch)
+    value = batch(drop_aux(critic), n=n_transitions_per_minibatch)
+    minibatch_critic = batch(critic, n=n_transitions_per_minibatch)
 
     def actor_loss(output: Struct, target: Struct) -> jax.Array:
         # target.critic arrives as loss target data, so only the command
@@ -143,9 +160,10 @@ def SACUpdate(
         return jnp.mean(cost + target.alpha * output.logprob)
 
     actor_step = train_step(fresh, actor_loss, actor_optimizer)
-    critic_step = train_step(fitted, critic_loss, critic_optimizer)
+    critic_step = train_step(minibatch_critic, critic_loss, critic_optimizer)
+    temperature = Temperature(initial_temperature)
     temperature_step = train_step(
-        Temperature(initial_temperature),
+        temperature,
         temperature_loss(target_entropy),
         temperature_optimizer,
     )
@@ -157,8 +175,7 @@ def SACUpdate(
     )
 
     def apply(self, observation, command, cost, next_observation, rng):
-        # The Temperature leaf stores its logarithm; read it back directly.
-        alpha = jnp.exp(self.state.temperature.opt.params)
+        alpha = temperature.bind(self.state.temperature.opt.params).value()
         policy_param = self.state.actor.opt.params
         next_command = fresh.bind(policy_param).apply(
             observation=next_observation,
@@ -193,14 +210,11 @@ def SACUpdate(
     def init(self):
         """Initialize the trainers and warm-start the target from the
         online critic weights, so the update needs no init input."""
-        target_weights = self.target if target.parametric else ()
         return Struct(
             actor=actor_step.bind(self.actor).init(),
             critic=critic_step.bind(self.critic).init(),
             temperature=temperature_step.bind(self.temperature).init(),
-            target=target.bind(target_weights).init(
-                input=self.critic.model,
-            ),
+            target=target.bind(()).init(input=self.critic.model),
         )
 
     return members(apply, init=init)
@@ -209,58 +223,33 @@ def SACUpdate(
 @node
 def SAC(
     policy: Node,
-    critic: Node,
-    plant: BaseNode,
-    target: BaseNode,
+    update: Node,
+    plant: Node,
     *,
     transition: PyTree,
     capacity: int,
-    critic_loss: Callable,
-    actor_optimizer,
-    critic_optimizer,
-    temperature_optimizer,
-    worlds: int,
-    horizon: int,
-    updates: int,
-    minibatch: int,
-    discount: float,
-    target_entropy: float,
-    initial_temperature: float,
+    n_worlds: int,
+    n_steps_per_world: int,
+    n_updates: int,
+    n_transitions_per_minibatch: int,
 ) -> Node:
     """One off-policy SAC iteration: collect, store, and update from replay.
 
-    ``transition`` is one zero transition fixing the replay element: the
-    fields SamplingStep records. It also resolves the policy and critic
-    contracts, so the iteration constructs without touching the plant.
+    ``update`` is one built gradient-update Node, scanned over the
+    iteration's minibatches. ``transition`` is one zero transition fixing
+    the replay element, the fields SamplingStep records; it also resolves
+    the policy contract, so the iteration constructs without touching the
+    plant.
     """
     if policy.cyclic:
         raise ValueError(
             'single-transition replay requires a feed-forward policy'
         )
     policy = policy.with_input(transition.observation)
-    critic = critic.with_input(
-        Struct(
-            observation=transition.observation,
-            command=transition.command,
-        ),
-    )
 
-    sampler = scanned(batch(SamplingStep(policy, plant), n=worlds))
-    update = SACUpdate(
-        policy,
-        critic,
-        target,
-        critic_loss=critic_loss,
-        actor_optimizer=actor_optimizer,
-        critic_optimizer=critic_optimizer,
-        temperature_optimizer=temperature_optimizer,
-        minibatch=minibatch,
-        discount=discount,
-        target_entropy=target_entropy,
-        initial_temperature=initial_temperature,
-    )
+    sampler = scanned(batch(SamplingStep(policy, plant), n=n_worlds))
     members = Composite(
-        update=scan(update, n=updates),
+        update=scan(update, n=n_updates),
         buffer=Buffer(capacity, transition),
     )
 
@@ -268,18 +257,18 @@ def SAC(
         policy_param = self.state.update.actor.opt.params
         record = sampler.bind(Struct(policy=policy_param)).apply(
             disturbance=disturbance,
-            initial_state=tile(initial_state, horizon),
+            initial_state=tile(initial_state, n_steps_per_world),
             rng=rng.next(),
         )
 
         # The buffer's currency is one transition per row: flattening the
         # collection axes decorrelates sampling across time and worlds.
-        self.buffer(tree_reshape(record, (horizon * worlds,), axes=2))
+        self.buffer(tree_reshape(record, (n_steps_per_world * n_worlds,), axes=2))
 
         # One gather supplies every minibatch of the iteration; all draws
         # see the buffer with this iteration's transitions inserted.
-        drawn = self.buffer.sample(updates * minibatch, rng=rng.next())
-        minibatches = tree_reshape(drawn, (updates, minibatch))
+        drawn = self.buffer.sample(n_updates * n_transitions_per_minibatch, rng=rng.next())
+        minibatches = tree_reshape(drawn, (n_updates, n_transitions_per_minibatch))
         outcome = self.update(
             observation=minibatches.observation,
             command=minibatches.command,
@@ -295,77 +284,24 @@ def SAC(
     return members(apply)
 
 
-def sac_program(
-    policy: Node,
-    critic: Node,
-    plant: BaseNode,
-    target: BaseNode,
-    data: BaseNode,
-    *,
-    transition: PyTree,
-    capacity: int,
-    critic_loss: Callable,
-    actor_optimizer,
-    critic_optimizer,
-    temperature_optimizer,
-    worlds: int,
-    horizon: int,
-    updates: int,
-    minibatch: int,
-    discount: float,
-    target_entropy: float,
-    initial_temperature: float,
-) -> Node:
-    """Build a complete SAC run from injected Nodes and callables."""
-    iteration = SAC(
-        policy,
-        critic,
-        plant,
-        target,
-        transition=transition,
-        capacity=capacity,
-        critic_loss=critic_loss,
-        actor_optimizer=actor_optimizer,
-        critic_optimizer=critic_optimizer,
-        temperature_optimizer=temperature_optimizer,
-        worlds=worlds,
-        horizon=horizon,
-        updates=updates,
-        minibatch=minibatch,
-        discount=discount,
-        target_entropy=target_entropy,
-        initial_temperature=initial_temperature,
-    )
-    program = carried(iteration)
-
-    def apply(self, initial_state, disturbance):
-        final = self.program(
-            initial_state=initial_state,
-            disturbance=disturbance,
-        )
-        return Struct(
-            policy=policy.bind(final.update.actor.opt.params),
-            critic=critic.bind(final.update.critic.opt.params),
-        )
-
-    training = Wrapper(program=program)(apply, name='training')
-    return serial(data=data, training=training)
-
-
 def sac_training(
-    program: Node,
+    assembly: Struct,
     *,
     parameter_key: jax.Array,
     training_key: jax.Array,
 ) -> Struct:
-    """Parameterize and run an assembled SAC program once."""
-    control = program.parameterize(rng=parameter_key)
-    trained, aux = split_aux(
+    """Run one assembled SAC program and bind the trained views.
+
+    ``assembly`` is Struct(program, policy, critic): the composed program
+    Node beside the unbound views its final carry binds.
+    """
+    control = assembly.program.parameterize(rng=parameter_key)
+    final, aux = split_aux(
         jax.jit(control.apply)(rng=training_key),
     )
     return Struct(
-        policy=trained.policy,
-        critic=trained.critic,
+        policy=assembly.policy.bind(final.update.actor.opt.params),
+        critic=assembly.critic.bind(final.update.critic.opt.params),
         history=Struct(
             actor_loss=aux.training.update.actor.loss.reshape(-1),
             critic_loss=aux.training.update.critic.loss.reshape(-1),

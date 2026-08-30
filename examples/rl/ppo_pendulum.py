@@ -67,23 +67,21 @@ def PendulumValue(hidden: int) -> Node:
 def PendulumTrainingData(
     iterations: int,
     *,
-    worlds: int,
-    horizon: int,
-    chunk: int,
+    n_worlds: int,
+    n_chunks_per_epoch: int,
+    n_steps_per_chunk: int,
 ) -> PNode:
     """Independent starts and disturbances for one Pendulum PPO run."""
-    chunks = horizon // chunk
-    if chunks * chunk != horizon:
-        raise ValueError('horizon must divide into chunks')
-
     def apply(rng):
-        sample = jax.random.uniform(rng.next(), (2, iterations, worlds))
+        sample = jax.random.uniform(rng.next(), (2, iterations, n_worlds))
         return Struct(
             initial_state=Struct(
                 angle=2.0 * jnp.pi * sample[0] - jnp.pi,
                 velocity=VELOCITY_SCALE * (2.0 * sample[1] - 1.0),
             ),
-            disturbance=jnp.zeros((iterations, chunks, chunk, worlds)),
+            disturbance=jnp.zeros(
+                (iterations, n_chunks_per_epoch, n_steps_per_chunk, n_worlds),
+            ),
         )
 
     return Leaf(apply)
@@ -98,12 +96,12 @@ def ProposalMean() -> Node:
 def mean_rollout_program(
     policy: PNode,
     plant: BaseNode,
-    worlds: int,
+    n_worlds: int,
 ) -> PNode:
     """Build a fresh deterministic rollout from an injected policy and plant."""
     mean_policy = policy >> ProposalMean()
     return scanned(
-        batch(ControlledStep(mean_policy, plant), n=worlds)
+        batch(ControlledStep(mean_policy, plant), n=n_worlds)
     ).parameterize()
 
 
@@ -114,13 +112,13 @@ def mean_rollout(
     disturbance: jax.Array,
 ) -> Struct:
     """Run a deterministic closed loop from the given starts."""
-    worlds = tree_len(starts)
+    n_worlds = tree_len(starts)
     steps = tree_len(disturbance)
     input = Struct(
         disturbance=disturbance,
         initial_state=tile(starts, steps),
     )
-    rollout = mean_rollout_program(policy, plant, worlds)
+    rollout = mean_rollout_program(policy, plant, n_worlds)
     trajectory = rollout.apply(bundle=input)
     return Struct(
         cost=trajectory.cost,

@@ -18,9 +18,11 @@ from nodejax import (
     BaseNode,
     Node,
     Struct,
+    carried,
     ensemble,
     reduce,
     scan,
+    serial,
     split_aux,
     state_reinit,
     tile,
@@ -28,7 +30,7 @@ from nodejax import (
 from nodejax import nn
 from examples.rl.losses import ensemble_mse
 from examples.rl.pendulum import Pendulum, downward_starts, phase_starts
-from examples.rl.shac import SHAC, shac_program, shac_training
+from examples.rl.shac import SHAC, shac_training
 from examples.rl.shac_pendulum import (
     PendulumCritic,
     PendulumPolicy,
@@ -44,18 +46,18 @@ DISCOUNT = 0.97
 TRACE = 0.95
 HIDDEN = 64
 MEMORY = 64
-POLICY_MEMBERS = 3
-CRITIC_MEMBERS = 3
-HORIZON = 20
-WORLDS = 64
-CHUNKS = 15
-EPISODES = 40
-CRITIC_UPDATES = 4
+N_POLICY_MEMBERS = 3
+N_CRITIC_MEMBERS = 3
+N_STEPS_PER_CHUNK = 20
+N_WORLDS = 64
+N_CHUNKS_PER_EPISODE = 15
+N_EPISODES = 40
+N_CRITIC_UPDATES = 4
 TARGET_DECAY = 0.995
 ACTOR_RATE = 0.001
 CRITIC_RATE = 0.001
 DISTURBANCE_SCALE = 0.03
-EVALUATION_STEPS = 300
+N_EVALUATION_STEPS = 300
 
 
 def pendulum_policy(memory: BaseNode) -> Node:
@@ -63,38 +65,44 @@ def pendulum_policy(memory: BaseNode) -> Node:
     return PendulumPolicy(memory=memory, hidden=HIDDEN)
 
 
-def pendulum_training_program(policy: Node, episodes: int) -> Node:
+def pendulum_training_program(policy: Node, n_episodes: int) -> Struct:
     """Assemble every Pendulum and SHAC choice at the example boundary."""
-    committee = ensemble(policy, n=POLICY_MEMBERS) >> reduce(jnp.mean)
+    committee = ensemble(policy, n=N_POLICY_MEMBERS) >> reduce(jnp.mean)
     critic = (
         ensemble(
             PendulumCritic(ScalarMLP(hidden=HIDDEN)),
-            n=CRITIC_MEMBERS,
+            n=N_CRITIC_MEMBERS,
         )
         >> reduce(jnp.mean)
     )
-    data = PendulumTrainingData(
-        episodes=episodes,
-        chunks=CHUNKS,
-        horizon=HORIZON,
-        worlds=WORLDS,
-        disturbance_scale=DISTURBANCE_SCALE,
-    )
-    return shac_program(
+    learner = SHAC(
         committee,
         critic,
         Pendulum(),
-        nn.EMA(tau=TARGET_DECAY, warm=True),
-        data,
         critic_loss=ensemble_mse,
         actor_optimizer=optax.adam(ACTOR_RATE),
         critic_optimizer=optax.adam(CRITIC_RATE),
-        worlds=WORLDS,
-        horizon=HORIZON,
-        critic_updates=CRITIC_UPDATES,
-        chunks=CHUNKS,
+        n_worlds=N_WORLDS,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+        n_critic_updates=N_CRITIC_UPDATES,
+        target_decay=TARGET_DECAY,
         discount=DISCOUNT,
         trace=TRACE,
+    )
+    data = PendulumTrainingData(
+        n_episodes=n_episodes,
+        n_chunks_per_episode=N_CHUNKS_PER_EPISODE,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+        n_worlds=N_WORLDS,
+        disturbance_scale=DISTURBANCE_SCALE,
+    )
+    return Struct(
+        program=serial(
+            data=data,
+            training=carried(scan(learner, boundary='episode', n=N_CHUNKS_PER_EPISODE)),
+        ),
+        policy=committee,
+        critic=critic,
     )
 
 
@@ -123,11 +131,11 @@ def test_policy_cyclicity_is_selected_by_its_memory_node() -> None:
 def test_policy_ensembles_compile_for_both_policy_lifecycles() -> None:
     state = Struct(angle=jnp.asarray(0.4), velocity=jnp.asarray(-0.2))
     feedforward = (
-        ensemble(pendulum_policy(nn.identity), n=POLICY_MEMBERS)
+        ensemble(pendulum_policy(nn.identity), n=N_POLICY_MEMBERS)
         >> reduce(jnp.mean)
     ).with_input(state).parameterize(rng=jax.random.PRNGKey(0))
     recurrent = (
-        ensemble(pendulum_policy(nn.GRU(MEMORY)), n=POLICY_MEMBERS)
+        ensemble(pendulum_policy(nn.GRU(MEMORY)), n=N_POLICY_MEMBERS)
         >> reduce(jnp.mean)
     ).with_input(state).parameterize(
         rng=jax.random.PRNGKey(1),
@@ -139,8 +147,8 @@ def test_policy_ensembles_compile_for_both_policy_lifecycles() -> None:
     recurrent_command, recurrent_aux = split_aux(recurrent_output)
 
     assert feedforward_command.shape == recurrent_command.shape == ()
-    assert feedforward_aux.reduce_mean.population.shape == (POLICY_MEMBERS,)
-    assert recurrent_aux.reduce_mean.population.shape == (POLICY_MEMBERS,)
+    assert feedforward_aux.reduce_mean.population.shape == (N_POLICY_MEMBERS,)
+    assert recurrent_aux.reduce_mean.population.shape == (N_POLICY_MEMBERS,)
     assert jnp.allclose(
         feedforward_command,
         jnp.mean(feedforward_aux.reduce_mean.population),
@@ -151,19 +159,19 @@ def test_policy_ensembles_compile_for_both_policy_lifecycles() -> None:
     )
     recurrent_state = jax.tree.leaves(recurrent.state)
     assert recurrent_state
-    assert all(value.shape[0] == POLICY_MEMBERS for value in recurrent_state)
+    assert all(value.shape[0] == N_POLICY_MEMBERS for value in recurrent_state)
 
 
 def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
-    worlds = 2
-    horizon = 4
+    n_worlds = 2
+    n_steps_per_chunk = 4
     initial = Struct(
         angle=jnp.asarray((0.4, -0.7)),
         velocity=jnp.asarray((-0.2, 0.3)),
     )
     input = Struct(
-        disturbance=jnp.zeros((horizon, worlds)),
-        initial_state=tile(initial, horizon),
+        disturbance=jnp.zeros((n_steps_per_chunk, n_worlds)),
+        initial_state=tile(initial, n_steps_per_chunk),
     )
 
     policies = (
@@ -171,11 +179,11 @@ def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
         pendulum_policy(nn.GRU(MEMORY)),
     )
     for policy in policies:
-        committee = ensemble(policy, n=POLICY_MEMBERS) >> reduce(jnp.mean)
+        committee = ensemble(policy, n=N_POLICY_MEMBERS) >> reduce(jnp.mean)
         critic = (
             ensemble(
                 PendulumCritic(ScalarMLP(hidden=HIDDEN)),
-                n=CRITIC_MEMBERS,
+                n=N_CRITIC_MEMBERS,
             )
             >> reduce(jnp.mean)
         )
@@ -183,13 +191,13 @@ def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
             committee,
             critic,
             Pendulum(),
-            nn.EMA(tau=TARGET_DECAY, warm=True),
             critic_loss=ensemble_mse,
             actor_optimizer=optax.adam(ACTOR_RATE),
             critic_optimizer=optax.adam(CRITIC_RATE),
-            worlds=worlds,
-            horizon=horizon,
-            critic_updates=1,
+            n_worlds=n_worlds,
+            n_steps_per_chunk=n_steps_per_chunk,
+            n_critic_updates=1,
+            target_decay=TARGET_DECAY,
             discount=DISCOUNT,
             trace=TRACE,
         )
@@ -268,7 +276,7 @@ def test_shac_swings_up_with_either_policy_lifecycle() -> None:
     feedforward = shac_training(
         pendulum_training_program(
             pendulum_policy(nn.identity),
-            episodes=EPISODES,
+            n_episodes=N_EPISODES,
         ),
         parameter_key=jax.random.PRNGKey(1),
         training_key=jax.random.PRNGKey(11),
@@ -276,7 +284,7 @@ def test_shac_swings_up_with_either_policy_lifecycle() -> None:
     recurrent = shac_training(
         pendulum_training_program(
             pendulum_policy(nn.GRU(MEMORY)),
-            episodes=EPISODES,
+            n_episodes=N_EPISODES,
         ),
         parameter_key=jax.random.PRNGKey(1),
         training_key=jax.random.PRNGKey(11),
@@ -285,13 +293,13 @@ def test_shac_swings_up_with_either_policy_lifecycle() -> None:
         feedforward.policy,
         Pendulum(),
         downward_starts(),
-        steps=EVALUATION_STEPS,
+        steps=N_EVALUATION_STEPS,
     )
     recurrent_result = pendulum_evaluation(
         recurrent.policy,
         Pendulum(),
         downward_starts(),
-        steps=EVALUATION_STEPS,
+        steps=N_EVALUATION_STEPS,
     )
 
     assert jnp.isfinite(feedforward.history.policy_loss).all()
@@ -307,7 +315,7 @@ if __name__ == '__main__':
     feedforward = shac_training(
         pendulum_training_program(
             pendulum_policy(nn.identity),
-            episodes=EPISODES,
+            n_episodes=N_EPISODES,
         ),
         parameter_key=jax.random.PRNGKey(1),
         training_key=jax.random.PRNGKey(11),
@@ -315,7 +323,7 @@ if __name__ == '__main__':
     recurrent = shac_training(
         pendulum_training_program(
             pendulum_policy(nn.GRU(MEMORY)),
-            episodes=EPISODES,
+            n_episodes=N_EPISODES,
         ),
         parameter_key=jax.random.PRNGKey(1),
         training_key=jax.random.PRNGKey(11),
@@ -324,18 +332,18 @@ if __name__ == '__main__':
         feedforward.policy,
         Pendulum(),
         downward_starts(),
-        steps=EVALUATION_STEPS,
+        steps=N_EVALUATION_STEPS,
     )
     recurrent_result = pendulum_evaluation(
         recurrent.policy,
         Pendulum(),
         downward_starts(),
-        steps=EVALUATION_STEPS,
+        steps=N_EVALUATION_STEPS,
     )
     print(
         pendulum_training_program(
             pendulum_policy(nn.GRU(MEMORY)),
-            episodes=EPISODES,
+            n_episodes=N_EPISODES,
         ).describe()
     )
     print(
@@ -357,7 +365,7 @@ if __name__ == '__main__':
         recurrent.policy,
         Pendulum(),
         phase_starts(jax.random.PRNGKey(29)),
-        steps=EVALUATION_STEPS,
+        steps=N_EVALUATION_STEPS,
     )
     portrait = plot_phase_space(
         recurrent.policy,

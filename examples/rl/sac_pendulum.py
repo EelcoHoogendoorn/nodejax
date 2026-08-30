@@ -44,18 +44,18 @@ def pendulum_transition() -> Struct:
 def PendulumTrainingData(
     iterations: int,
     *,
-    worlds: int,
-    horizon: int,
+    n_worlds: int,
+    n_steps_per_world: int,
 ) -> PNode:
     """Independent starts and zero disturbances for one Pendulum SAC run."""
     def apply(rng):
-        sample = jax.random.uniform(rng.next(), (2, iterations, worlds))
+        sample = jax.random.uniform(rng.next(), (2, iterations, n_worlds))
         return Struct(
             initial_state=Struct(
                 angle=2.0 * jnp.pi * sample[0] - jnp.pi,
                 velocity=VELOCITY_SCALE * (2.0 * sample[1] - 1.0),
             ),
-            disturbance=jnp.zeros((iterations, horizon, worlds)),
+            disturbance=jnp.zeros((iterations, n_steps_per_world, n_worlds)),
         )
 
     return Leaf(apply)
