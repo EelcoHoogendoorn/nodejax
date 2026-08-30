@@ -96,13 +96,11 @@ tuples, collection paths, buffer mutation, or reset lines outside the model.
 
 Haiku's count of one is not equivalent: its rule belongs to one rollout; the
 NodeJAX rule belongs to the state and survives other rollouts and trainers.
-The competing code must be audited, not read: omitting a reset still produces
-a valid program with wrong semantics. Only in NodeJAX is control over state
-lifetime not a leaky abstraction.
+The competing code must be audited, not read: omitting a reset still produces a valid program with wrong semantics. In NodeJAX this scan-aligned lifetime policy stays attached to the stateful Node instead of leaking into enclosing control flow.
 
 ## Recurrent PPO: where the abstraction stops
 
-[`ppo.py`](../examples/rl/ppo.py) implements recurrent PPO. [`distributions.py`](../examples/rl/distributions.py) supplies the learned Gaussian policy Node, and [`ppo_pendulum.py`](../examples/rl/ppo_pendulum.py) supplies the domain policy, value, data, and evaluation Nodes. [`test_ppo_pendulum.py`](../examples/rl/test_ppo_pendulum.py) assembles them over a weakly actuated pendulum with either a feed-forward or a GRU policy. The reference point is brax's [`ppo/train.py`](https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py). This is a comparison of authoring boundaries, not throughput or feature count.
+[`ppo.py`](../examples/rl/ppo.py) implements recurrent PPO for fixed-horizon continuing control; it does not model data-dependent termination. [`distributions.py`](../examples/rl/distributions.py) supplies the learned Gaussian policy Node, and [`ppo_pendulum.py`](../examples/rl/ppo_pendulum.py) supplies the domain policy, value, data, and evaluation Nodes. [`test_ppo_pendulum.py`](../examples/rl/test_ppo_pendulum.py) assembles them over a weakly actuated pendulum with either a feed-forward or a GRU policy. The reference point is brax's [`ppo/train.py`](https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py). This is a comparison of authoring boundaries, not throughput or feature count.
 
 Brax's network abstraction ends at feed-forward policy and value calls. Its `train` function then constructs and operates the learning system: optimizer, normalizer, environment rollout, minibatches, nested updates, device coordination, evaluation, and checkpointing. Its nested `minibatch_step`, `sgd_step`, `training_step`, and `training_epoch` functions share dependencies through closure capture. `TrainingState` names only part of the program state: the outer training scan still carries `(TrainingState, environment state, key)`, while the optimization scan carries `(optimizer state, params, key)`. One host-side function owns nearly every lifecycle, and a new concern cuts across its private carries and conventions.
 
@@ -113,13 +111,16 @@ The NodeJAX example leaves PPO explicit: generalized advantage estimation, chunk
 - no manual RNG splitting or RNG keys in scan carries
 - no recurrent state threaded through policy calls or trainer state
 - no hand-authored training-state dataclass
+- no host-side epoch or minibatch loops, and no metric buffers: updates are nested scans over one permutation array, and training history is the program's aux
 - no separately maintained recurrent-state buffer: the scanned Node records its state alongside the rollout
+
+One honest qualification: the pendulum is continuing control, so every episode boundary here is structural and declared, and no `done` flag exists to handle. Part of brax's carry traffic exists because its tasks terminate. A terminating environment would not change the authoring boundary, though: the per-world reset is one `where` over the plant's own state inside the plant's apply, written for a single world with a scalar `done`, vectorized by `batch`, and invisible to the scans, trainers, and replay around it. What no framework removes is the algorithm content that termination adds, such as masking inside an advantage recursion; that stays an explicit statement here as anywhere.
 
 One `PPO` Node owns the actor and critic trainers. Scans around those trainer Nodes express minibatches, epochs, and critic passes. `ppo_program` composes the training-data Node with `carried(PPO(...))`, so one jitted Node application runs every training iteration and returns the trained policy and value. Both optimizer states are ordinary Node state rather than locals in one host-side training function.
 
-The policy exposes the same contract with identity or GRU memory. The PPO author still chooses sequence chunks and selects the recorded state at each chunk boundary, because those are PPO decisions. Replay then initializes a fresh scan from that ordinary data, and a test verifies that every chunk reproduces the log-probabilities observed during collection.
+The policy exposes the same contract with identity or GRU memory. The policy owns `sample`, `logprob`, and `entropy` as methods and the plant owns `observe`, so distribution and observation semantics ride their Nodes through batching, scanning, and the trainers; brax also has distribution objects, routed into each loss function beside the networks. The PPO author still chooses sequence chunks and selects the recorded state at each chunk boundary, because those are PPO decisions. Replay then initializes a fresh scan from that ordinary data. A test verifies the property in both directions: every chunk reproduces the log-probabilities observed during collection, and replay from the neighboring recorded states does not, so the check cannot pass vacuously.
 
-Stock brax PPO can be made recurrent, but recurrence crosses its acting, rollout, reset, storage, minibatching, loss, and evaluation interfaces because the network abstraction does not represent state lifecycle. In NodeJAX it crosses the places where PPO genuinely cares about sequence boundaries; state transport remains the responsibility of the Node and its transforms. Brax implements more production features, but adding features to that training function does not improve its authoring boundary.
+Stock brax PPO can be made recurrent, but recurrence crosses its acting, rollout, storage, minibatching, loss, and evaluation interfaces because the network abstraction does not represent recurrent state transport. In this fixed-horizon NodeJAX example it crosses the places where PPO cares about chunk boundaries; state transport remains the responsibility of the Node and its transforms. Brax implements more production features, but adding features to that training function does not improve its authoring boundary.
 
 The same separation holds for SHAC: [`shac.py`](../examples/rl/shac.py) contains the injected learner and training program, while [`shac_pendulum.py`](../examples/rl/shac_pendulum.py) contains its domain Nodes. The PPO and SHAC assemblies share the `Pendulum` plant and use `ControlledStep` for deterministic closed-loop rollouts. Their policy and value Nodes remain algorithm-specific.
 
@@ -189,8 +190,7 @@ route.
    transformed architecture is the five-line definition; the alternatives
    distribute it across carries, axis declarations, variable mappings, and
    training procedures.
-2. NodeJAX wins state-lifetime composition. Lifetime policy stays attached to
-   the stateful Node while enclosing scans and trainers change.
+2. NodeJAX wins scan-aligned state-lifetime composition. Boundary policy stays attached to the stateful Node while enclosing scans and trainers change.
 3. NodeJAX wins reusable transform authoring. Its transforms preserve one common contract. NNX and Equinox compose within selected local protocols, but transparent reuse across construction, initialization, calls, state, aux, and member interfaces requires protocol-specific adapters that collectively recreate such a contract.
 4. NodeJAX wins generic construction and composed setup. Unresolved statics,
    priming, parameter construction, and RNG routing remain in program

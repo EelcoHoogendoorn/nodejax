@@ -28,17 +28,17 @@ from nodejax.core.wrapper import Wrapper
 
 @transform(preserves='param')
 def state_reinit(inner: Node, boundary: str = 'episode') -> Node:
-    """This subtree's state is RE-INITED at the named boundary, where it
-    would otherwise carry on as it does everywhere else.
+    """Reinitialize this subtree at the start of an enclosing scan call
+    tagged with ``boundary``, where it would otherwise carry on.
 
     The name says both halves because both are the point: it is the STATE that
     goes, params being untouched, and it goes by running the node's own init
     rather than by being zeroed or cleared.
 
     A recurrent carry that should not remember the previous sequence, a
-    feedback register that should not start the next episode mid-swing. The
-    state that accumulates on purpose (a covariance, a belief, running
-    statistics) says nothing, because carrying is what a carry does.
+    feedback register that should not start the next episode-aligned call
+    mid-swing. State that accumulates on purpose (a covariance, a belief,
+    running statistics) says nothing, because carrying is what a carry does.
 
     It claims its WHOLE subtree, since the walk runs bottom up and this node
     acts last: one above a member overrides what that member decided.

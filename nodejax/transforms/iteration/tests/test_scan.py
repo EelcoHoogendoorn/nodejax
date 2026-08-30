@@ -1,9 +1,8 @@
-"""scan: internalize the state loop, a stepper becomes a sequence function.
+"""scan: apply a step over a sequence while keeping its carry external.
 
-Each apply is an episode: state is built from init and runs the sequence.
-With boundary=, scan CLAIMS a tag, and the nodes beneath that declared the
-same one decide what to do with the episode boundary. Nothing here decides
-for them.
+Each apply is one sequence run. With boundary=, scan tags the start of that
+call, and nodes beneath it that declared the same tag decide what to do there.
+Nothing here decides for them.
 """
 
 import jax

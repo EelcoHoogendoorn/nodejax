@@ -5,9 +5,9 @@ does not change it. What a boundary does is give the nodes that want to depart
 from carrying a place to say so, and a name to say it against.
 
 Everything else follows. WHICH state re-inits is declared by the node that
-owns it, since a scan is layers away and could only point by name. WHEN it
-happens the node cannot see, its apply running per step, so the scan tells it.
-Hence a name both sides use.
+owns it, since a scan is layers away and could only point by name. WHEN is the
+start of an enclosing scan call carrying the same tag. Hence a name both sides
+use.
 
 The default was once the other way round, and the asymmetry it created is
 worth remembering: an unclaimed scan carried everything while a claimed one

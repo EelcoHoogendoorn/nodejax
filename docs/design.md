@@ -197,8 +197,7 @@ of composition, not a mutation of the child definition.
   Node tree.
 - Public and authoring interfaces are views or invocation scopes over the
   definition, not alternative definition models.
-- Role presence, priming, input evidence, RNG requirements, layout, and state
-  lifetime behavior are explicit definition data.
+- Role presence, priming, input evidence, RNG requirements, layout, and scan-boundary state actions are explicit definition data.
 - Caller-owned values do not change. Local construction and invocation scopes
   may use mutation that cannot escape as model data.
 - A completed composition or transform returns an ordinary public Node view;

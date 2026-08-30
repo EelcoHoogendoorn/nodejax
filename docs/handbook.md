@@ -220,7 +220,7 @@ Parameter sharing in NodeJAX is structural rather than pointer-based:
 
 ---
 
-## 10. Sequential Boundaries & Episode Reset
+## 10. Sequential Call Boundaries & Episode-Aligned Reset
 
 When scanning models over long sequences in chunks, recurrent state and running statistics have different lifetime requirements:
 * Recurrent hidden state should reset between distinct episodes.
@@ -235,7 +235,7 @@ def keep_statistics(carried, init, decided):
 
 Leaf(apply, init=init, boundary={'episode': keep_statistics})
 ```
-Enclosing `scan(model, boundary='episode')` runs these declared boundary hooks when an episode boundary is reached.
+`scan(model, boundary='episode')` runs matching hooks once at the start of each call. It names an episode boundary only when the caller aligns scan calls with episodes.
 
 ---
 

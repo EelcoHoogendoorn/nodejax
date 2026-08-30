@@ -177,26 +177,13 @@ advanced, output = model(input_data)
 
 ## State lifetimes are declared where the state lives
 
-A uniform state model does not imply that all state lives equally long. An RNN
-carry may reset at the start of every episode while running statistics continue
-across episodes; a simulated plant may restart for each trial while an adaptive
-calibration persists.
+A uniform state model does not imply that all state lives equally long. An RNN carry may reset at the start of every episode-aligned scan call while running statistics continue across calls; a simulated plant may restart for each trial-aligned call while adaptive calibration persists.
 
-Lifetime belongs to the meaning of the state. A temporal structure identifies
-events such as episode or trial boundaries; each state-owning Node decides how
-its own state responds. The loop need not inspect member state, and the member
-need not know which loop or training process contains it.
+Lifetime belongs to the meaning of the state. An enclosing temporal structure names structural call boundaries such as episodes or trials; each state-owning Node decides how its own state responds when that call begins. The loop need not inspect member state, and the member need not know which loop or training process contains it.
 
-This keeps recurrence generic while reset policy travels with the state it
-describes. A stateful Node can be composed, wrapped, or moved without forcing
-callers to reconstruct that policy from its internal layout.
+This keeps recurrence generic for scan-aligned lifetimes while reset policy travels with the state it describes. A stateful Node can be composed, wrapped, or moved without forcing callers to reconstruct that policy from its internal layout.
 
-The choice between functional state or State-like containers when writing code
-in other frameworks is often driven by lifetime-management concerns;
-running stats persist so they are more convenient as a persistent container.
-However that only provides partial control, and its granularity does not suffice
-for more complex use cases, where ad-hoc reset mechanisms have to be threaded
-through a program.
+The choice between functional state or State-like containers when writing code in other frameworks is often driven by lifetime-management concerns; running stats persist so they are more convenient as a persistent container. Without an attached scan-boundary declaration, structural reset choices must instead be reconstructed at call sites.
 
 ## Generic Nodes make reusable libraries possible
 
