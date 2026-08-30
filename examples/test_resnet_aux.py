@@ -20,7 +20,7 @@ from nodejax import tile
 from examples.util import mse
 
 
-@node(name='aux_block')
+@node
 def SownBlock(dim: int) -> Node:
     """A linear block that emits its L2 activation penalty as Aux."""
     def apply(param, input):

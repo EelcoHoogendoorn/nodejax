@@ -35,8 +35,7 @@ def build() -> Node:
         act2=nn.gelu,
         tokens=nn.tokens(),
         pos=nn.PosEmbed(),
-        blocks=stack(
-            nn.TransformerBlock(HIDDEN, heads=HEADS, ratio=4), n=DEPTH),
+        blocks=stack(nn.TransformerBlock(HIDDEN, heads=HEADS, ratio=4), n=DEPTH),
         flat=nn.flat,
         head=nn.Linear(10),
     )

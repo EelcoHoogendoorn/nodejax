@@ -107,30 +107,18 @@ def sequence_loss(output: PyTree, target: jax.Array) -> jax.Array:
 
 def predictor() -> Node:
     block = residual(nn.MinGRU(WIDTH)) >> nn.BatchNorm(momentum=0.1) >> nn.tanh
-    adaptive = next_step_ttt(
-        train_step(
-            block,
-            token_loss,
-            learned_sgd(TTT_RATE),
-        )
-    )
+    adaptive = next_step_ttt(train_step(block, token_loss, learned_sgd(TTT_RATE)))
     recurrent = stack(adaptive, n=DEPTH)
-    observed = taps(serial(recurrent=recurrent, activation=nn.tanh))
-    pipe = serial(
-        encoder=Encoder(FEATURES, WIDTH),
-        recurrent=observed,
-        decoder=Decoder(FEATURES, WIDTH),
-    )
+    observed = taps(recurrent >> nn.tanh)
+    pipe = Encoder(FEATURES, WIDTH) >> observed >> Decoder(FEATURES, WIDTH)
     return tie(pipe, 'encoder', 'decoder')
 
 
 def third_order_learning() -> Node:
     online = scanned(predictor())
-    adapted = finetune(
-        train_step(online, sequence_loss, learned_sgd(FINETUNE_RATE)))
+    adapted = finetune(train_step(online, sequence_loss, learned_sgd(FINETUNE_RATE)))
     committee = ensemble(remat(adapted), n=MEMBERS) >> reduce(jnp.mean)
-    outer = train_step(
-        batch(committee), sequence_loss, optax.adam(META_RATE))
+    outer = train_step(batch(committee), sequence_loss, optax.adam(META_RATE))
     return trained(outer)
 
 
@@ -196,7 +184,7 @@ def main() -> None:
     tapped = [
         leaf
         for path, leaf in jax.tree_util.tree_flatten_with_path(result.aux)[0]
-        if jax.tree_util.keystr(path).endswith('.recurrent.activation')
+        if jax.tree_util.keystr(path).endswith('.tanh')
     ]
     activation_trace, = tapped
     print(result.initial.summary())

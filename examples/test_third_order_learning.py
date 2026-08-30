@@ -144,7 +144,7 @@ def test_full_showcase_trains_through_the_tied_recurrent_tree() -> None:
     tapped = [
         leaf
         for path, leaf in jax.tree_util.tree_flatten_with_path(result.aux)[0]
-        if jax.tree_util.keystr(path).endswith('.recurrent.activation')
+        if jax.tree_util.keystr(path).endswith('.tanh')
     ]
     assert len(tapped) == 1
     assert tapped[0].shape == (
