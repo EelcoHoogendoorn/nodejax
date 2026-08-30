@@ -41,6 +41,14 @@ def tree_len(tree: PyTree) -> int:
     return length
 
 
+def tree_reshape(tree: PyTree, shape: tuple, axes: int = 1) -> PyTree:
+    """Replace the first ``axes`` leading axes of every leaf with ``shape``."""
+    return jax.tree.map(
+        lambda leaf: leaf.reshape(shape + jnp.shape(leaf)[axes:]),
+        tree,
+    )
+
+
 def tree_broadcast_axis(tree: PyTree, count: int, axis: int) -> PyTree:
     """Broadcast a pytree over one new axis."""
     def broadcast(leaf):
