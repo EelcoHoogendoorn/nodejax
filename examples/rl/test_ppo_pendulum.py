@@ -37,14 +37,16 @@ from examples.rl.distributions import (
     StateIndependentLogStd,
 )
 from examples.rl.losses import mse
-from examples.rl.pendulum import Pendulum
+from examples.rl.pendulum import (
+    AngleFeatures,
+    Pendulum,
+    downward_starts,
+)
+from examples.rl.control import SamplingStep, chunk_starts, collect
 from examples.rl.ppo import (
     PPO,
     ReplayStep,
-    SamplingStep,
-    chunk_starts,
     clipped_surrogate,
-    collect,
     ppo_training,
 )
 from examples.rl.ppo_pendulum import (
@@ -111,7 +113,7 @@ def pendulum_training_program(policy: Node, iterations: int) -> Struct:
     data = PendulumTrainingData(
         iterations,
         n_worlds=N_WORLDS,
-        n_chunks_per_epoch=N_CHUNKS_PER_EPOCH,
+        n_chunks=N_CHUNKS_PER_EPOCH,
         n_steps_per_chunk=N_STEPS_PER_CHUNK,
     )
     return Struct(
@@ -190,7 +192,7 @@ def test_replay_reproduces_the_rollout() -> None:
     data = PendulumTrainingData(
         1,
         n_worlds=N_WORLDS,
-        n_chunks_per_epoch=N_CHUNKS_PER_EPOCH,
+        n_chunks=N_CHUNKS_PER_EPOCH,
         n_steps_per_chunk=N_STEPS_PER_CHUNK,
     ).apply(rng=jax.random.PRNGKey(3))
     initial_state = tree_first(data.initial_state)
@@ -201,7 +203,7 @@ def test_replay_reproduces_the_rollout() -> None:
         initial_state,
         disturbance,
         jax.random.PRNGKey(1),
-        n_chunks_per_epoch=N_CHUNKS_PER_EPOCH,
+        n_chunks=N_CHUNKS_PER_EPOCH,
         n_steps_per_chunk=N_STEPS_PER_CHUNK,
     )
     starts = chunk_starts(
@@ -295,5 +297,40 @@ def swing_up() -> None:
     print(output)
 
 
+def angle_only_swing_up() -> None:
+    """The partially observed run: the policy reads the angle alone, the
+    value keeps the full observation, and memory must recover velocity.
+    Takes about four times the fully observed budget; run it with
+    ``python -m examples.rl.test_ppo_pendulum angle``."""
+    policy = LearnedGaussian(
+        PendulumMean(
+            memory=nn.GRU(MEMORY),
+            hidden=HIDDEN,
+            features=AngleFeatures(),
+        ),
+        StateIndependentLogStd(initial=INITIAL_LOG_STD),
+    )
+    result = ppo_training(
+        pendulum_training_program(policy, iterations=1200),
+        parameter_key=jax.random.PRNGKey(0),
+        training_key=jax.random.PRNGKey(100),
+    )
+    outcome = pendulum_evaluation(
+        result.policy,
+        Pendulum(),
+        downward_starts(),
+        steps=N_EVALUATION_STEPS,
+    )
+    print(
+        f'angle-only evaluation cost {outcome.mean_cost:.3f} | '
+        f'final angle {outcome.final_angle:.3f} rad | '
+        f'final velocity {outcome.final_velocity:.3f} rad/s'
+    )
+
+
 if __name__ == '__main__':
-    swing_up()
+    import sys
+    if 'angle' in sys.argv[1:]:
+        angle_only_swing_up()
+    else:
+        swing_up()

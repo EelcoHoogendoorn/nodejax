@@ -1,16 +1,28 @@
 """Soft Actor-Critic over a replay Buffer that is ordinary Node state.
 
-One SAC iteration collects fresh transitions, inserts them into the buffer,
-draws every minibatch of the iteration in one gather, and scans one gradient
-update over them. One gradient update is itself a Node whose members are the
+The buffer's currency is one chunk per row: an observation sequence with
+one step of overlap, the commands and costs taken along it, and the policy
+state at the chunk start. A feed-forward policy leaves the stored state
+empty and unread, while a recurrent policy resumes from it, so one code
+path serves both lifecycles with no fork anywhere. Collection and
+chunk-start recovery are the shared machinery in ``control.py``; the
+buffer never learns what a row means.
+
+One SAC iteration collects fresh chunks, inserts them, draws every
+minibatch of the iteration in one gather, and scans one gradient update
+over them. One gradient update is itself a Node whose members are the
 actor, critic, and temperature trainers plus the slow target; the buffer
 shares the iteration's state with all of them, so ``carried`` over an
 injected data Node runs the complete training as one jitted apply.
 
-Replay draws single transitions, so this SAC takes a feed-forward policy;
-sequence replay from stored recurrent state is the PPO example's machinery.
-The actor, critic, and temperature update from the pre-update snapshot of
-each other's parameters, like the GAN example's trainers.
+Sizes are free integers named with their own scope, one training
+iteration being the ambient scope: ``n_worlds``, ``n_chunks`` collected,
+``n_steps_per_chunk`` (also the truncation depth replay resumes across),
+``n_updates``, and ``n_chunks_per_minibatch``, the sample one gradient
+step consumes. The policy's ``sample`` method returns the command with
+its log-probability. Actor, critic, and temperature update from the
+pre-update snapshot of each other's parameters, like the GAN example's
+trainers.
 """
 
 from typing import Callable
@@ -20,7 +32,6 @@ import jax.numpy as jnp
 
 from nodejax import (
     Aux,
-    BaseNode,
     Composite,
     Leaf,
     Node,
@@ -34,42 +45,28 @@ from nodejax import (
     scanned,
     split_aux,
     tile,
+    tree_broadcast_axis,
     tree_last,
     tree_reshape,
+    tree_tail,
+    tree_swap_axes,
     train_step,
 )
 from nodejax import nn
+from examples.rl.control import SamplingStep, chunk_starts, collect
 from examples.rl.replay import Buffer
 
 
 @node
-def SamplingStep(policy: Node, plant: BaseNode) -> Node:
-    """One exploration transition recorded for the replay buffer."""
-    members = Composite(policy=policy, plant=plant)
-
-    def apply(self, disturbance, initial_state, rng):
-        observation = self.plant.observe()
-        proposal = self.policy(observation)
-        drawn = self.policy.sample(proposal, rng=rng.next())
-        output = self.plant(command=drawn.command, disturbance=disturbance)
-        return Struct(
-            observation=observation,
-            command=drawn.command,
-            cost=output.cost,
-            next_observation=self.plant.observe(),
-        )
-
-    def init(self, input):
-        """Start a rollout from caller-supplied plant state."""
-        return Struct(plant=input.initial_state)
-
-    return members(apply, init=init)
-
-
-@node
 def SampledCommand(policy: Node) -> Node:
-    """Draw a reparameterized command and its log-probability."""
-    def apply(self, observation, rng):
+    """Replay stored observations, drawing a fresh command at every step.
+
+    A recurrent chunk's starting state arrives as data: init adopts
+    ``initial`` verbatim, so replay resumes the memory observed during
+    collection; over a stateless policy the declaration is vacuous and
+    the field rides unread. It rides every step and is read once.
+    """
+    def apply(self, observation, initial, rng):
         proposal = self.policy(observation)
         drawn = self.policy.sample(proposal, rng=rng.next())
         return Struct(
@@ -78,7 +75,10 @@ def SampledCommand(policy: Node) -> Node:
             logprob=drawn.logprob,
         )
 
-    return Wrapper(policy=policy)(apply)
+    def init(input):
+        return input.initial
+
+    return Wrapper(policy=policy)(apply, init=init)
 
 
 @node
@@ -112,32 +112,70 @@ def temperature_loss(target_entropy: float) -> Callable:
     return loss
 
 
+def entropy_regularized_cost(output: Struct, target: Struct) -> jax.Array:
+    """SAC's actor objective: pessimistic cost plus entropy pressure.
+
+    The bound online critic and the temperature arrive as loss data, so
+    only the fresh commands carry gradient into the value; that path is
+    the actor's signal.
+    """
+    cost = drop_aux(target.critic.apply(
+        Struct(observation=output.observation, command=output.command),
+    ))
+    return jnp.mean(cost + target.alpha * output.logprob)
+
+
+def soft_bellman_fit(discount: float, fit: Callable) -> Callable:
+    """Configure the critic objective as a two-argument callable.
+
+    The soft Bellman target built from the replayed tail and the bound
+    EMA critic arriving as loss data, fitted by ``fit(output, targets)``;
+    the targets are constants by capture, so no gradient stopping is
+    needed.
+    """
+    def loss(output, target) -> jax.Array:
+        future = drop_aux(target.critic.apply(
+            Struct(
+                observation=target.tail.observation,
+                command=target.tail.command,
+            ),
+        ))
+        targets = target.cost + discount * (
+            future + target.alpha * target.tail.logprob)
+        return fit(output, targets)
+
+    return loss
+
+
 @node
 def SACUpdate(
     policy: Node,
     critic: Node,
     *,
     transition: PyTree,
+    actor_loss: Callable,
     critic_loss: Callable,
     actor_optimizer,
     critic_optimizer,
     temperature_optimizer,
-    n_transitions_per_minibatch: int,
-    discount: float,
-    target_decay: float,
+    n_chunks_per_minibatch: int,
+    n_steps_per_chunk: int,
+    ema_critic_decay: float,
     target_entropy: float,
     initial_temperature: float,
 ) -> Node:
-    """One SAC gradient update consuming one replayed minibatch.
+    """One SAC gradient update consuming one replayed minibatch of chunks.
 
-    ``transition`` resolves the policy and critic contracts. The Bellman
-    target bootstraps from a slow critic, an EMA over the online critic
-    parameters advanced once per update, plus the entropy contribution of
-    a fresh policy sample at the next observation. The EMA is constructed
-    here because the update's warm start assumes its state layout; only
-    its decay is a caller's choice. ``critic_loss`` accepts ``(output,
-    target)`` and may inspect Aux, so an ensemble critic can fit every
-    member while exposing one pessimistic value to the backup.
+    ``transition`` resolves the policy and critic contracts. One replay
+    pass over each chunk's overlapping observation sequence serves
+    everything: fresh commands and log-probabilities at every step feed
+    the actor loss, and the same pass shifted one step supplies the soft
+    Bellman target from the EMA critic, a lagging view of the online
+    critic parameters advanced once per update and constructed here
+    because the warm start assumes its state layout. Both losses receive
+    bound critic views as loss data; ``critic_loss`` may inspect Aux, so
+    an ensemble critic can fit every member while exposing one
+    pessimistic value to the backup.
     """
     policy = policy.with_input(transition.observation)
     critic = critic.with_input(
@@ -146,20 +184,25 @@ def SACUpdate(
             command=transition.command,
         ),
     )
-    target = nn.EMA(tau=target_decay, warm=True)
-    fresh = batch(SampledCommand(policy), n=n_transitions_per_minibatch)
-    value = batch(drop_aux(critic), n=n_transitions_per_minibatch)
-    minibatch_critic = batch(critic, n=n_transitions_per_minibatch)
+    ema_critic = nn.EMA(tau=ema_critic_decay, warm=True)
+    replay = scanned(
+        batch(SampledCommand(policy), n=n_chunks_per_minibatch),
+    )
+    # One critic tower per shape; each consumer drops the Aux it does
+    # not read, so the trainer may fit every member value the ensemble
+    # retains while the backup reads the pessimistic value.
+    minibatch_critic = batch(
+        batch(critic, n=n_chunks_per_minibatch),
+        n=n_steps_per_chunk,
+        axis='time',
+    )
+    sequence_critic = batch(
+        batch(critic, n=n_chunks_per_minibatch),
+        n=n_steps_per_chunk + 1,
+        axis='time',
+    )
 
-    def actor_loss(output: Struct, target: Struct) -> jax.Array:
-        # target.critic arrives as loss target data, so only the command
-        # carries gradient into the value; that path is the actor's signal.
-        cost = value.bind(target.critic).apply(
-            Struct(observation=output.observation, command=output.command),
-        )
-        return jnp.mean(cost + target.alpha * output.logprob)
-
-    actor_step = train_step(fresh, actor_loss, actor_optimizer)
+    actor_step = train_step(replay, actor_loss, actor_optimizer)
     critic_step = train_step(minibatch_critic, critic_loss, critic_optimizer)
     temperature = Temperature(initial_temperature)
     temperature_step = train_step(
@@ -168,53 +211,71 @@ def SACUpdate(
         temperature_optimizer,
     )
     members = Composite(
-        actor=actor_step,
-        critic=critic_step,
-        temperature=temperature_step,
-        target=target,
+        actor_trainer=actor_step,
+        critic_trainer=critic_step,
+        temperature_trainer=temperature_step,
+        ema_critic=ema_critic,
     )
 
-    def apply(self, observation, command, cost, next_observation, rng):
-        alpha = temperature.bind(self.state.temperature.opt.params).value()
-        policy_param = self.state.actor.opt.params
-        next_command = fresh.bind(policy_param).apply(
-            observation=next_observation,
+    def apply(self, observation, command, cost, initial, rng):
+        alpha = temperature.bind(
+            self.state.temperature_trainer.opt.params).value()
+        policy_param = self.state.actor_trainer.opt.params
+
+        # One axis move: chunk rows arrive row-major, replay scans time.
+        steps = tree_swap_axes(Struct(observation=observation, command=command, cost=cost), 0, 1)
+        rider = tree_broadcast_axis(initial, n_steps_per_chunk + 1, axis=0)
+        replayed = replay.bind(policy_param).apply(
+            observation=steps.observation,
+            initial=rider,
             rng=rng.next(),
         )
-        target_param = self.target(self.state.critic.opt.params)
-        future = value.bind(target_param).apply(
-            Struct(
-                observation=next_observation,
-                command=next_command.command,
+        ema_critic_param = self.ema_critic(
+            self.state.critic_trainer.opt.params)
+        # The Bellman target reads the same tensors one step later.
+        shifted = tree_tail(Struct(
+            observation=steps.observation,
+            command=replayed.command,
+            logprob=replayed.logprob,
+        ))
+        self.critic_trainer(
+            input=Struct(
+                observation=jax.tree.map(
+                    lambda value_: value_[:-1], steps.observation),
+                command=steps.command,
+            ),
+            target=Struct(
+                cost=steps.cost,
+                tail=shifted,
+                critic=minibatch_critic.bind(ema_critic_param),
+                alpha=alpha,
             ),
         )
-        cost_to_go = jax.lax.stop_gradient(
-            cost + discount * (future + alpha * next_command.logprob),
-        )
-
-        self.critic(
-            input=Struct(observation=observation, command=command),
-            target=cost_to_go,
-        )
-        self.actor(
-            input=observation,
-            target=Struct(critic=self.state.critic.opt.params, alpha=alpha),
+        self.actor_trainer(
+            input=Struct(observation=steps.observation, initial=rider),
+            target=Struct(
+                critic=sequence_critic.bind(
+                    self.state.critic_trainer.opt.params),
+                alpha=alpha,
+            ),
         )
         # The Temperature leaf ignores its input; the loss reads the target.
-        self.temperature(
-            input=next_command.logprob,
-            target=next_command.logprob,
+        self.temperature_trainer(
+            input=replayed.logprob,
+            target=replayed.logprob,
         )
         return Struct(temperature=alpha)
 
-    def init(self):
+    def init(param):
         """Initialize the trainers and warm-start the target from the
         online critic weights, so the update needs no init input."""
         return Struct(
-            actor=actor_step.bind(self.actor).init(),
-            critic=critic_step.bind(self.critic).init(),
-            temperature=temperature_step.bind(self.temperature).init(),
-            target=target.bind(()).init(input=self.critic.model),
+            actor_trainer=actor_step.bind(param.actor_trainer).init(),
+            critic_trainer=critic_step.bind(param.critic_trainer).init(),
+            temperature_trainer=temperature_step.bind(
+                param.temperature_trainer).init(),
+            ema_critic=ema_critic.bind(()).init(
+                input=param.critic_trainer.model),
         )
 
     return members(apply, init=init)
@@ -229,51 +290,102 @@ def SAC(
     transition: PyTree,
     capacity: int,
     n_worlds: int,
-    n_steps_per_world: int,
+    n_chunks: int,
+    n_steps_per_chunk: int,
     n_updates: int,
-    n_transitions_per_minibatch: int,
+    n_chunks_per_minibatch: int,
 ) -> Node:
     """One off-policy SAC iteration: collect, store, and update from replay.
 
     ``update`` is one built gradient-update Node, scanned over the
     iteration's minibatches. ``transition`` is one zero transition fixing
-    the replay element, the fields SamplingStep records; it also resolves
-    the policy contract, so the iteration constructs without touching the
-    plant.
+    one step's observation, command, and cost; the stored chunk element
+    derives from it and from the policy's own state tree, so the
+    iteration constructs without touching the plant.
     """
-    if policy.cyclic:
-        raise ValueError(
-            'single-transition replay requires a feed-forward policy'
-        )
     policy = policy.with_input(transition.observation)
+    memory = jax.tree.map(
+        jnp.zeros_like,
+        policy.parameterize(rng=jax.random.PRNGKey(0)).init(
+            input=transition.observation,
+        ),
+    )
+    element = Struct(
+        observation=tile(transition.observation, n_steps_per_chunk + 1),
+        command=tile(transition.command, n_steps_per_chunk),
+        cost=tile(transition.cost, n_steps_per_chunk),
+        initial=memory,
+    )
 
-    sampler = scanned(batch(SamplingStep(policy, plant), n=n_worlds))
+    sampler = scanned(
+        scan(
+            batch(SamplingStep(policy, plant), n=n_worlds),
+            n=n_steps_per_chunk,
+        ),
+        record=True,
+    )
     members = Composite(
         update=scan(update, n=n_updates),
-        buffer=Buffer(capacity, transition),
+        buffer=Buffer(capacity, element),
     )
 
     def apply(self, initial_state, disturbance, rng):
-        policy_param = self.state.update.actor.opt.params
-        record = sampler.bind(Struct(policy=policy_param)).apply(
-            disturbance=disturbance,
-            initial_state=tile(initial_state, n_steps_per_world),
-            rng=rng.next(),
+        policy_param = self.state.update.actor_trainer.opt.params
+        record, recorded_state = collect(
+            sampler,
+            policy_param,
+            initial_state,
+            disturbance,
+            rng.next(),
+            n_chunks=n_chunks,
+            n_steps_per_chunk=n_steps_per_chunk,
+        )
+        starts = chunk_starts(
+            policy,
+            policy_param,
+            record.observation,
+            recorded_state,
+            n_worlds,
         )
 
-        # The buffer's currency is one transition per row: flattening the
-        # collection axes decorrelates sampling across time and worlds.
-        self.buffer(tree_reshape(record, (n_steps_per_world * n_worlds,), axes=2))
+        # One overlap step lets a single replay pass serve both the fresh
+        # actions and the shifted Bellman targets. The buffer's currency
+        # is one chunk per row: flattening the (chunk, world) axes
+        # decorrelates sampling across both.
+        sequence = jax.tree.map(
+            lambda observation, last: jnp.concatenate(
+                (observation, last[:, -1:]), axis=1),
+            record.observation,
+            record.next_observation,
+        )
+        rows = tree_swap_axes(
+            Struct(
+                observation=sequence,
+                command=record.command,
+                cost=record.cost,
+            ),
+            1,
+            2,
+        )
+        rows = tree_reshape(rows, (n_chunks * n_worlds,), axes=2)
+        self.buffer(Struct(
+            observation=rows.observation,
+            command=rows.command,
+            cost=rows.cost,
+            initial=tree_reshape(starts, (n_chunks * n_worlds,), axes=2),
+        ))
 
         # One gather supplies every minibatch of the iteration; all draws
-        # see the buffer with this iteration's transitions inserted.
-        drawn = self.buffer.sample(n_updates * n_transitions_per_minibatch, rng=rng.next())
-        minibatches = tree_reshape(drawn, (n_updates, n_transitions_per_minibatch))
+        # see the buffer with this iteration's chunks inserted.
+        drawn = self.buffer.sample(
+            n_updates * n_chunks_per_minibatch, rng=rng.next())
+        minibatches = tree_reshape(
+            drawn, (n_updates, n_chunks_per_minibatch))
         outcome = self.update(
             observation=minibatches.observation,
             command=minibatches.command,
             cost=minibatches.cost,
-            next_observation=minibatches.next_observation,
+            initial=minibatches.initial,
         )
         mean_cost = jnp.mean(record.cost)
         return Struct(mean_cost=mean_cost), Aux(
@@ -300,11 +412,11 @@ def sac_training(
         jax.jit(control.apply)(rng=training_key),
     )
     return Struct(
-        policy=assembly.policy.bind(final.update.actor.opt.params),
-        critic=assembly.critic.bind(final.update.critic.opt.params),
+        policy=assembly.policy.bind(final.update.actor_trainer.opt.params),
+        critic=assembly.critic.bind(final.update.critic_trainer.opt.params),
         history=Struct(
-            actor_loss=aux.training.update.actor.loss.reshape(-1),
-            critic_loss=aux.training.update.critic.loss.reshape(-1),
+            actor_loss=aux.training.update.actor_trainer.loss.reshape(-1),
+            critic_loss=aux.training.update.critic_trainer.loss.reshape(-1),
             temperature=aux.training.temperature,
             mean_cost=aux.training.mean_cost,
         ),

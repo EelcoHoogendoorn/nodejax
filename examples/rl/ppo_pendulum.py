@@ -29,10 +29,14 @@ from examples.rl.pendulum import (
 def PendulumMean(
     memory: BaseNode,
     hidden: int,
+    features: BaseNode | None = None,
 ) -> Node:
-    """Pendulum observation to Gaussian mean, optionally with memory."""
+    """Pendulum observation to Gaussian mean, optionally with memory.
+
+    ``features`` narrows what the policy sees; the default reads the full
+    observation."""
     members = Composite(
-        features=PendulumFeatures(),
+        features=features or PendulumFeatures(),
         encoder=nn.Linear(hidden) >> nn.silu,
         memory=memory,
         command=(
@@ -68,10 +72,10 @@ def PendulumTrainingData(
     iterations: int,
     *,
     n_worlds: int,
-    n_chunks_per_epoch: int,
+    n_chunks: int,
     n_steps_per_chunk: int,
 ) -> PNode:
-    """Independent starts and disturbances for one Pendulum PPO run."""
+    """Independent starts and disturbances for one collection-driven run."""
     def apply(rng):
         sample = jax.random.uniform(rng.next(), (2, iterations, n_worlds))
         return Struct(
@@ -80,7 +84,7 @@ def PendulumTrainingData(
                 velocity=VELOCITY_SCALE * (2.0 * sample[1] - 1.0),
             ),
             disturbance=jnp.zeros(
-                (iterations, n_chunks_per_epoch, n_steps_per_chunk, n_worlds),
+                (iterations, n_chunks, n_steps_per_chunk, n_worlds),
             ),
         )
 

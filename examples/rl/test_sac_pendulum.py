@@ -16,38 +16,38 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from nodejax import (Composite, Node, Struct, carried, ensemble, node,
-                     reduce, serial)
+from nodejax import (BaseNode, Composite, Node, Struct, carried, ensemble,
+                     node, reduce, serial)
 from nodejax import nn
 from examples.rl.distributions import (
     SquashedGaussian,
     StateIndependentLogStd,
 )
 from examples.rl.losses import ensemble_min_mse
-from examples.rl.pendulum import Pendulum, downward_starts
+from examples.rl.pendulum import AngleFeatures, Pendulum, downward_starts
 from examples.rl.ppo_pendulum import (
     PendulumMean,
+    PendulumTrainingData,
     mean_rollout,
     pendulum_evaluation,
 )
 from examples.rl.replay import Buffer
-from examples.rl.sac import SAC, SACUpdate, sac_training
-from examples.rl.sac_pendulum import (
-    PendulumQ,
-    PendulumTrainingData,
-    pendulum_transition,
-)
+from examples.rl.sac import (SAC, SACUpdate, entropy_regularized_cost,
+                             sac_training, soft_bellman_fit)
+from examples.rl.sac_pendulum import PendulumQ, pendulum_transition
 
 
 HIDDEN = 64
+MEMORY = 32
 N_CRITIC_MEMBERS = 2
 CAPACITY = 20_000
 N_WORLDS = 16
-N_STEPS_PER_WORLD = 8
+N_CHUNKS = 1
+N_STEPS_PER_CHUNK = 8
 N_UPDATES = 128
-N_TRANSITIONS_PER_MINIBATCH = 128
+N_CHUNKS_PER_MINIBATCH = 16
 DISCOUNT = 0.97
-TARGET_DECAY = 0.995
+EMA_CRITIC_DECAY = 0.995
 ACTOR_RATE = 1e-3
 CRITIC_RATE = 1e-3
 TEMPERATURE_RATE = 1e-3
@@ -58,23 +58,31 @@ COMMAND_SCALE = 3.0
 N_EVALUATION_STEPS = 300
 
 
-def pendulum_policy() -> Node:
+def pendulum_policy(memory: BaseNode) -> Node:
     """A squashed Gaussian over the PPO example's mean network: bounded
     commands keep the learned Q from dragging the actor into saturation."""
     return SquashedGaussian(
-        PendulumMean(memory=nn.identity, hidden=HIDDEN),
+        PendulumMean(memory=memory, hidden=HIDDEN),
         StateIndependentLogStd(initial=INITIAL_LOG_STD),
         scale=COMMAND_SCALE,
     )
 
 
-def pendulum_training_program(iterations: int) -> Struct:
+def pendulum_training_program(
+    policy: Node,
+    iterations: int,
+    *,
+    capacity: int = CAPACITY,
+    n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
+    n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
+) -> Struct:
     """Assemble every Pendulum and SAC choice at the example boundary.
 
     Each constructor consumes the configuration it owns; the layers
-    exchange built Nodes. ``transition`` and ``n_transitions_per_minibatch``
-    reach two constructors because two components genuinely consume them."""
-    policy = pendulum_policy()
+    exchange built Nodes. ``transition`` and the chunk sizes reach two
+    constructors because two components genuinely consume them. The
+    keyword sizes default to the fast-test grid; the angle-only run
+    overrides them."""
     critic = (
         ensemble(PendulumQ(hidden=HIDDEN), n=N_CRITIC_MEMBERS)
         >> reduce(jnp.min)
@@ -84,13 +92,17 @@ def pendulum_training_program(iterations: int) -> Struct:
         policy,
         critic,
         transition=transition,
-        critic_loss=ensemble_min_mse,
+        actor_loss=entropy_regularized_cost,
+        critic_loss=soft_bellman_fit(
+            discount=DISCOUNT,
+            fit=ensemble_min_mse,
+        ),
         actor_optimizer=optax.adam(ACTOR_RATE),
         critic_optimizer=optax.adam(CRITIC_RATE),
         temperature_optimizer=optax.adam(TEMPERATURE_RATE),
-        n_transitions_per_minibatch=N_TRANSITIONS_PER_MINIBATCH,
-        discount=DISCOUNT,
-        target_decay=TARGET_DECAY,
+        n_chunks_per_minibatch=n_chunks_per_minibatch,
+        n_steps_per_chunk=n_steps_per_chunk,
+        ema_critic_decay=EMA_CRITIC_DECAY,
         target_entropy=TARGET_ENTROPY,
         initial_temperature=INITIAL_TEMPERATURE,
     )
@@ -99,16 +111,18 @@ def pendulum_training_program(iterations: int) -> Struct:
         update,
         Pendulum(),
         transition=transition,
-        capacity=CAPACITY,
+        capacity=capacity,
         n_worlds=N_WORLDS,
-        n_steps_per_world=N_STEPS_PER_WORLD,
+        n_chunks=N_CHUNKS,
+        n_steps_per_chunk=n_steps_per_chunk,
         n_updates=N_UPDATES,
-        n_transitions_per_minibatch=N_TRANSITIONS_PER_MINIBATCH,
+        n_chunks_per_minibatch=n_chunks_per_minibatch,
     )
     data = PendulumTrainingData(
         iterations,
         n_worlds=N_WORLDS,
-        n_steps_per_world=N_STEPS_PER_WORLD,
+        n_chunks=N_CHUNKS,
+        n_steps_per_chunk=n_steps_per_chunk,
     )
     return Struct(
         program=serial(data=data, training=carried(iteration)),
@@ -175,7 +189,7 @@ def test_sac_learns_the_swing_up() -> None:
     budget an occasional seed leaves one start settling near 0.7 rad, so
     the angle pin separates learned from unlearned, not luck from luck."""
     result = sac_training(
-        pendulum_training_program(iterations=60),
+        pendulum_training_program(pendulum_policy(nn.identity), iterations=60),
         parameter_key=jax.random.PRNGKey(0),
         training_key=jax.random.PRNGKey(100),
     )
@@ -193,6 +207,21 @@ def test_sac_learns_the_swing_up() -> None:
     assert outcome.final_angle < 1.0, outcome
 
 
+def test_recurrent_sac_is_wired() -> None:
+    """Two iterations of the GRU arm run finite: the chunk currency, the
+    stored starts, and the replayed update hold together. Learning budget
+    lives in the angle-only main, keeping executed tests minimal."""
+    result = sac_training(
+        pendulum_training_program(pendulum_policy(nn.GRU(MEMORY)), iterations=2),
+        parameter_key=jax.random.PRNGKey(0),
+        training_key=jax.random.PRNGKey(100),
+    )
+
+    assert np.all(np.isfinite(result.history.mean_cost))
+    assert np.all(np.isfinite(result.history.actor_loss))
+    assert np.all(np.isfinite(result.history.critic_loss))
+
+
 def swing_up() -> None:
     """Run the full training budget and write its phase portrait."""
     import os
@@ -208,7 +237,7 @@ def swing_up() -> None:
     )
 
     result = sac_training(
-        pendulum_training_program(iterations=300),
+        pendulum_training_program(pendulum_policy(nn.identity), iterations=300),
         parameter_key=jax.random.PRNGKey(0),
         training_key=jax.random.PRNGKey(100),
     )
@@ -257,5 +286,51 @@ def swing_up() -> None:
     print(output)
 
 
+def angle_only_swing_up() -> None:
+    """The partially observed run: the policy reads the angle alone, the
+    Q function keeps the full observation, and stored chunk starts carry
+    the memory replay resumes from. Measured on 2026-08-30: needs about
+    eight times the fully observed budget, a small buffer so stored
+    memories stay fresh, and longer chunks so fresh observations dilute
+    the stale stored start (0.16 rad final; 8-step chunks reach 0.43).
+    Run it with ``python -m examples.rl.test_sac_pendulum angle``."""
+    policy = SquashedGaussian(
+        PendulumMean(
+            memory=nn.GRU(MEMORY),
+            hidden=HIDDEN,
+            features=AngleFeatures(),
+        ),
+        StateIndependentLogStd(initial=INITIAL_LOG_STD),
+        scale=COMMAND_SCALE,
+    )
+    result = sac_training(
+        pendulum_training_program(
+            policy,
+            iterations=2400,
+            capacity=2_000,
+            n_steps_per_chunk=16,
+            n_chunks_per_minibatch=8,
+        ),
+        parameter_key=jax.random.PRNGKey(0),
+        training_key=jax.random.PRNGKey(100),
+    )
+    outcome = pendulum_evaluation(
+        result.policy,
+        Pendulum(),
+        downward_starts(),
+        steps=N_EVALUATION_STEPS,
+    )
+    print(
+        f'angle-only evaluation cost {outcome.mean_cost:.3f} | '
+        f'temperature {result.history.temperature[-1]:.3f} | '
+        f'final angle {outcome.final_angle:.3f} rad | '
+        f'final velocity {outcome.final_velocity:.3f} rad/s'
+    )
+
+
 if __name__ == '__main__':
-    swing_up()
+    import sys
+    if 'angle' in sys.argv[1:]:
+        angle_only_swing_up()
+    else:
+        swing_up()

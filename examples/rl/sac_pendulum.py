@@ -1,11 +1,11 @@
-"""Pendulum Q function, replay transition, and training data for SAC."""
+"""Pendulum Q function and replay transition for SAC."""
 
 import jax
 import jax.numpy as jnp
 
-from nodejax import Composite, Leaf, Node, PNode, Struct, node
+from nodejax import Composite, Node, Struct, node
 from nodejax import nn
-from examples.rl.pendulum import PendulumFeatures, VELOCITY_SCALE
+from examples.rl.pendulum import PendulumFeatures
 
 
 @node
@@ -38,24 +38,3 @@ def pendulum_transition() -> Struct:
         cost=jnp.zeros(()),
         next_observation=observation,
     )
-
-
-@node
-def PendulumTrainingData(
-    iterations: int,
-    *,
-    n_worlds: int,
-    n_steps_per_world: int,
-) -> PNode:
-    """Independent starts and zero disturbances for one Pendulum SAC run."""
-    def apply(rng):
-        sample = jax.random.uniform(rng.next(), (2, iterations, n_worlds))
-        return Struct(
-            initial_state=Struct(
-                angle=2.0 * jnp.pi * sample[0] - jnp.pi,
-                velocity=VELOCITY_SCALE * (2.0 * sample[1] - 1.0),
-            ),
-            disturbance=jnp.zeros((iterations, n_steps_per_world, n_worlds)),
-        )
-
-    return Leaf(apply)

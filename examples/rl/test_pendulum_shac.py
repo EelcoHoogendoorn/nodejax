@@ -29,8 +29,14 @@ from nodejax import (
 )
 from nodejax import nn
 from examples.rl.losses import ensemble_mse
-from examples.rl.pendulum import Pendulum, downward_starts, phase_starts
-from examples.rl.shac import SHAC, shac_training
+from examples.rl.pendulum import (
+    AngleFeatures,
+    Pendulum,
+    downward_starts,
+    phase_starts,
+)
+from examples.rl.shac import (SHAC, bootstrapped_cost, shac_training,
+                              td_lambda_fit)
 from examples.rl.shac_pendulum import (
     PendulumCritic,
     PendulumPolicy,
@@ -53,7 +59,7 @@ N_WORLDS = 64
 N_CHUNKS_PER_EPISODE = 15
 N_EPISODES = 40
 N_CRITIC_UPDATES = 4
-TARGET_DECAY = 0.995
+EMA_CRITIC_DECAY = 0.995
 ACTOR_RATE = 0.001
 CRITIC_RATE = 0.001
 DISTURBANCE_SCALE = 0.03
@@ -79,15 +85,18 @@ def pendulum_training_program(policy: Node, n_episodes: int) -> Struct:
         committee,
         critic,
         Pendulum(),
-        critic_loss=ensemble_mse,
+        policy_loss=bootstrapped_cost(discount=DISCOUNT),
+        critic_loss=td_lambda_fit(
+            discount=DISCOUNT,
+            trace=TRACE,
+            fit=ensemble_mse,
+        ),
         actor_optimizer=optax.adam(ACTOR_RATE),
         critic_optimizer=optax.adam(CRITIC_RATE),
         n_worlds=N_WORLDS,
         n_steps_per_chunk=N_STEPS_PER_CHUNK,
         n_critic_updates=N_CRITIC_UPDATES,
-        target_decay=TARGET_DECAY,
-        discount=DISCOUNT,
-        trace=TRACE,
+        ema_critic_decay=EMA_CRITIC_DECAY,
     )
     data = PendulumTrainingData(
         n_episodes=n_episodes,
@@ -191,15 +200,18 @@ def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
             committee,
             critic,
             Pendulum(),
-            critic_loss=ensemble_mse,
+            policy_loss=bootstrapped_cost(discount=DISCOUNT),
+            critic_loss=td_lambda_fit(
+                discount=DISCOUNT,
+                trace=TRACE,
+                fit=ensemble_mse,
+            ),
             actor_optimizer=optax.adam(ACTOR_RATE),
             critic_optimizer=optax.adam(CRITIC_RATE),
             n_worlds=n_worlds,
             n_steps_per_chunk=n_steps_per_chunk,
             n_critic_updates=1,
-            target_decay=TARGET_DECAY,
-            discount=DISCOUNT,
-            trace=TRACE,
+            ema_critic_decay=EMA_CRITIC_DECAY,
         )
         control = learner.with_input(input).parameterize(
             rng=jax.random.PRNGKey(2),
@@ -208,8 +220,8 @@ def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
         metric, aux = split_aux(output)
 
         assert jnp.isfinite(metric.mean_cost)
-        assert jnp.isfinite(aux.policy.loss)
-        assert jnp.isfinite(aux.critic.loss).all()
+        assert jnp.isfinite(aux.policy_trainer.loss)
+        assert jnp.isfinite(aux.critic_trainer.loss).all()
 
 
 def test_recurrent_state_carries_across_chunks_and_resets_at_episode() -> None:
@@ -311,7 +323,40 @@ def test_shac_swings_up_with_either_policy_lifecycle() -> None:
         assert result.final_velocity < 0.1
 
 
+def angle_only_swing_up() -> None:
+    """The partially observed run: the policy reads the angle alone while
+    the critic keeps the plant state, and memory must recover velocity.
+    Takes about four times the fully observed budget; run it with
+    ``python -m examples.rl.test_pendulum_shac angle``."""
+    result = shac_training(
+        pendulum_training_program(
+            PendulumPolicy(
+                memory=nn.GRU(MEMORY),
+                hidden=HIDDEN,
+                features=AngleFeatures(),
+            ),
+            n_episodes=4 * N_EPISODES,
+        ),
+        parameter_key=jax.random.PRNGKey(1),
+        training_key=jax.random.PRNGKey(11),
+    )
+    outcome = pendulum_evaluation(
+        result.policy,
+        Pendulum(),
+        downward_starts(),
+        steps=N_EVALUATION_STEPS,
+    )
+    print(
+        f'angle-only final error: {outcome.final_angle:.4f} rad, '
+        f'{outcome.final_velocity:.4f} rad/s'
+    )
+
+
 if __name__ == '__main__':
+    import sys
+    if 'angle' in sys.argv[1:]:
+        angle_only_swing_up()
+        raise SystemExit
     feedforward = shac_training(
         pendulum_training_program(
             pendulum_policy(nn.identity),

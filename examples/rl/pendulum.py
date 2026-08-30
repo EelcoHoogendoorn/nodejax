@@ -48,6 +48,23 @@ def PendulumFeatures() -> Node:
 
 
 @node
+def AngleFeatures() -> Node:
+    """Periodic coordinates of the angle alone.
+
+    For a controller denied the velocity: consecutive angles are then the
+    only route to it, so this is the honest workload for a policy with
+    memory. Consumers of the full observation ignore the velocity field.
+    """
+    def apply(input):
+        return jnp.stack(
+            (jnp.cos(input.angle), jnp.sin(input.angle)),
+            axis=-1,
+        )
+
+    return Leaf(apply)
+
+
+@node
 def Pendulum(dt: float = DT, max_torque: float = MAX_TORQUE) -> Node:
     """Weak actuator, upright angle zero, and named physical state fields."""
 

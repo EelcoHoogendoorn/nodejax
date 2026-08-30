@@ -57,4 +57,4 @@ def Buffer(capacity: int, element: PyTree) -> Node:
         indices = jax.random.randint(rng.next(), (count,), 0, state.fill)
         return jax.tree.map(lambda held: held[indices], state.store)
 
-    return Leaf(apply, init=init, methods={'sample': sample}, name='buffer')
+    return Leaf(apply, init=init, methods={'sample': sample})

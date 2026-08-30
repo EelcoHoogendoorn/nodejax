@@ -40,50 +40,22 @@ from nodejax import (
     BaseNode,
     Composite,
     Node,
-    PyTree,
     Struct,
     Wrapper,
     batch,
+    iterated,
     node,
     scan,
     scanned,
     split_aux,
-    tile,
     tree_broadcast_axis,
-    tree_first,
     tree_last,
+    tree_take,
     train_step,
 )
+from examples.rl.control import SamplingStep, chunk_starts, collect
 
 
-@node
-def SamplingStep(policy: Node, plant: Node) -> Node:
-    """One on-policy transition: sample, act, record what replay needs."""
-    members = Composite(policy=policy, plant=plant)
-
-    def apply(self, disturbance, initial_state, rng):
-        observation = self.plant.observe()
-        proposal = self.policy(observation)
-        drawn = self.policy.sample(proposal, rng=rng.next())
-        output = self.plant(command=drawn.command, disturbance=disturbance)
-        return Struct(
-            observation=observation,
-            command=drawn.command,
-            logprob=drawn.logprob,
-            cost=output.cost,
-            next_observation=self.plant.observe(),
-        )
-
-    def init(self, input):
-        """Start a rollout from caller-supplied plant state; a stateless
-        policy contributes the empty slot."""
-        observation = plant.observe(state=input.initial_state)
-        return Struct(
-            policy=policy.bind(self.policy).init(input=observation),
-            plant=input.initial_state,
-        )
-
-    return members(apply, init=init)
 
 
 @node
@@ -100,10 +72,6 @@ def ReplayStep(policy: Node) -> Node:
             logprob=self.policy.logprob(proposal, command),
             entropy=self.policy.entropy(proposal),
         )
-
-    if not policy.cyclic:
-        # No memory is restored, so the initial field rides along unread.
-        return Wrapper(policy=policy)(apply)
 
     def init(input):
         return input.initial
@@ -133,79 +101,39 @@ def clipped_surrogate(
 
 
 def advantage_estimates(
-    reward: jax.Array,
-    value: jax.Array,
-    final_value: jax.Array,
+    rewards: jax.Array,
+    values: jax.Array,
+    final_values: jax.Array,
     *,
     discount: float,
     trace: float,
 ) -> tuple[jax.Array, jax.Array]:
-    """Generalized advantage estimation over chunk-major rollout data."""
-    shape = reward.shape
+    """Generalized advantage estimation over chunk-major rollout data.
+
+    Advantages come back normalized for the clipped surrogate; returns
+    stay in cost units, being the critic's regression target."""
+    shape = rewards.shape
     flat_shape = (shape[0] * shape[1],) + shape[2:]
-    reward = reward.reshape(flat_shape)
-    value = value.reshape(flat_shape)
-    next_value = jnp.concatenate([value[1:], final_value[None]])
-    delta = reward + discount * next_value - value
+    rewards = rewards.reshape(flat_shape)
+    values = values.reshape(flat_shape)
+    next_values = jnp.concatenate([values[1:], final_values[None]])
+    deltas = rewards + discount * next_values - values
 
     def step(carry, input):
         estimate = input + discount * trace * carry
         return estimate, estimate
 
-    advantage = jax.lax.scan(
+    advantages = jax.lax.scan(
         step,
-        jnp.zeros_like(final_value),
-        delta,
+        jnp.zeros_like(final_values),
+        deltas,
         reverse=True,
     )[1]
-    returns = advantage + value
-    return advantage.reshape(shape), returns.reshape(shape)
-
-
-def collect(
-    sampler: Node,
-    policy_param: PyTree,
-    initial_state: Struct,
-    disturbance: jax.Array,
-    key: jax.Array,
-    *,
-    n_chunks_per_epoch: int,
-    n_steps_per_chunk: int,
-) -> tuple[Struct, PyTree]:
-    """Collect a native ``(chunk, time, world)`` rollout and chunk-end state."""
-    starts = tile(tile(initial_state, n_steps_per_chunk), n_chunks_per_epoch)
-    output = sampler.bind(Struct(policy=policy_param)).apply(
-        disturbance=disturbance,
-        initial_state=starts,
-        rng=key,
+    returns = advantages + values
+    advantages = (advantages - jnp.mean(advantages)) / (
+        jnp.std(advantages) + 1e-8
     )
-    record, aux = split_aux(output)
-    # The sampler is scanned with record=True, so aux carries the sampler
-    # state after every chunk; replay starts derive from that trace.
-    return record, aux.state
-
-
-def chunk_starts(
-    policy: Node,
-    policy_param: PyTree,
-    observation: Struct,
-    chunk_end_state: PyTree,
-    n_worlds: int,
-) -> PyTree:
-    """Recover each chunk's policy state for deterministic policy init."""
-    if not policy.cyclic:
-        return ()
-    first_observation = tree_first(tree_first(observation))
-    batched_policy = batch(policy, n=n_worlds).bind(policy_param)
-    first = batched_policy.init(input=first_observation)
-    # Recorded state includes empty acyclic slots. Binding removes them so the
-    # chunk endings have the same public tree as freshly initialized state.
-    ends = batched_policy.bind(state=chunk_end_state.policy).state
-    return jax.tree.map(
-        lambda initial, ending: jnp.concatenate((initial[None], ending[:-1])),
-        first,
-        ends,
-    )
+    return advantages.reshape(shape), returns.reshape(shape)
 
 
 @node
@@ -264,36 +192,35 @@ def PPO(
     )
 
     actor_step = train_step(replay, actor_loss, actor_optimizer)
-    actor = scan(
-        scan(actor_step, n=n_minibatches_per_epoch),
-        n=n_epochs,
-    )
 
-    terminal_value = batch(value, n=n_worlds)
-    trajectory_value = batch(
-        batch(terminal_value, n=n_steps_per_chunk, axis='time'),
+    values = batch(value, n=n_worlds)
+    trajectories_value = batch(
+        batch(values, n=n_steps_per_chunk, axis='time'),
         n=n_chunks_per_epoch,
         axis='chunk',
     )
     critic_step = train_step(
-        trajectory_value,
+        trajectories_value,
         critic_loss,
         critic_optimizer,
     )
     members = Composite(
-        actor=actor,
-        critic=scan(critic_step, n=n_critic_passes),
+        actor_trainer=scan(
+            scan(actor_step, n=n_minibatches_per_epoch),
+            n=n_epochs,
+        ),
+        critic_trainer=iterated(critic_step, n=n_critic_passes),
     )
 
     def apply(self, initial_state, disturbance, rng):
-        policy_param = self.state.actor.opt.params
+        policy_param = self.state.actor_trainer.opt.params
         record, recorded_state = collect(
             sampler,
             policy_param,
             initial_state,
             disturbance,
             rng.next(),
-            n_chunks_per_epoch=n_chunks_per_epoch,
+            n_chunks=n_chunks_per_epoch,
             n_steps_per_chunk=n_steps_per_chunk,
         )
         starts = chunk_starts(
@@ -304,22 +231,19 @@ def PPO(
             n_worlds,
         )
 
-        critic_param = self.state.critic.opt.params
-        values = trajectory_value.bind(critic_param).apply(record.observation)
-        final_value = terminal_value.bind(critic_param).apply(
+        critic_param = self.state.critic_trainer.opt.params
+        value_estimates = trajectories_value.bind(critic_param).apply(
+            record.observation)
+        final_values = values.bind(critic_param).apply(
             tree_last(tree_last(record.next_observation))
         )
-        advantage, returns = advantage_estimates(
+        advantages, returns = advantage_estimates(
             -record.cost,
-            values,
-            final_value,
+            value_estimates,
+            final_values,
             discount=discount,
             trace=trace,
         )
-        advantage = (advantage - jnp.mean(advantage)) / (
-            jnp.std(advantage) + 1e-8
-        )
-
         # One random order per epoch. Gathering the native chunk axis creates
         # the complete (epoch, minibatch, chunk, time, world) update tensor.
         order = jax.random.permutation(
@@ -328,18 +252,18 @@ def PPO(
             axis=1,
             independent=True,
         ).reshape(n_epochs, n_minibatches_per_epoch, n_chunks_per_minibatch)
-        rows = jax.tree.map(
-            lambda value_: value_[order],
+        rows = tree_take(
             Struct(
                 observation=record.observation,
                 command=record.command,
                 logprob=record.logprob,
-                advantage=advantage,
+                advantage=advantages,
             ),
+            order,
         )
-        selected_starts = jax.tree.map(lambda value_: value_[order], starts)
+        selected_starts = tree_take(starts, order)
         initial = tree_broadcast_axis(selected_starts, n_steps_per_chunk, axis=3)
-        self.actor(
+        self.actor_trainer(
             input=Struct(
                 observation=rows.observation,
                 command=rows.command,
@@ -351,9 +275,9 @@ def PPO(
             ),
         )
 
-        self.critic(
-            input=tile(record.observation, n_critic_passes),
-            target=tile(returns, n_critic_passes),
+        self.critic_trainer(
+            input=record.observation,
+            target=returns,
         )
         mean_cost = jnp.mean(record.cost)
         return Struct(mean_cost=mean_cost), Aux(mean_cost=mean_cost)
@@ -377,11 +301,11 @@ def ppo_training(
         jax.jit(control.apply)(rng=training_key),
     )
     return Struct(
-        policy=assembly.policy.bind(final.actor.opt.params),
-        value=assembly.value.bind(final.critic.opt.params),
+        policy=assembly.policy.bind(final.actor_trainer.opt.params),
+        value=assembly.value.bind(final.critic_trainer.opt.params),
         history=Struct(
-            actor_loss=aux.training.actor.loss.reshape(-1),
-            critic_loss=aux.training.critic.loss.reshape(-1),
+            actor_loss=aux.training.actor_trainer.loss.reshape(-1),
+            critic_loss=aux.training.critic_trainer.loss.reshape(-1),
             mean_cost=aux.training.mean_cost,
         ),
     )

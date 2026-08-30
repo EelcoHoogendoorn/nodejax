@@ -34,10 +34,17 @@ from examples.rl.pendulum import (
 
 
 @node
-def PendulumPolicy(memory: BaseNode, hidden: int) -> Node:
-    """A deterministic policy with an explicit memory lifecycle."""
+def PendulumPolicy(
+    memory: BaseNode,
+    hidden: int,
+    features: BaseNode | None = None,
+) -> Node:
+    """A deterministic policy with an explicit memory lifecycle.
+
+    ``features`` narrows what the policy sees; the default reads the full
+    observation."""
     members = Composite(
-        features=PendulumFeatures(),
+        features=features or PendulumFeatures(),
         encoder=nn.Linear(hidden) >> nn.silu,
         memory=memory,
         command=(
