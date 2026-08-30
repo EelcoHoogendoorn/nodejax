@@ -28,7 +28,6 @@ from nodejax import (
     state_reinit,
     tile,
     tree_last,
-    tree_stop_gradient,
     train_step,
 )
 from examples.rl.control import ControlledStep
@@ -105,9 +104,10 @@ def SHAC(
     discounts = discount ** jnp.arange(horizon)
 
     def policy_loss(output, target_param) -> jax.Array:
+        # target_param arrives as loss target data; the gradient reaches the
+        # terminal value only through next_state, which is the algorithm.
         trajectory = output
-        fixed_target = tree_stop_gradient(target_param)
-        terminal = terminal_value.bind(fixed_target).apply(
+        terminal = terminal_value.bind(target_param).apply(
             tree_last(trajectory.next_state),
         )
         running = jnp.sum(discounts[:, None] * trajectory.cost, axis=0)
@@ -147,9 +147,8 @@ def SHAC(
             )
         )
 
-        observation = tree_stop_gradient(trajectory.state)
         self.critic(
-            input=tile(observation, critic_updates),
+            input=tile(trajectory.state, critic_updates),
             target=tile(targets, critic_updates),
         )
         mean_cost = jnp.mean(trajectory.cost)
