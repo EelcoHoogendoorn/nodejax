@@ -762,8 +762,7 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
         return rebuilt._def
 
     definition = _transparent_def(
-        member, child, name=inner.name, captures=inner.captures,
-        tags=child.tags, methods=child.methods,
+        member, child, name=inner.name, captures=inner.captures, tags=child.tags,
     ).copy(calls=calls.with_apply(impl=apply_impl), tree=bind)
     return operand._with_definition(definition)
 

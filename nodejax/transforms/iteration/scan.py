@@ -7,7 +7,7 @@ from nodejax.core.pnode import PNode
 from nodejax.core.spec import add_axis, element_spec
 from nodejax.struct import Struct
 from nodejax.tree import tree_first
-from nodejax.transforms.transform import scan_inputs, scan_steps, transform
+from nodejax.transforms.transform import bind, scan_inputs, scan_steps, transform
 from nodejax.core.wrapper import Wrapper
 
 
@@ -205,10 +205,11 @@ def scanned(step: Node, record: bool = False) -> Node | PNode:
 
 @transform(preserves='param')
 def carried(step: Node) -> Node | PNode:
-    """Run ``step`` from fresh state and return its final state.
+    """Run ``step`` from fresh state and return it bound to its final state.
 
     Per-step outputs are discarded. Any auxiliary values emitted by the step
-    remain available alongside the final state.
+    remain available alongside the bound step, whose members and methods
+    read the final state.
     """
     if not step.cyclic:
         raise TypeError(f'carried requires a cyclic node, got {step!r}')
@@ -219,7 +220,8 @@ def carried(step: Node) -> Node | PNode:
         final, outputs = scan_steps(
             current, param, initial, input, rng)
         _, aux = split_aux(outputs)
-        return final if aux is None else (final, aux)
+        done = bind(current, param, state=final)
+        return done if aux is None else (done, aux)
 
     return Wrapper(step=step).roles(
         name=f'carried({step.name})',

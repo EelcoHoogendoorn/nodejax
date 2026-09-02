@@ -80,41 +80,49 @@ class PSNode(BaseNode):
     def __getattr__(self, name: str):
         if name in self._def.methods:
             from nodejax.core.author_view import AuthorNode
+            # Methods see the dense slices an authored apply sees.
             return _bind_method(
                 self._def.methods[name],
-                param=lambda: self.param,
-                state=lambda: self.state,
+                param=lambda: self.contract._dense_param(self.param),
+                state=lambda: self.contract._dense_state(self.state),
                 node=lambda: AuthorNode(self._def),
             )
         if name in self._def.members:
-            if not self._def.layout.destructurable_param:
-                raise AttributeError(
-                    f'{self.name!r} maps parameters over an axis; '
-                    'a member has no single parameter slice')
-            member = getattr(self._def.members, name)
-            param_members = self._def.layout.param_members
-            if (member.parametric and param_members is not None
-                    and name not in param_members):
-                raise TypeError(
-                    f"member {name!r} has no slot in {self.name!r}'s "
-                    'parameter tree')
-            if member.cyclic and not self._def.layout.destructurable_state:
-                raise AttributeError(
-                    f'{self.name!r} maps state over an axis; '
-                    'a member has no single state slice')
-            if self._def.layout.transparent_member == name:
-                param, state = self.param, self.state
-            else:
-                param = (getattr(self.param, name)
-                         if member.parametric else ())
-                state = (getattr(self.state, name)
-                         if member.cyclic else ())
-            return PSNode(member, param, state)
+            return self._member(name)
+        transparent = self._def.layout.transparent_member
+        if transparent is not None:
+            # A transparent wrapper adds no level to the tree, so its
+            # member's attributes are reached without naming it.
+            return getattr(self._member(transparent), name)
         methods = tuple(self._def.methods)
         available = f'; authored methods: {methods}' if methods else ''
         raise AttributeError(
             f'PSNode {self.name!r} has no attribute {name!r}; '
             f'values live under .param and .state{available}')
+
+    def _member(self, name: str) -> 'PSNode':
+        """The member view with its parameter and state slices."""
+        if not self._def.layout.destructurable_param:
+            raise AttributeError(
+                f'{self.name!r} maps parameters over an axis; '
+                'a member has no single parameter slice')
+        member = getattr(self._def.members, name)
+        param_members = self._def.layout.param_members
+        if (member.parametric and param_members is not None
+                and name not in param_members):
+            raise TypeError(
+                f"member {name!r} has no slot in {self.name!r}'s "
+                'parameter tree')
+        if member.cyclic and not self._def.layout.destructurable_state:
+            raise AttributeError(
+                f'{self.name!r} maps state over an axis; '
+                'a member has no single state slice')
+        if self._def.layout.transparent_member == name:
+            param, state = self.param, self.state
+        else:
+            param = getattr(self.param, name) if member.parametric else ()
+            state = getattr(self.state, name) if member.cyclic else ()
+        return PSNode(member, param, state)
 
     def __rshift__(self, other):
         from nodejax.core.compose import _compose

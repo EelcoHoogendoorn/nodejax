@@ -35,7 +35,8 @@ class _Member:
     (core._bind_method): node is the member's def, param its param,
     state its chained state slice (a read after a step sees the
     advance), rng the wiring's boundary stream. Unbound calls through the node
-    pass the slots explicitly."""
+    pass the slots explicitly. A member's own members are reached the same
+    way, for their methods and slots; only the owning apply steps them."""
     __slots__ = ('_call', '_def', '_param', '_state_fn', '_rng_fn')
 
     def __init__(self, call, definition: Def, param, state_fn, rng_fn=None):
@@ -49,6 +50,13 @@ class _Member:
         from nodejax.core.binding import (_bind_call)
         return self._call(_bind_call(self._def, args, fields))
 
+    @property
+    def state(self):
+        """The member's live state in its public form, as a bound view
+        shows it; ``self.state.<member>`` is the same value as the
+        composite stores it."""
+        return self._def.contract._sparse_state(self._state_fn())
+
     def __getattr__(self, name):
         methods = self._def.methods
         if methods and name in methods:
@@ -57,8 +65,36 @@ class _Member:
                                 param=lambda: self._param,
                                 state=self._state_fn,
                                 rng=self._rng_fn)
-        raise AttributeError(
-            f"member node {self._def.name!r} has no method {name!r}")
+        return _member_of(self._def, name, self._param, self._state_fn,
+                          self._rng_fn)
+
+
+def _member_of(definition: Def, name: str, param, state_fn, rng_fn):
+    """A read-only handle on one member of ``definition`` inside an apply:
+    its methods and slots, sliced from the parent's live values. A
+    transparent wrapper's member is reached without naming it."""
+    transparent = definition.layout.transparent_member
+    if name in definition.members:
+        member = getattr(definition.members, name)
+        if name == transparent:
+            slice_param, slice_state = param, state_fn
+        else:
+            slice_param = getattr(param, name) if member.parametric else ()
+            slice_state = ((lambda: getattr(state_fn(), name))
+                           if member.cyclic else (lambda: ()))
+
+        def step(bundle):
+            raise TypeError(
+                f"member {name!r} of {definition.name!r} is stepped by the "
+                'apply that owns it')
+
+        return _Member(step, member, slice_param, slice_state, rng_fn)
+    if transparent is not None:
+        return getattr(
+            _member_of(definition, transparent, param, state_fn, rng_fn),
+            name)
+    raise AttributeError(
+        f"member node {definition.name!r} has no method or member {name!r}")
 
 
 class _Wired:
@@ -205,6 +241,12 @@ class _BuildingMember:
         return self._wired._call(
             self._name, _bind_call(self._def, args, fields))
 
+    @property
+    def state(self):
+        """The member's state in its public form, as ``_Member.state``."""
+        return self._wired._resolved_node(self._name).contract._sparse_state(
+            self._wired._ensure(self._name))
+
     def __getattr__(self, name):
         methods = self._def.methods
         if methods and name in methods:
@@ -216,8 +258,10 @@ class _BuildingMember:
                 state=lambda: self._wired._ensure(self._name),
                 rng=lambda: self._wired._boundary,
             )
-        raise AttributeError(
-            f"member node {self._def.name!r} has no method {name!r}")
+        return _member_of(
+            self._def, name, self._wired._ensure_param(self._name),
+            lambda: self._wired._ensure(self._name),
+            lambda: self._wired._boundary)
 
 
 class _InitWired:

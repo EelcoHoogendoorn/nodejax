@@ -104,34 +104,43 @@ class PNode(BaseNode):
     def __getattr__(self, name: str):
         if name in self._def.methods:
             from nodejax.core.author_view import AuthorNode
+            # Methods see the dense slices an authored apply sees.
             return _bind_method(
                 self._def.methods[name],
-                param=lambda: self.param,
+                param=lambda: self.contract._dense_param(self.param),
                 node=lambda: AuthorNode(self._def),
             )
         if name in self._def.members:
-            if not self._def.layout.destructurable_param:
-                raise AttributeError(
-                    f'{self.name!r} maps parameters over an axis; '
-                    'a member has no single parameter slice')
-            member = getattr(self._def.members, name)
-            param_members = self._def.layout.param_members
-            if (member.parametric and param_members is not None
-                    and name not in param_members):
-                raise TypeError(
-                    f"member {name!r} has no slot in {self.name!r}'s "
-                    'parameter tree')
-            if self._def.layout.transparent_member == name:
-                param = self.param
-            else:
-                param = (getattr(self.param, name)
-                         if member.parametric else ())
-            return PNode(member, param)
+            return self._member(name)
+        transparent = self._def.layout.transparent_member
+        if transparent is not None:
+            # A transparent wrapper adds no level to the tree, so its
+            # member's attributes are reached without naming it.
+            return getattr(self._member(transparent), name)
         methods = tuple(self._def.methods)
         available = f'; authored methods: {methods}' if methods else ''
         raise AttributeError(
             f'PNode {self.name!r} has no attribute {name!r}; '
             f'values live under .param{available}')
+
+    def _member(self, name: str) -> 'PNode':
+        """The member view with its parameter slice."""
+        if not self._def.layout.destructurable_param:
+            raise AttributeError(
+                f'{self.name!r} maps parameters over an axis; '
+                'a member has no single parameter slice')
+        member = getattr(self._def.members, name)
+        param_members = self._def.layout.param_members
+        if (member.parametric and param_members is not None
+                and name not in param_members):
+            raise TypeError(
+                f"member {name!r} has no slot in {self.name!r}'s "
+                'parameter tree')
+        if self._def.layout.transparent_member == name:
+            param = self.param
+        else:
+            param = getattr(self.param, name) if member.parametric else ()
+        return PNode(member, param)
 
     def __repr__(self) -> str:
         return f'PNode({self.name}, param={self.param!r})'

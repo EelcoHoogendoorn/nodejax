@@ -86,6 +86,10 @@ def _transparent_def(member_name: str, member: Def, *, name: str,
                      destructurable=True, destructurable_state=True,
                      externalized_param_paths: frozenset[str] = (
                          frozenset())) -> Def:
+    """A transparent wrapper's tags are the member's own unless replaced.
+    It declares no methods of the member's: attribute lookup on a view or
+    a member handle passes through to the member, which binds its own
+    methods to the shared slots."""
     members = Struct(**{member_name: member})
 
     def bind(replacements):

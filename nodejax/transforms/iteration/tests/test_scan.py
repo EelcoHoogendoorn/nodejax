@@ -332,3 +332,22 @@ def test_scan_of_an_acyclic_step_is_its_sequence_map():
     from nodejax import carried
     with pytest.raises(TypeError):
         carried(Double())
+
+
+def test_carried_returns_the_step_bound_to_its_final_state():
+    from nodejax import Composite, carried, iterated
+
+    counter = Leaf(lambda state, input: (state + input, state), init=lambda: jnp.zeros(()),
+                   name='counter')
+    members = Composite(count=iterated(counter, n=2))
+
+    def apply(self, input):
+        return self.count(input)
+
+    program = carried(members(apply)).parameterize()
+    done = program.apply(jnp.ones(3))
+
+    assert done.state.count == 6.0
+    # a transparent wrapper's member is reached without naming it
+    assert done.count.state == 6.0
+    assert done.count.step.state == 6.0
