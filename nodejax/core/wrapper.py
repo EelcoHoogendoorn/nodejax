@@ -83,7 +83,9 @@ def _transparent_def(member_name: str, member: Def, *, name: str,
                      captures: Captures,
                      tags=None, boundaries: Mapping = _EMPTY_MAPPING,
                      methods: Mapping = _EMPTY_MAPPING,
-                     destructurable=True, destructurable_state=True) -> Def:
+                     destructurable=True, destructurable_state=True,
+                     externalized_param_paths: frozenset[str] = (
+                         frozenset())) -> Def:
     members = Struct(**{member_name: member})
 
     def bind(replacements):
@@ -93,6 +95,7 @@ def _transparent_def(member_name: str, member: Def, *, name: str,
             boundaries=boundaries, methods=methods,
             destructurable=destructurable,
             destructurable_state=destructurable_state,
+            externalized_param_paths=externalized_param_paths,
         )
 
     return Def(
@@ -108,6 +111,7 @@ def _transparent_def(member_name: str, member: Def, *, name: str,
             transparent_member=member_name,
             destructurable_param=destructurable,
             destructurable_state=destructurable_state,
+            externalized_param_paths=externalized_param_paths,
         ),
     )
 
@@ -124,7 +128,8 @@ class Wrapped:
               apply_fields=None, open: bool = False,
               tags=None, boundary: Mapping = _EMPTY_MAPPING,
               methods: Mapping = _EMPTY_MAPPING,
-              destructurable=True, destructurable_state=True):
+              destructurable=True, destructurable_state=True,
+              externalized_param_paths: frozenset[str] = frozenset()):
         """Build a wrapper by replacing roles with ordinary T3 functions.
 
         ``requires_input`` can promote an inherited init into a prime, or
@@ -143,6 +148,7 @@ class Wrapped:
             tags=tags, boundaries=boundary, methods=methods,
             destructurable=destructurable,
             destructurable_state=destructurable_state,
+            externalized_param_paths=externalized_param_paths,
         )
         calls = definition.contract._roles(
             param=param, init=init, prime=prime, apply=apply,
@@ -164,6 +170,7 @@ class Wrapped:
             tags=tags, boundary=boundary, methods=methods,
             destructurable=destructurable,
             destructurable_state=destructurable_state,
+            externalized_param_paths=externalized_param_paths,
         )
 
         def bind(replacements):

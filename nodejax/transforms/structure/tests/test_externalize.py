@@ -1,10 +1,11 @@
 """Tests for moving one member's params into the input."""
 
+import jax
 import jax.numpy as jnp
 
 import pytest
 
-from nodejax import externalize
+from nodejax import Composite, externalize, nn
 from nodejax.struct import Struct
 from nodejax.control import Gain, Integrator
 
@@ -45,3 +46,25 @@ def test_externalize_at_init():
     ).bind(node.param).init()
     _, out = node.apply(state, gain=Struct(scale=jnp.asarray(3.0)), input=2.0)
     assert jnp.allclose(out, 6.0)                # 0 + (2 * 3), accumulated once
+
+
+def test_externalize_composite_subtree() -> None:
+    critic = (
+        nn.Linear(4) >> nn.tanh >> nn.Linear(1)
+    ).with_input(jnp.zeros(3))
+    members = Composite(critic=critic)
+
+    def apply(self, input):
+        return self.critic(input)
+
+    model = members(apply, name='model').with_input(jnp.zeros(3))
+    externalized = externalize(model, 'critic')
+    bound = externalized.parameterize(rng=jax.random.PRNGKey(0))
+    critic_param = critic.parameterize(rng=jax.random.PRNGKey(1)).param
+    input = jnp.arange(3.0)
+
+    assert bound.param.critic == ()
+    assert jnp.allclose(
+        bound.apply(critic=critic_param, input=input),
+        model.bind(Struct(critic=critic_param)).apply(input),
+    )

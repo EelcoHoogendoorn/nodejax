@@ -300,8 +300,14 @@ def _form_call(call, supplied: Struct, where: str) -> Struct:
 
 
 def _definition_slots(definition, value: Any, role: str, *,
-                      project: bool, path: str = '') -> Any:
+                      project: bool, path: str = '',
+                      externalized_param_paths: frozenset[str] = (
+                          frozenset())) -> Any:
     """Convert between sparse public values and dense T4 value trees."""
+    if role == 'param' and definition.layout.externalized_param_paths:
+        externalized_param_paths = externalized_param_paths | frozenset(
+            f'{path}.{member}' if path else member
+            for member in definition.layout.externalized_param_paths)
     active = (definition.parametric if role == 'param' else definition.cyclic)
     if not active:
         if value is not _MISSING_SLOT and not _empty(value):
@@ -316,7 +322,8 @@ def _definition_slots(definition, value: Any, role: str, *,
     if transparent is not None:
         return _definition_slots(
             getattr(definition.members, transparent), value, role,
-            project=project, path=path)
+            project=project, path=path,
+            externalized_param_paths=externalized_param_paths)
 
     if not definition.members:
         return value
@@ -341,9 +348,14 @@ def _definition_slots(definition, value: Any, role: str, *,
                         member.cyclic)
         if role == 'param' and param_members is not None:
             child_active = child_active and name in param_members
-        if child_active:
+        if (role == 'param'
+                and child_path in externalized_param_paths
+                and _empty(slot)):
+            converted = ()
+        elif child_active:
             converted = _definition_slots(
-                member, slot, role, project=project, path=child_path)
+                member, slot, role, project=project, path=child_path,
+                externalized_param_paths=externalized_param_paths)
         else:
             if slot is not _MISSING_SLOT and not _empty(slot):
                 raise TypeError(f'{child_path}: no {role} value is declared')

@@ -67,10 +67,12 @@ class Layout:
     param_members: frozenset[str] | None = None
     destructurable_param: bool = True
     destructurable_state: bool = True
+    externalized_param_paths: frozenset[str] = frozenset()
 
     def __post_init__(self):
         if self.param_members is not None:
             self.param_members = frozenset(self.param_members)
+        self.externalized_param_paths = frozenset(self.externalized_param_paths)
 
 
 @dataclass(eq=False)

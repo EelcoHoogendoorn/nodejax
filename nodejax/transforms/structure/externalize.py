@@ -79,6 +79,7 @@ def externalize(inner: Node, member: str,
     return Wrapper(inner=inner).roles(
         name=f'externalize({inner.name})',
         destructurable=False,
+        externalized_param_paths=frozenset((member,)),
         param=param_fn,
         init=init_fn,
         prime=prime_fn,
