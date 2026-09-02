@@ -351,3 +351,16 @@ def test_carried_returns_the_step_bound_to_its_final_state():
     # a transparent wrapper's member is reached without naming it
     assert done.count.state == 6.0
     assert done.count.step.state == 6.0
+
+
+def test_an_internalized_run_takes_the_step_state_inputs_beside_the_sequence():
+    """A step declaring init(initial) is scanned from that start, given once."""
+    counter = Leaf(
+        lambda state, input: (state + input, state),
+        init=lambda initial: initial,
+        name='counter',
+    )
+    run = scanned(counter).parameterize()
+    outputs = run.apply(input=jnp.ones(3), initial=jnp.asarray(10.0))
+
+    assert jnp.allclose(outputs, jnp.asarray([10.0, 11.0, 12.0]))

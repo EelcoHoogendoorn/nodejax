@@ -174,3 +174,17 @@ def test_a_random_init_draws_once_per_batch_element():
     assert state.shape == (3, 2)
     assert not jnp.allclose(state[0], state[1])
     assert not jnp.allclose(state[1], state[2])
+
+
+def test_state_inputs_carry_the_batch_axis_at_init():
+    """batch maps its init over state inputs, one element each, as its prime
+    maps over inputs."""
+    counter = Leaf(
+        lambda state, input: (state + input, state),
+        init=lambda initial: initial,
+        name='counter',
+    )
+    starts = jnp.asarray([1.0, 2.0, 3.0])
+    node = batch(counter, n=3).parameterize().initialize(initial=starts)
+
+    assert jnp.allclose(node.state, starts)

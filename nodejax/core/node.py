@@ -168,9 +168,11 @@ class Node(BaseNode):
     def __getattr__(self, name: str):
         if name in self._def.methods:
             return self._def.methods[name]
+        if name in self._def.members:
+            return Node(getattr(self._def.members, name))
         transparent = self._def.layout.transparent_member
         if transparent is not None:
-            return getattr(getattr(self.members, transparent), name)
+            return getattr(Node(getattr(self._def.members, transparent)), name)
         raise AttributeError(f'Node {self.name!r} has no attribute {name!r}')
 
     def bind(self, param=(), *, state=_UNSET):

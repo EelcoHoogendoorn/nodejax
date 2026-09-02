@@ -83,22 +83,25 @@ def batch(sample: Node, n: int | None = None,
         return inner, element_shape, count
 
     def init_fn(contract, param, state_input, rng):
-        """One state per element: a random init draws per element, as prime
-        does; a deterministic init builds one state and tiles it."""
+        """One state per element. State inputs carry the batch axis and a
+        random init draws per element, as prime does; an init with neither
+        builds one state and tiles it."""
         inner, element_shape, count = init_context(contract)
         current = (inner if element_shape is None else
                    inner._resolve_def(
                        element_shape, bundled=True).contract)
         rngs, rng_axis = rng.axis(current.init_takes_rng, count)
-        if rng_axis is None:
+        if rng_axis is None and not jax.tree.leaves(state_input):
             return _batched_states(inner, current.init(param, state_input, rngs), count)
+        mapped = dict(out_axes=_state_axes(inner), axis_name=axis, axis_size=count)
+        if rng_axis is None:
+            return jax.vmap(
+                lambda bundle: current.init(param, bundle, rngs), in_axes=0, **mapped,
+            )(state_input)
         return jax.vmap(
-            lambda child_rng: current.init(param, state_input, child_rng),
-            in_axes=rng_axis,
-            out_axes=_state_axes(inner),
-            axis_name=axis,
-            axis_size=count,
-        )(rngs)
+            lambda bundle, child_rng: current.init(param, bundle, child_rng),
+            in_axes=(0, rng_axis), **mapped,
+        )(state_input, rngs)
 
     def prime_fn(contract, param, state_input, input, rng):
         inner, _, count = init_context(contract)

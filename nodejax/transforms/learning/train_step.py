@@ -20,7 +20,8 @@ from nodejax.core.rng import MaybeKeyStream
 from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
 from nodejax.transforms.iteration.scan import (
-    _fresh_step_state, _sequence_parameterize, _sequence_spec,
+    _fresh_step_state, _internalized_form, _sequence_parameterize,
+    _split_state_fields, _state_fields,
 )
 from nodejax.transforms.transform import (
     bind, scan_steps, transform,
@@ -306,21 +307,24 @@ def trained(step: BaseNode) -> Node | PNode:
             final.opt.params, state=final.model)
         return done if aux is None else (done, aux)
 
+    fields = () if starts_bound else _state_fields(step_node.contract)
+
     def apply_fn(contract, param, input, rng):
         current = contract.members.step
+        state_input, sequence = _split_state_fields(input, fields)
         initial = (starting_state if starts_bound else
-                   _fresh_step_state(current, param, input, rng))
+                   _fresh_step_state(current, param, state_input, sequence, rng))
         final, outputs = scan_steps(
-            current, param, initial, input, rng)
+            current, param, initial, sequence, rng)
         _, aux = split_aux(outputs)
         return finalize(current, final, aux)
 
     result = Wrapper(step=step_node).roles(
         name=f'trained({step_node.name})',
-        param=_sequence_parameterize('step'),
+        param=_sequence_parameterize('step', fields),
         init=False,
         apply=apply_fn,
-        input_spec=_sequence_spec(step_node.contract),
+        **_internalized_form(step_node.contract, fields),
         apply_takes_rng=(
             (not starts_bound and step_node.contract.init_takes_rng)
             or step_node.contract.apply_takes_rng),
