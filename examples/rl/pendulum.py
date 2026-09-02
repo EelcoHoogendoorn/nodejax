@@ -186,7 +186,11 @@ def PendulumTrainingData(
     n_chunks: int,
     n_steps_per_chunk: int,
 ) -> PNode:
-    """Independent starts and disturbances for one collection-driven run."""
+    """Independent starts and disturbances for one collection-driven run.
+
+    Initial-state leaves are shaped (iteration, world, ...), and ``disturbance``
+    is shaped (iteration, world, chunk, time).
+    """
     def apply(rng):
         sample = jax.random.uniform(rng.next(), (2, iterations, n_worlds))
         return Struct(
@@ -195,7 +199,7 @@ def PendulumTrainingData(
                 velocity=VELOCITY_SCALE * (2.0 * sample[1] - 1.0),
             ),
             disturbance=jnp.zeros(
-                (iterations, n_chunks, n_worlds, n_steps_per_chunk),
+                (iterations, n_worlds, n_chunks, n_steps_per_chunk),
             ),
         )
 

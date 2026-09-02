@@ -7,6 +7,7 @@ import optax
 from nodejax import (
     BaseNode,
     Composite,
+    LossFn,
     Node,
     PNode,
     Struct,
@@ -101,25 +102,31 @@ def pendulum_policy(memory: BaseNode) -> Node:
     )
 
 
-def pendulum_critic() -> Struct:
-    """Pair the minimum-valued critic ensemble with its memberwise fit."""
-    model = (
+def pendulum_critic() -> Node:
+    """Build the minimum-valued critic ensemble."""
+    return (
         ensemble(PendulumQ(hidden=HIDDEN), n=N_CRITIC_MEMBERS)
         >> reduce(jnp.min)
     )
 
-    def fit(reduced_cost, target, *, aux) -> jax.Array:
-        member_costs = aux.reduce_min.population
-        return mse(member_costs, target[..., None])
 
-    return Struct(model=model, fit=fit)
+def pendulum_critic_loss(reduced_cost: jax.Array, target: jax.Array, *, aux) -> jax.Array:
+    """Fit every ensemble member while the critic returns their minimum.
+
+    ``reduced_cost`` is the critic's ordinary output. Training reads the
+    retained population beside the architecture so SAC itself remains
+    independent of whether its critic is an ensemble.
+    """
+    member_costs = aux.reduce_min.population
+    return mse(member_costs, target[..., None])
 
 
 def pendulum_training_program(
     policy: Node,
-    critic: Struct,
+    critic: Node,
     iterations: int,
     *,
+    critic_loss: LossFn | BaseNode,
     capacity: int = CAPACITY,
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
     n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
@@ -129,6 +136,7 @@ def pendulum_training_program(
         policy,
         critic,
         Pendulum(),
+        critic_loss=critic_loss,
         transition=pendulum_transition(),
         capacity=capacity,
         discount=DISCOUNT,
@@ -192,6 +200,7 @@ def swing_up() -> None:
             pendulum_policy(nn.identity),
             pendulum_critic(),
             iterations=N_ITERATIONS,
+            critic_loss=pendulum_critic_loss,
         ),
         parameter_key=jax.random.PRNGKey(0),
         training_key=jax.random.PRNGKey(100),

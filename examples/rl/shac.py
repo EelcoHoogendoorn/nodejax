@@ -42,7 +42,9 @@ def bootstrapped_cost(discount: float) -> Node:
     """SHAC's policy objective over a rollout that carries its terminal values.
 
     ``output`` is a trajectory with ``cost`` shaped (world, time) and
-    ``terminal`` for the same worlds. No separate target enters this objective.
+    ``terminal`` shaped (world,). Time is discounted independently per world,
+    then the resulting values are averaged over worlds. No separate target
+    enters this objective.
     """
     def apply(output: Struct) -> jax.Array:
         return jnp.mean(bootstrapped_costs(
@@ -58,12 +60,10 @@ def bootstrapped_cost(discount: float) -> Node:
 def TerminalCritic(rollout: Node, critic: Node) -> Node:
     """Value the final states of a rollout with a critic.
 
-    ``rollout`` maps a chunk input to trajectories with ``cost`` and
-    ``next_state`` shaped (world, time); ``critic`` maps a state pytree on
-    the world axis to a scalar per world. The output is the trajectories
-    with the critic's values of the last ``next_state`` added as
-    ``terminal``. Externalizing ``critic`` lets a caller supply the target
-    critic's parameters on every call.
+    ``input`` fields and rollout state leaves are shaped (world, time, ...),
+    with ``cost`` shaped (world, time). ``critic`` maps the final state from
+    each world to ``terminal`` shaped (world,). Externalizing ``critic`` lets
+    a caller supply the target critic's parameters on every call.
     """
     members = Composite(rollout=rollout, critic=critic)
 
@@ -91,6 +91,10 @@ def SHACUpdate(
     trace: float,  # TD-lambda trace; 0 is one-step, 1 is Monte Carlo
 ) -> Node:
     """One short-horizon policy update and fitted-value update.
+
+    ``disturbance`` is shaped (world, time), and initial-state leaves begin
+    (world, time, ...). Trajectories, target-critic values, and TD-lambda targets
+    retain that axis order.
 
     ``MPPIUpdate`` has this same apply with a plain sampler in the policy
     trainer's place; the two stay separate so each example reads on its own.
@@ -164,7 +168,7 @@ def shac_learner(
     transition = state_reinit(ControlledStep(policy, plant), boundary='episode')
     rollout = batch(scan(transition, n=n_steps_per_chunk), n=n_worlds)
     terminal_critic = batch(critic, n=n_worlds)
-    trajectory_critic = batch(batch(critic, n=n_steps_per_chunk, axis='time'), n=n_worlds)
+    trajectory_critic = batch(batch(critic, n=n_steps_per_chunk), n=n_worlds)
     policy_trainer = train_step(
         externalize(TerminalCritic(rollout, terminal_critic), 'critic'),
         bootstrapped_cost(discount=discount),

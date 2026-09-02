@@ -43,7 +43,7 @@ from examples.rl.losses import bootstrapped_costs, mse, td_lambda
 
 
 def mppi_weights(costs: jax.Array, temperature: float) -> jax.Array:
-    """Exponential importance weights favoring low-cost candidates."""
+    """Softmax costs shaped (candidate,) into weights normalized over candidates."""
     return jax.nn.softmax(-costs / temperature)
 
 
@@ -167,12 +167,12 @@ def MPPIUpdate(
 
     ``SHACUpdate`` has this same apply with a policy trainer in the sampler's
     place; the two stay separate so each example reads on its own.
-    ``sampler`` accepts an ``input`` Struct containing ``initial_state`` as a
-    world-by-time pytree and ``disturbance`` shaped ``[world, time]``. It also
-    accepts the target critic's parameter pytree through its externalized
-    ``critics`` field and returns a trajectory with ``state`` and ``cost`` on
-    the same axes. ``target_critic`` values that trajectory's next states,
-    its whole parameter tree arriving in its ``critic`` field.
+    ``sampler`` accepts ``initial_state`` leaves shaped (world, time, ...) and
+    ``disturbance`` shaped (world, time). It also accepts the target critic's
+    parameter pytree through its externalized ``critics`` field and returns a
+    trajectory whose state leaves begin (world, time, ...) and whose ``cost``
+    is shaped (world, time). ``target_critic`` values that trajectory's next
+    states, its whole parameter tree arriving in its ``critic`` field.
     ``critic_trainer`` is cyclic, exposes the fitted parameters as
     ``params()``, and accepts trajectory state as ``input`` plus the
     TD-lambda target array as ``target``. ``ema_critic`` smooths those
@@ -217,6 +217,10 @@ def MPPIUpdate(
 @node
 def CandidateRollouts(rollouts: Node) -> Node:
     """Roll one start out open loop under every candidate plan.
+
+    ``candidates`` is shaped (candidate, time), while ``initial_state`` is one
+    unbatched plant-state pytree. Returned state leaves begin
+    (candidate, time, ...), and ``cost`` is shaped (candidate, time).
 
     The wrapped Node is ``batch(scanned(OpenLoopStep))``: batch consumes
     candidates and scan consumes time, the order the plans arrive in. The
@@ -288,6 +292,9 @@ def mppi_learner(
 ) -> Node:
     """Assemble one critic-fitting iteration around a receding controller.
 
+    The returned iteration accepts ``initial_state`` leaves shaped
+    (world, time, ...) and ``disturbance`` shaped (world, time).
+
     The controller plans under the EMA target critic, whose parameters reach
     it as data through the planner's critic batch, and the sampled
     trajectories fit the online critic to TD-lambda targets under that same
@@ -297,7 +304,7 @@ def mppi_learner(
         batch(scanned(ControlledStep(controller, plant)), n=n_worlds),
         'policy.refinements.critics',
     )
-    trajectory_critic = batch(batch(critic, n=n_steps_per_iteration, axis='time'), n=n_worlds)
+    trajectory_critic = batch(batch(critic, n=n_steps_per_iteration), n=n_worlds)
     critic_trainer = iterated(
         train_step(trajectory_critic, mse, critic_optimizer),
         n=n_critic_updates,

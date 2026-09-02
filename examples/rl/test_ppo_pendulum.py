@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from nodejax import (
-    Struct,
+    Node,
     ensemble,
     reduce,
 )
@@ -36,18 +36,18 @@ from examples.rl.ppo_pendulum import (
 N_VALUE_MEMBERS = 2
 
 
-def min_ensemble_pendulum_value() -> Struct:
-    """Pair a min-valued ensemble with its memberwise fit."""
-    model = (
+def min_ensemble_pendulum_value() -> Node:
+    """Build the min-valued ensemble used to test architecture-local loss logic."""
+    return (
         ensemble(PendulumValue(hidden=HIDDEN), n=N_VALUE_MEMBERS)
         >> reduce(jnp.min)
     )
 
-    def fit(reduced_value, target, *, aux) -> jax.Array:
-        member_values = aux.reduce_min.population
-        return mse(member_values, target[..., None])
 
-    return Struct(model=model, fit=fit)
+def min_ensemble_value_loss(reduced_value, target, *, aux) -> jax.Array:
+    """Fit every ensemble member before the min reduction."""
+    member_values = aux.reduce_min.population
+    return mse(member_values, target[..., None])
 
 
 def test_ppo_improves_both_policy_lifecycles() -> None:
@@ -61,6 +61,7 @@ def test_ppo_improves_both_policy_lifecycles() -> None:
             pendulum_training_program(
                 policy,
                 pendulum_value(),
+                value_loss=mse,
                 iterations=20,
             ),
             parameter_key=jax.random.PRNGKey(0),
@@ -76,6 +77,7 @@ def test_min_ensemble_value_uses_the_same_ppo_program() -> None:
         pendulum_training_program(
             pendulum_policy(nn.identity),
             min_ensemble_pendulum_value(),
+            value_loss=min_ensemble_value_loss,
             iterations=1,
         ),
         parameter_key=jax.random.PRNGKey(0),

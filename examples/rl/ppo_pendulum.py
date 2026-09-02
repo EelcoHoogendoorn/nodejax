@@ -7,8 +7,8 @@ import optax
 from nodejax import (
     BaseNode,
     Composite,
+    LossFn,
     Node,
-    Struct,
     carried,
     node,
     serial,
@@ -80,21 +80,31 @@ def pendulum_policy(memory: BaseNode) -> Node:
     return LearnedGaussian(mean, log_std)
 
 
-def pendulum_value() -> Struct:
-    """Pair the example value Node with its regression loss."""
-    return Struct(model=PendulumValue(hidden=HIDDEN), fit=mse)
+def pendulum_value() -> Node:
+    """Build the example value Node."""
+    return PendulumValue(hidden=HIDDEN)
 
 
 def pendulum_training_program(
     policy: Node,
-    value: Struct,
+    value: Node,
+    *,
+    value_loss: LossFn | BaseNode,
     iterations: int,
 ) -> Node:
-    """Assemble the complete Pendulum PPO training tree."""
-    iteration = ppo_learner(
+    """Build a complete executable Pendulum PPO training program.
+
+    The returned Node has no ordinary inputs and requires ``rng``. It generates
+    ``iterations`` batches of initial states and disturbances, runs one PPO
+    learner iteration for each batch, and carries the actor and critic training
+    state between iterations. Its ordinary output is the PPO learner bound to
+    its final state; per-iteration metrics are retained under ``aux.training``.
+    """
+    learner_iteration = ppo_learner(
         policy,
         value,
         Pendulum(),
+        value_loss=value_loss,
         clip=CLIP,
         entropy_weight=ENTROPY_WEIGHT,
         actor_optimizer=optax.adam(ACTOR_RATE),
@@ -108,13 +118,13 @@ def pendulum_training_program(
         n_chunks_per_minibatch=N_CHUNKS_PER_MINIBATCH,
         n_critic_passes=N_CRITIC_PASSES,
     )
-    data = PendulumTrainingData(
+    training_data = PendulumTrainingData(
         iterations,
         n_worlds=N_WORLDS,
         n_chunks=N_CHUNKS_PER_EPOCH,
         n_steps_per_chunk=N_STEPS_PER_CHUNK,
     )
-    return serial(data=data, training=carried(iteration))
+    return serial(data=training_data, training=carried(learner_iteration))
 
 
 def save_figure(figure, filename: str) -> str:
@@ -138,6 +148,7 @@ def swing_up() -> None:
         pendulum_training_program(
             pendulum_policy(nn.GRU(MEMORY)),
             pendulum_value(),
+            value_loss=mse,
             iterations=N_ITERATIONS,
         ),
         parameter_key=jax.random.PRNGKey(0),

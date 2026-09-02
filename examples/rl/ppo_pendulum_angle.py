@@ -7,6 +7,7 @@ from nodejax import tree_len
 from nodejax import nn
 from examples.rl.control import mean_rollout
 from examples.rl.distributions import LearnedGaussian, StateIndependentLogStd
+from examples.rl.losses import mse
 from examples.rl.pendulum import (
     AngleFeatures,
     Pendulum,
@@ -52,6 +53,7 @@ def angle_only_swing_up() -> None:
         pendulum_training_program(
             policy,
             pendulum_value(),
+            value_loss=mse,
             iterations=N_ITERATIONS,
         ),
         parameter_key=jax.random.PRNGKey(0),

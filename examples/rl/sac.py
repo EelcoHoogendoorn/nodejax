@@ -25,8 +25,10 @@ import jax.numpy as jnp
 
 from nodejax import (
     Aux,
+    BaseNode,
     Composite,
     Leaf,
+    LossFn,
     Node,
     PyTree,
     Struct,
@@ -94,6 +96,7 @@ def temperature_loss(target_entropy: float) -> Node:
 
     The gradient with respect to the stored logarithm raises the temperature
     while the policy's entropy sits below the target and lowers it above.
+    ``logprob`` is shaped (chunk, time + 1); both axes are averaged.
     """
     def apply(temperature: jax.Array, logprob: jax.Array) -> jax.Array:
         return -jnp.log(temperature) * (jnp.mean(logprob) + target_entropy)
@@ -105,9 +108,10 @@ def entropy_regularized_cost(output: Struct, temperature: jax.Array) -> tuple[ja
     """SAC's actor objective: critic cost plus entropy pressure.
 
     ``output`` is a valued replay, fresh commands with their
-    log-probabilities and the critic's cost of each. Only the commands carry
-    gradient into the cost, and that path is the actor's signal. The
-    policy's mean entropy estimate rides on aux.
+    log-probabilities and critic costs shaped (chunk, time + 1), while
+    ``temperature`` is scalar. Both replay axes are averaged. Only the
+    commands carry gradient into the cost, and that path is the actor's
+    signal. The policy's mean entropy estimate rides on aux.
     """
     loss = jnp.mean(output.cost + temperature * output.logprob)
     return loss, Aux(entropy=-jnp.mean(output.logprob))
@@ -117,9 +121,10 @@ def entropy_regularized_cost(output: Struct, temperature: jax.Array) -> tuple[ja
 def ValuedReplay(replay: Node, critic: Node) -> Node:
     """Replay stored observations with fresh commands and cost each one.
 
-    ``replay`` maps observation sequences and chunk-start policy states to
-    fresh commands and log-probabilities at every step; ``critic`` maps
-    observation and command on the same axes to a cost. Externalizing
+    Observation leaves begin (chunk, time + 1, ...), and ``initial`` is one
+    policy-state pytree per chunk whose leaves begin (chunk, ...). ``replay`` produces
+    fresh commands and log-probabilities on the observation axes; ``critic``
+    maps observation and command on those same axes to a cost. Externalizing
     ``critic`` lets a caller supply the online critic's parameters on every
     call and keeps them out of this Node's own parameter tree.
     """
@@ -146,8 +151,11 @@ def SACUpdate(
     *,
     discount: float,  # per-step discount on the soft Bellman target
 ) -> Node:
-    """One SAC gradient update over one replayed minibatch of chunks, shaped
-    (chunk, time) with the recorded chunk starts shaped (chunk, ...).
+    """One SAC gradient update over one replayed minibatch of chunks.
+
+    Observation leaves begin (chunk, time + 1, ...), command leaves begin
+    (chunk, time, ...), ``cost`` is shaped (chunk, time), and ``initial`` is one
+    recorded policy-state pytree per chunk whose leaves begin (chunk, ...).
 
     ``actor_trainer`` differentiates a valued replay under an externalized
     ``critic`` and returns the fresh commands and log-probabilities it
@@ -223,6 +231,11 @@ def SAC(
 ) -> Node:
     """One off-policy SAC iteration: collect, store, and update from replay.
 
+    Initial-state leaves begin (world, ...), and ``disturbance`` is shaped
+    (world, chunk, time). Sampled-record leaves begin (world, chunk, time, ...).
+    The (world, chunk) axes are flattened into the replay buffer's row axis while
+    time remains within each row.
+
     ``sampler`` rolls the policy out over chunks and worlds, its policy
     parameters arriving in its ``policy`` field, and records the
     observation, the policy state each step saw, the command, the cost, and
@@ -243,7 +256,7 @@ def SAC(
 
         # One overlap step lets a single replay pass serve both the fresh commands and the
         # shifted Bellman targets. The buffer's currency is one chunk per row: flattening the
-        # (chunk, world) axes decorrelates sampling across both.
+        # (world, chunk) axes decorrelates sampling across both.
         last = jax.tree.map(lambda value: value[:, :, -1:], record.next_observation)
         sequence = jax.tree.map(
             lambda head, end: jnp.concatenate((head, end), axis=2),
@@ -270,9 +283,10 @@ def SAC(
 
 def sac_learner(
     policy: Node,
-    critic: Struct,
+    critic: Node,
     plant: Node,
     *,
+    critic_loss: LossFn | BaseNode,  # fits critic output to the soft Bellman target
     transition: PyTree,  # one zero transition: observation, command, cost of a step
     capacity: int,  # replay rows held
     discount: float,  # per-step discount on the soft Bellman target
@@ -290,13 +304,12 @@ def sac_learner(
 ) -> Node:
     """Assemble one SAC iteration from a policy, a critic, and a plant.
 
-    ``critic`` is Struct(model, fit): the state-command cost Node and the
-    loss that fits it to a target, which may declare ``aux``. The
-    transition resolves the policy and critic contracts and shapes the
-    buffer's rows together with the policy's own state.
+    ``critic_loss`` fits the state-command cost Node to a target and may
+    declare ``aux``. The transition resolves the policy and critic contracts
+    and shapes the buffer's rows together with the policy's own state.
     """
     policy = policy.with_input(transition.observation)
-    critic_model = critic.model.with_input(Struct(
+    critic = critic.with_input(Struct(
         observation=transition.observation,
         command=transition.command,
     ))
@@ -311,16 +324,19 @@ def sac_learner(
         initial=memory,
     )
     sampler = externalize(
-        scanned(batch(scan(SamplingStep(policy, plant), n=n_steps_per_chunk), n=n_worlds)),
+        batch(
+            scanned(scan(SamplingStep(policy, plant), n=n_steps_per_chunk)),
+            n=n_worlds,
+        ),
         'policy',
     )
     replay = batch(scanned(SampledCommand(policy)), n=n_chunks_per_minibatch)
     minibatch_critic = batch(
-        batch(critic_model, n=n_steps_per_chunk, axis='time'),
+        batch(critic, n=n_steps_per_chunk),
         n=n_chunks_per_minibatch,
     )
     sequence_critic = batch(
-        batch(critic_model, n=n_steps_per_chunk + 1, axis='time'),
+        batch(critic, n=n_steps_per_chunk + 1),
         n=n_chunks_per_minibatch,
     )
     update = SACUpdate(
@@ -330,7 +346,7 @@ def sac_learner(
             actor_optimizer,
         ),
         target_critic=externalize(minibatch_critic, field='critic'),
-        critic_trainer=train_step(minibatch_critic, critic.fit, critic_optimizer),
+        critic_trainer=train_step(minibatch_critic, critic_loss, critic_optimizer),
         temperature_trainer=train_step(
             Temperature(initial_temperature),
             temperature_loss(target_entropy),

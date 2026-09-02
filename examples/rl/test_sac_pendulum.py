@@ -3,7 +3,7 @@
 import jax
 import numpy as np
 
-from nodejax import Struct
+from nodejax import Node
 from nodejax import nn
 from examples.rl.losses import mse
 from examples.rl.pendulum import Pendulum, downward_starts, pendulum_evaluation
@@ -14,14 +14,15 @@ from examples.rl.sac_pendulum import (
     N_EVALUATION_STEPS,
     PendulumQ,
     pendulum_critic,
+    pendulum_critic_loss,
     pendulum_policy,
     pendulum_training_program,
 )
 
 
-def single_pendulum_critic() -> Struct:
-    """Pair one ordinary critic Node with ordinary MSE for the variant check."""
-    return Struct(model=PendulumQ(hidden=HIDDEN), fit=mse)
+def single_pendulum_critic() -> Node:
+    """Build one ordinary critic for the non-ensemble variant check."""
+    return PendulumQ(hidden=HIDDEN)
 
 
 def test_sac_learns_the_swing_up() -> None:
@@ -36,6 +37,7 @@ def test_sac_learns_the_swing_up() -> None:
             pendulum_policy(nn.identity),
             pendulum_critic(),
             iterations=90,
+            critic_loss=pendulum_critic_loss,
         ),
         parameter_key=jax.random.PRNGKey(0),
         training_key=jax.random.PRNGKey(100),
@@ -61,6 +63,7 @@ def test_recurrent_sac_is_wired() -> None:
             pendulum_policy(nn.GRU(MEMORY)),
             pendulum_critic(),
             iterations=2,
+            critic_loss=pendulum_critic_loss,
         ),
         parameter_key=jax.random.PRNGKey(0),
         training_key=jax.random.PRNGKey(100),
@@ -77,6 +80,7 @@ def test_single_critic_uses_the_same_sac_program() -> None:
             pendulum_policy(nn.identity),
             single_pendulum_critic(),
             iterations=2,
+            critic_loss=mse,
         ),
         parameter_key=jax.random.PRNGKey(0),
         training_key=jax.random.PRNGKey(100),

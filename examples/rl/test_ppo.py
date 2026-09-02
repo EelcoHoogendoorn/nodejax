@@ -8,14 +8,17 @@ from nodejax import (
     Struct,
     batch,
     drop_aux,
+    replace_by_path,
     scan,
     scanned,
     tree_first,
+    tree_last,
+    tree_reshape,
 )
 from nodejax import nn
 from examples.rl.control import SamplingStep
 from examples.rl.pendulum import Pendulum, PendulumTrainingData
-from examples.rl.ppo import ReplayStep
+from examples.rl.ppo import ReplayStep, advantage_estimates
 from examples.rl.ppo_pendulum import (
     MEMORY,
     N_CHUNKS_PER_EPOCH,
@@ -25,33 +28,38 @@ from examples.rl.ppo_pendulum import (
 )
 
 
+def test_advantage_estimates_one_trajectory() -> None:
+    estimator = advantage_estimates(discount=0.5, trace=1.0).parameterize()
+    estimates = drop_aux(estimator.apply(
+        reward=jnp.array([[1.0, 2.0], [3.0, 4.0]]),
+        value=jnp.zeros((2, 2)),
+        next_value=jnp.zeros((2, 2)),
+    ))
+
+    expected = jnp.array([[3.25, 4.5], [5.0, 4.0]])
+    assert jnp.allclose(estimates.advantage, expected)
+    assert jnp.allclose(estimates.returns, expected)
+
+
 def test_replay_reproduces_the_rollout() -> None:
     """Replay every chunk from recorded state and recover its log-probability."""
     policy = pendulum_policy(nn.GRU(MEMORY))
     plant = Pendulum()
-    sampler = scanned(
-        batch(scan(SamplingStep(policy, plant), n=N_STEPS_PER_CHUNK), n=N_WORLDS),
+    sampler = batch(
+        scanned(scan(SamplingStep(policy, plant), n=N_STEPS_PER_CHUNK)),
+        n=N_WORLDS,
     )
     observation = plant.initialize().observe()
-    weights = policy.with_input(observation).parameterize(
+    policy_param = policy.with_input(observation).parameterize(
         rng=jax.random.PRNGKey(0),
     ).param
     # The production head starts at zero. Activate its memory path here so
     # a chunk's last recorded GRU state, rather than its first, cannot pass
     # vacuously.
-    weights = weights.replace(
-        mean=weights.mean.replace(
-            command=weights.mean.command.replace(
-                projection=weights.mean.command.projection.replace(
-                    w=jnp.linspace(
-                        -0.1,
-                        0.1,
-                        weights.mean.command.projection.w.shape[0],
-                    ),
-                ),
-            ),
-        ),
-    )
+    policy_param = replace_by_path(policy_param, {
+        '.mean.command.projection.w': lambda weight: jnp.linspace(
+            -0.1, 0.1, weight.shape[0]),
+    })
 
     data = PendulumTrainingData(
         1,
@@ -61,27 +69,28 @@ def test_replay_reproduces_the_rollout() -> None:
     ).apply(rng=jax.random.PRNGKey(3))
     initial_state = tree_first(data.initial_state)
     disturbance = tree_first(data.disturbance)
-    record = drop_aux(sampler.bind(Struct(policy=weights)).apply(
+    record = drop_aux(sampler.bind(Struct(policy=policy_param)).apply(
         disturbance=disturbance,
         initial_state=initial_state,
         rng=jax.random.PRNGKey(1),
     ))
-    starts = jax.tree.map(lambda value: value[:, :, 0], record.policy_state)
-    ends = jax.tree.map(lambda value: value[:, :, -1], record.policy_state)
+    rows = tree_reshape(record, (-1,), axes=2)
+    starts = tree_first(rows.policy_state, axis=1)
+    ends = tree_last(rows.policy_state, axis=1)
     replay = batch(
-        batch(scanned(ReplayStep(policy)), n=N_WORLDS),
-        n=N_CHUNKS_PER_EPOCH,
-    ).bind(weights)
+        scanned(ReplayStep(policy)),
+        n=N_WORLDS * N_CHUNKS_PER_EPOCH,
+    ).bind(policy_param)
 
     def replayed_logprob(policy_state: PyTree) -> jax.Array:
         bundle = Struct(
-            observation=record.observation,
-            command=record.command,
+            observation=rows.observation,
+            command=rows.command,
             initial=policy_state,
         )
         return drop_aux(replay.apply(bundle=bundle)).logprob
 
     reproduced = replayed_logprob(starts)
     shifted = replayed_logprob(ends)
-    assert jnp.allclose(reproduced, record.logprob, atol=1e-5)
-    assert jnp.max(jnp.abs(shifted - record.logprob)) > 1e-3
+    assert jnp.allclose(reproduced, rows.logprob, atol=1e-5)
+    assert jnp.max(jnp.abs(shifted - rows.logprob)) > 1e-3

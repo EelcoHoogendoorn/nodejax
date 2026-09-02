@@ -16,19 +16,17 @@ value, and a plant with stock transforms.
 
 Collection cuts each world's contiguous run into chunks: stored sequence
 pieces, each kept beside the policy state at its start. A chunk is the
-smallest piece replay can evaluate independently: ``n_steps_per_chunk``
-is therefore the truncation depth, whole chunks are the atoms shuffling
-gathers (one minibatch is the sample one actor gradient step consumes),
-and every epoch replays the one collection, chunk by chunk. Every size
-is a free integer named with its own scope, one training iteration
-being the ambient scope, so no divisibility constraints exist and
-``n_chunks_per_epoch = n_minibatches_per_epoch * n_chunks_per_minibatch``
-is also the number of chunks collected.
+smallest piece replay can evaluate independently, so ``n_steps_per_chunk``
+is also the truncation depth. Once advantages have been computed, every
+(world, chunk) pair is one independent replay row and all rows are shuffled
+together. ``n_minibatches_per_epoch * n_chunks_per_minibatch`` determines
+the chunks collected per world, while ``n_worlds * n_chunks_per_minibatch``
+determines the replay rows consumed by each actor update.
 
-Rollout records are shaped (n_chunks_per_epoch, n_worlds, n_steps_per_chunk, ...);
+Rollout records are shaped (n_worlds, n_chunks_per_epoch, n_steps_per_chunk, ...);
 gathered update tensors are (n_epochs, n_minibatches_per_epoch,
-n_chunks_per_minibatch, n_worlds, n_steps_per_chunk, ...), each chunk
-replayed from its recorded start.
+n_rows_per_minibatch, n_steps_per_chunk, ...), each row replayed from its
+recorded start.
 """
 
 import jax
@@ -39,6 +37,7 @@ from nodejax import (
     BaseNode,
     Composite,
     Leaf,
+    LossFn,
     Node,
     Struct,
     Wrapper,
@@ -49,6 +48,8 @@ from nodejax import (
     scan,
     scanned,
     split_aux,
+    tree_first,
+    tree_reshape,
     tree_take,
     train_step,
 )
@@ -86,8 +87,10 @@ def clipped_surrogate(
 ) -> Node:
     """Configure PPO's clipped actor objective from its recorded rollout.
 
-    The approximate KL to the recorded policy, the fraction of clipped
-    ratios, and the mean entropy ride on aux.
+    Within one actor update, ``output.logprob``, ``output.entropy``,
+    ``old_logprob``, and ``advantage`` are shaped (row, time). The objective
+    averages both axes. The approximate KL to the recorded policy, the fraction
+    of clipped ratios, and the mean entropy ride on aux.
     """
     def apply(output: Struct, old_logprob, advantage):
         log_ratio = output.logprob - old_logprob
@@ -104,29 +107,38 @@ def clipped_surrogate(
     return Leaf(apply)
 
 
+@node
 def advantage_estimates(
-    rewards: jax.Array,
-    values: jax.Array,
-    next_values: jax.Array,
     *,
-    discount: float,
-    trace: float,
-) -> tuple[jax.Array, jax.Array]:
-    """Generalized advantage estimation over rollout data shaped (chunk, world, time).
+    discount: float,  # per-step discount in the advantage recursion
+    trace: float,  # GAE trace; 0 is one-step, 1 is Monte Carlo
+) -> Node:
+    """Generalized advantage estimation for one world's chunked trajectory.
 
-    ``next_values`` values each step's next observation, so the recursion
-    runs across chunk boundaries as one contiguous run per world.
-    Advantages come back normalized for the clipped surrogate; returns
-    stay in cost units, being the critic's regression target."""
-    def chunk(carry, deltas):
-        advantages = discounted_backward_sum(deltas, discount * trace, carry)
-        return advantages[:, 0], advantages
+    ``reward``, ``value``, and ``next_value`` are shaped (chunk, time).
+    The recursion carries across chunk boundaries, and ``advantage`` and
+    ``returns`` retain that shape. World batching belongs outside this Node.
+    """
+    def apply(reward, value, next_value):
+        delta = reward + discount * next_value - value
 
-    deltas = rewards + discount * next_values - values
-    advantages = jax.lax.scan(chunk, jnp.zeros(deltas.shape[1]), deltas, reverse=True)[1]
-    returns = advantages + values
-    advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
-    return advantages, returns
+        def reverse_chunk(next_advantage, chunk_delta):
+            advantage = discounted_backward_sum(
+                chunk_delta,
+                discount * trace,
+                next_advantage,
+            )
+            return advantage[0], advantage
+
+        advantage = jax.lax.scan(
+            reverse_chunk,
+            jnp.zeros((), dtype=delta.dtype),
+            delta,
+            reverse=True,
+        )[1]
+        return Struct(advantage=advantage, returns=advantage + value)
+
+    return Leaf(apply)
 
 
 def shuffled_minibatches(
@@ -136,25 +148,27 @@ def shuffled_minibatches(
     *,
     n_epochs: int,
     n_minibatches_per_epoch: int,
-    n_chunks_per_minibatch: int,
 ) -> Struct:
-    """The actor trainer's bundle: one random order of all chunks per epoch,
-    cut into minibatches, with each chunk replayed from its recorded start.
+    """The actor trainer's bundle: one random order of all replay rows per epoch.
 
-    ``record`` is a rollout shaped (chunk, world, time, ...); the result holds
-    the replay's three inputs beside its old log-probability and advantage, shaped
-    (epoch, minibatch, chunk, world, time, ...), the recorded chunk starts
-    shaped (epoch, minibatch, chunk, world, ...).
+    ``record`` is shaped (world, chunk, time, ...). Its leading axes become one
+    row axis before shuffling. The result's sequence leaves are shaped
+    (epoch, minibatch, row, time, ...), with recorded starts shaped
+    (epoch, minibatch, row, ...).
     """
-    n_chunks = record.cost.shape[0]
+    chunks = record.replace(
+        advantage=advantages,
+        policy_state=tree_first(record.policy_state, axis=2),
+    )
+    rows = tree_reshape(chunks, (-1,), axes=2)
+    n_rows_per_epoch = rows.cost.shape[0]
     order = jax.random.permutation(
         key,
-        jnp.broadcast_to(jnp.arange(n_chunks), (n_epochs, n_chunks)),
+        jnp.broadcast_to(jnp.arange(n_rows_per_epoch), (n_epochs, n_rows_per_epoch)),
         axis=1,
         independent=True,
-    ).reshape(n_epochs, n_minibatches_per_epoch, n_chunks_per_minibatch)
-    chunk_starts = jax.tree.map(lambda value: value[:, :, 0], record.policy_state)
-    rows = tree_take(record.replace(advantage=advantages, policy_state=chunk_starts), order)
+    ).reshape(n_epochs, n_minibatches_per_epoch, -1)
+    rows = tree_take(rows, order)
     return Struct(
         observation=rows.observation,
         command=rows.command,
@@ -168,16 +182,18 @@ def shuffled_minibatches(
 def PPO(
     sampler: Node,
     trajectory_value: Node,
+    trajectory_advantage: Node,
     actor_trainer: Node,
     critic_trainer: Node,
     *,
-    discount: float,  # per-step discount in the advantage recursion
-    trace: float,  # GAE trace; 0 is one-step, 1 is Monte Carlo
     n_epochs: int,  # replays of one collection, the actor trainer's outer scan length
-    n_minibatches_per_epoch: int,  # the actor trainer's inner scan length
-    n_chunks_per_minibatch: int,  # chunks one actor update consumes
+    n_minibatches_per_epoch: int,  # actor updates made during each replay epoch
 ) -> Node:
     """One fixed-horizon continuing-control PPO iteration.
+
+    Initial-state leaves begin (world, ...). ``disturbance`` and returned-record
+    leaves begin (world, chunk, time, ...). ``trajectory_advantage`` maps one
+    (chunk, time) trajectory per world to estimates on those same axes.
 
     ``sampler`` rolls the policy out over chunks and worlds, its policy
     parameters arriving in its ``policy`` field, and records the
@@ -185,7 +201,7 @@ def PPO(
     log-probability, the cost, and the next observation.
     ``trajectory_value`` values observations on the rollout's axes, its
     whole parameter tree arriving in its ``value`` field. ``actor_trainer``
-    replays shuffled chunks from their recorded policy states over
+    replays shuffled rows from their recorded policy states over
     minibatches and epochs; ``critic_trainer`` fits the value to the
     returns. Both expose what they hold as ``params()``. The output is the
     collected rollout; the mean cost per step rides on aux.
@@ -193,6 +209,7 @@ def PPO(
     members = Composite(
         sampler=sampler,
         trajectory_value=trajectory_value,
+        trajectory_advantage=trajectory_advantage,
         actor_trainer=actor_trainer,
         critic_trainer=critic_trainer,
     )
@@ -207,8 +224,15 @@ def PPO(
         value_param = self.critic_trainer.params()
         values = self.trajectory_value(input=record.observation, value=value_param)
         next_values = self.trajectory_value(input=record.next_observation, value=value_param)
-        advantages, returns = advantage_estimates(
-            -record.cost, values, next_values, discount=discount, trace=trace)
+        estimates = self.trajectory_advantage(
+            reward=-record.cost,
+            value=values,
+            next_value=next_values,
+        )
+        advantages = (
+            (estimates.advantage - jnp.mean(estimates.advantage))
+            / (jnp.std(estimates.advantage) + 1e-8)
+        )
 
         self.actor_trainer(bundle=shuffled_minibatches(
             rng.next(),
@@ -216,9 +240,8 @@ def PPO(
             advantages,
             n_epochs=n_epochs,
             n_minibatches_per_epoch=n_minibatches_per_epoch,
-            n_chunks_per_minibatch=n_chunks_per_minibatch,
         ))
-        self.critic_trainer(input=record.observation, target=returns)
+        self.critic_trainer(input=record.observation, target=estimates.returns)
         return record, Aux(mean_cost=jnp.mean(record.cost))
 
     return members(apply)
@@ -226,9 +249,10 @@ def PPO(
 
 def ppo_learner(
     policy: Node,
-    value: Struct,
+    value: Node,
     plant: BaseNode,
     *,
+    value_loss: LossFn | BaseNode,
     clip: float,  # ratio clip radius around one
     entropy_weight: float,  # weight of the entropy bonus against the surrogate
     actor_optimizer,  # Optax transformation for the policy parameters
@@ -238,35 +262,40 @@ def ppo_learner(
     n_worlds: int,
     n_steps_per_chunk: int,  # chunk length, also the replay's truncation depth
     n_epochs: int,  # replays of one collection
-    n_minibatches_per_epoch: int,
-    n_chunks_per_minibatch: int,  # chunks one actor gradient step consumes
+    n_minibatches_per_epoch: int,  # actor updates made during each replay epoch
+    n_chunks_per_minibatch: int,  # per-world chunk factor in one actor minibatch
     n_critic_passes: int,  # value fits per iteration
 ) -> Node:
     """Assemble one PPO iteration from a policy, a value, and a plant.
 
-    ``value`` is Struct(model, fit): the state value Node and the loss that
-    fits it to the returns, which may declare ``aux``. The policy returns
-    proposals and owns ``sample``, ``logprob``, and ``entropy`` methods; the
-    plant owns observation and transition semantics, and its initial
-    observation resolves both model contracts.
+    ``value_loss(value_output, target)`` fits the value to the estimated returns
+    and may declare ``aux``. The policy returns proposals and owns ``sample``,
+    ``logprob``, and ``entropy`` methods; the plant owns observation and
+    transition semantics, and its initial observation resolves both model
+    contracts.
     """
     n_chunks_per_epoch = n_minibatches_per_epoch * n_chunks_per_minibatch
+    n_rows_per_minibatch = n_worlds * n_chunks_per_minibatch
     observation = plant.initialize().observe()
     policy = policy.with_input(observation)
-    value_model = value.model.with_input(observation)
+    value = value.with_input(observation)
 
     sampler = externalize(
-        scanned(batch(scan(SamplingStep(policy, plant), n=n_steps_per_chunk), n=n_worlds)),
+        batch(
+            scanned(scan(SamplingStep(policy, plant), n=n_steps_per_chunk)),
+            n=n_worlds,
+        ),
         'policy',
     )
     # Every optimizer call starts each selected chunk from recorded state. No
     # replay memory survives into the next minibatch or epoch.
-    replay = batch(batch(scanned(ReplayStep(policy)), n=n_worlds), n=n_chunks_per_minibatch)
+    replay = batch(scanned(ReplayStep(policy)), n=n_rows_per_minibatch)
     trajectory_value = batch(
-        batch(batch(value_model, n=n_steps_per_chunk, axis='time'), n=n_worlds),
-        n=n_chunks_per_epoch,
-        axis='chunk',
+        batch(batch(value, n=n_steps_per_chunk), n=n_chunks_per_epoch),
+        n=n_worlds,
     )
+    trajectory_advantage = batch(
+        advantage_estimates(discount=discount, trace=trace), n=n_worlds)
     actor_trainer = scan(
         scan(
             train_step(
@@ -279,41 +308,42 @@ def ppo_learner(
         n=n_epochs,
     )
     critic_trainer = iterated(
-        train_step(trajectory_value, value.fit, critic_optimizer),
+        train_step(trajectory_value, value_loss, critic_optimizer),
         n=n_critic_passes,
     )
     return PPO(
         sampler=sampler,
         trajectory_value=externalize(trajectory_value, field='value'),
+        trajectory_advantage=trajectory_advantage,
         actor_trainer=actor_trainer,
         critic_trainer=critic_trainer,
-        discount=discount,
-        trace=trace,
         n_epochs=n_epochs,
         n_minibatches_per_epoch=n_minibatches_per_epoch,
-        n_chunks_per_minibatch=n_chunks_per_minibatch,
     )
 
 
 def ppo_training(
-    program: Node,
+    training_program: Node,
     *,
     parameter_key: jax.Array,
     training_key: jax.Array,
 ) -> Struct:
-    """Run a PPO program and return what it trained.
+    """Execute a complete data-to-learner PPO training composition.
 
-    ``program`` carries a PPO iteration over its data. The result holds the
-    trained policy, read out of the actor trainer's trained model, the
-    iteration bound to its final state, from which a caller binds a value
-    to the fitted parameters, and the history.
+    ``training_program`` is not one ``ppo_learner`` iteration. It must supply a
+    sequence of training inputs to ``carried(ppo_learner(...))``, returning the
+    learner bound to its final state and emitting per-iteration values under
+    ``aux.training``. This function parameterizes and executes that whole Node,
+    then returns its trained policy, final learner, and named training history.
     """
-    final, aux = split_aux(
-        jax.jit(program.parameterize(rng=parameter_key).apply)(rng=training_key),
+    learner, aux = split_aux(
+        jax.jit(
+            training_program.parameterize(rng=parameter_key).apply,
+        )(rng=training_key),
     )
     return Struct(
-        policy=final.actor_trainer.trained().pnode.policy,
-        learner=final,
+        policy=learner.actor_trainer.trained().pnode.policy,
+        learner=learner,
         history=Struct(
             actor_loss=aux.training.actor_trainer.loss.reshape(-1),
             critic_loss=aux.training.critic_trainer.loss.reshape(-1),
