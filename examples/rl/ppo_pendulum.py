@@ -1,152 +1,176 @@
-"""Pendulum policy, value, data, and evaluation Nodes for PPO."""
+"""Run recurrent PPO on the Pendulum and save its phase-space plot."""
 
 import jax
 import jax.numpy as jnp
+import optax
 
 from nodejax import (
     BaseNode,
     Composite,
-    Leaf,
     Node,
-    PNode,
     Struct,
-    batch,
+    carried,
     node,
-    scanned,
-    tile,
-    tree_last,
+    serial,
     tree_len,
 )
 from nodejax import nn
-from examples.rl.control import ControlledStep
+from examples.rl.control import mean_rollout
+from examples.rl.distributions import LearnedGaussian, StateIndependentLogStd
+from examples.rl.losses import mse
 from examples.rl.pendulum import (
+    Pendulum,
     PendulumFeatures,
-    VELOCITY_SCALE,
+    PendulumMean,
+    PendulumTrainingData,
+    downward_starts,
+    overlay_phase_trajectories,
+    pendulum_evaluation,
+    phase_grid,
+    phase_portrait,
+    phase_starts,
 )
+from examples.rl.ppo import ppo_learner, ppo_training
 
 
-@node
-def PendulumMean(
-    memory: BaseNode,
-    hidden: int,
-    features: BaseNode | None = None,
-) -> Node:
-    """Pendulum observation to Gaussian mean, optionally with memory.
-
-    ``features`` narrows what the policy sees; the default reads the full
-    observation."""
-    members = Composite(
-        features=features or PendulumFeatures(),
-        encoder=nn.Linear(hidden) >> nn.silu,
-        memory=memory,
-        command=(
-            nn.Linear(hidden)
-            >> nn.silu
-            >> nn.Projection(weight_init=jax.nn.initializers.zeros)
-        ),
-    )
-
-    def apply(self, input):
-        encoded = self.encoder(self.features(input))
-        representation = self.memory(encoded)
-        return self.command(representation)
-
-    return members(apply)
+HIDDEN = 64
+MEMORY = 32
+N_WORLDS = 32
+N_STEPS_PER_CHUNK = 16
+N_EPOCHS = 4
+N_MINIBATCHES_PER_EPOCH = 4
+N_CHUNKS_PER_MINIBATCH = 2
+N_CHUNKS_PER_EPOCH = N_MINIBATCHES_PER_EPOCH * N_CHUNKS_PER_MINIBATCH
+N_CRITIC_PASSES = 4
+CLIP = 0.2
+DISCOUNT = 0.97
+TRACE = 0.95
+ENTROPY_WEIGHT = 1e-3
+ACTOR_RATE = 1e-3
+CRITIC_RATE = 1e-3
+INITIAL_LOG_STD = -0.5
+N_ITERATIONS = 400
+N_EVALUATION_STEPS = 300
 
 
 @node
 def PendulumValue(hidden: int) -> Node:
     """Pendulum state value for the advantage baseline."""
-    return (
-        PendulumFeatures()
-        >> nn.Linear(hidden)
-        >> nn.tanh
-        >> nn.Linear(hidden)
-        >> nn.tanh
-        >> nn.Projection()
+    members = Composite(
+        features=PendulumFeatures(),
+        body=(
+            nn.Linear(hidden)
+            >> nn.tanh
+            >> nn.Linear(hidden)
+            >> nn.tanh
+            >> nn.Projection()
+        ),
     )
 
+    def apply(self, input):
+        return self.body(self.features(input))
 
-@node
-def PendulumTrainingData(
+    return members(apply)
+
+
+def pendulum_policy(memory: BaseNode) -> Node:
+    """Build the example policy with an explicit memory lifecycle."""
+    mean = PendulumMean(memory=memory, hidden=HIDDEN)
+    log_std = StateIndependentLogStd(initial=INITIAL_LOG_STD)
+    return LearnedGaussian(mean, log_std)
+
+
+def pendulum_value() -> Struct:
+    """Pair the example value Node with its regression loss."""
+    return Struct(model=PendulumValue(hidden=HIDDEN), fit=mse)
+
+
+def pendulum_training_program(
+    policy: Node,
+    value: Struct,
     iterations: int,
-    *,
-    n_worlds: int,
-    n_chunks: int,
-    n_steps_per_chunk: int,
-) -> PNode:
-    """Independent starts and disturbances for one collection-driven run."""
-    def apply(rng):
-        sample = jax.random.uniform(rng.next(), (2, iterations, n_worlds))
-        return Struct(
-            initial_state=Struct(
-                angle=2.0 * jnp.pi * sample[0] - jnp.pi,
-                velocity=VELOCITY_SCALE * (2.0 * sample[1] - 1.0),
-            ),
-            disturbance=jnp.zeros(
-                (iterations, n_chunks, n_steps_per_chunk, n_worlds),
-            ),
-        )
-
-    return Leaf(apply)
-
-
-@node
-def ProposalMean() -> Node:
-    """Select the deterministic command from a Gaussian proposal."""
-    return Leaf(lambda input: input.mean)
-
-
-def mean_rollout_program(
-    policy: PNode,
-    plant: BaseNode,
-    n_worlds: int,
-) -> PNode:
-    """Build a fresh deterministic rollout from an injected policy and plant."""
-    mean_policy = policy >> ProposalMean()
-    return scanned(
-        batch(ControlledStep(mean_policy, plant), n=n_worlds)
-    ).parameterize()
-
-
-def mean_rollout(
-    policy: PNode,
-    plant: BaseNode,
-    starts: Struct,
-    disturbance: jax.Array,
-) -> Struct:
-    """Run a deterministic closed loop from the given starts."""
-    n_worlds = tree_len(starts)
-    steps = tree_len(disturbance)
-    input = Struct(
-        disturbance=disturbance,
-        initial_state=tile(starts, steps),
-    )
-    rollout = mean_rollout_program(policy, plant, n_worlds)
-    trajectory = rollout.apply(bundle=input)
-    return Struct(
-        cost=trajectory.cost,
-        state=trajectory.next_state,
-        action=trajectory.action,
-    )
-
-
-def pendulum_evaluation(
-    policy: PNode,
-    plant: BaseNode,
-    starts: Struct,
-    steps: int,
-) -> Struct:
-    """Summarize a deterministic Pendulum rollout from injected starts."""
-    trajectory = mean_rollout(
+) -> Node:
+    """Assemble the complete Pendulum PPO training tree."""
+    iteration = ppo_learner(
         policy,
-        plant,
-        starts,
-        jnp.zeros((steps, tree_len(starts))),
+        value,
+        Pendulum(),
+        clip=CLIP,
+        entropy_weight=ENTROPY_WEIGHT,
+        actor_optimizer=optax.adam(ACTOR_RATE),
+        critic_optimizer=optax.adam(CRITIC_RATE),
+        discount=DISCOUNT,
+        trace=TRACE,
+        n_worlds=N_WORLDS,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+        n_epochs=N_EPOCHS,
+        n_minibatches_per_epoch=N_MINIBATCHES_PER_EPOCH,
+        n_chunks_per_minibatch=N_CHUNKS_PER_MINIBATCH,
+        n_critic_passes=N_CRITIC_PASSES,
     )
-    final = tree_last(trajectory.state)
-    return Struct(
-        mean_cost=jnp.mean(trajectory.cost),
-        final_angle=jnp.max(jnp.abs(final.angle)),
-        final_velocity=jnp.max(jnp.abs(final.velocity)),
+    data = PendulumTrainingData(
+        iterations,
+        n_worlds=N_WORLDS,
+        n_chunks=N_CHUNKS_PER_EPOCH,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
     )
+    return serial(data=data, training=carried(iteration))
+
+
+def save_figure(figure, filename: str) -> str:
+    """Save one example figure beside the other RL plots."""
+    import os
+
+    output = os.path.join(os.path.dirname(__file__), 'plots', filename)
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    figure.savefig(output, dpi=160)
+    return output
+
+
+def swing_up() -> None:
+    """Train the recurrent policy, evaluate it, and save its phase portrait."""
+    import matplotlib
+
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    result = ppo_training(
+        pendulum_training_program(
+            pendulum_policy(nn.GRU(MEMORY)),
+            pendulum_value(),
+            iterations=N_ITERATIONS,
+        ),
+        parameter_key=jax.random.PRNGKey(0),
+        training_key=jax.random.PRNGKey(100),
+    )
+    history = result.history.mean_cost
+    outcome = pendulum_evaluation(
+        result.policy,
+        Pendulum(),
+        downward_starts(),
+        steps=N_EVALUATION_STEPS,
+    )
+    print(
+        f'training cost {history[0]:.3f} -> {history[-1]:.3f} | '
+        f'final angle {outcome.final_angle:.3f} rad | '
+        f'final velocity {outcome.final_velocity:.3f} rad/s'
+    )
+
+    figure, axis = plt.subplots(figsize=(7.2, 5.8))
+    phase_portrait(axis, phase_grid())
+    plotted_starts = phase_starts(jax.random.PRNGKey(29))
+    plotted_rollouts = mean_rollout(
+        result.policy,
+        Pendulum(),
+        plotted_starts,
+        jnp.zeros((N_EVALUATION_STEPS, tree_len(plotted_starts))),
+    )
+    overlay_phase_trajectories(axis, plotted_rollouts.state)
+    axis.set_title('recurrent PPO pendulum: real rollouts from sampled starts')
+    output = save_figure(figure, 'ppo_pendulum_phase_space.png')
+    plt.close(figure)
+    print(f'phase plot: {output}')
+
+
+if __name__ == '__main__':
+    swing_up()

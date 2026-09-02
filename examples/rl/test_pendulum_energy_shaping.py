@@ -19,7 +19,7 @@ from examples.rl.control import ControlledStep
 from examples.rl.pendulum import (
     Pendulum,
     downward_starts,
-    overlay_trajectories,
+    overlay_phase_trajectories,
     phase_grid,
     phase_portrait,
     phase_starts,
@@ -94,52 +94,18 @@ def energy_trajectory(
 
 
 def plot_phase_space(trajectory: Struct) -> str:
-    """Render a fresh-state controller slice and closed-loop rollouts."""
+    """Render real closed-loop rollouts from sampled phase states."""
     import os
     import matplotlib
 
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import numpy as np
-
-    grid = phase_grid()
-    flat_state = jax.tree.map(lambda value: value.reshape(-1), grid)
-    action = energy_trajectory(flat_state, steps=1).action[0]
-    actions = action.reshape(grid.angle.shape)
 
     figure, axis = plt.subplots(figsize=(7.2, 5.8))
-    phase_portrait(axis, grid, actions)
-    references = downward_starts().angle.shape[0]
-    colors = plt.cm.viridis(np.linspace(0.05, 0.95, references))
-    reference_state = jax.tree.map(
-        lambda value: value[:, :references],
-        trajectory.state,
-    )
-    random_state = jax.tree.map(
-        lambda value: value[:, references:],
-        trajectory.state,
-    )
-    overlay_trajectories(axis, reference_state, colors)
-    overlay_trajectories(
-        axis,
-        random_state,
-        ('0.12',) * random_state.angle.shape[1],
-        linewidth=0.75,
-        alpha=0.42,
-        mark_starts=False,
-    )
-    axis.scatter(
-        np.asarray(random_state.angle[0]),
-        np.asarray(random_state.velocity[0]),
-        facecolor='none',
-        edgecolor='0.15',
-        s=17,
-        linewidth=0.7,
-        zorder=3,
-        label='random rollout start',
-    )
+    phase_portrait(axis, phase_grid())
+    overlay_phase_trajectories(axis, trajectory.state)
     axis.set_title(
-        'pendulum energy shaping: fresh-state controller slice and rollouts',
+        'pendulum energy shaping: real rollouts from sampled starts',
     )
     axis.legend(loc='upper right', frameon=False)
     figure.tight_layout()

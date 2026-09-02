@@ -1,66 +1,60 @@
-"""Pendulum policy, critic, data, evaluation, and plotting support for SHAC."""
+"""Train one recurrent Pendulum policy with SHAC and save its phase plot."""
 
 import jax
 import jax.numpy as jnp
+import optax
 
 from nodejax import (
-    Aux,
     BaseNode,
-    Composite,
     Leaf,
     Node,
     PNode,
     Struct,
     batch,
+    carried,
     drop_aux,
+    ensemble,
     node,
-    tile,
-    tree_first,
-    tree_last,
+    reduce,
+    scan,
+    serial,
     tree_len,
 )
 from nodejax import nn
-from examples.rl.control import ControlledStep
+from examples.rl import control
 from examples.rl.pendulum import (
     MAX_TORQUE,
     VELOCITY_SCALE,
-    PendulumFeatures,
+    Pendulum,
+    PendulumCritic,
+    PendulumMean,
     downward_starts,
+    overlay_phase_trajectories,
     overlay_trajectories,
     phase_grid,
     phase_portrait,
+    phase_starts,
     phase_surface,
 )
+from examples.rl.shac import shac_learner, shac_training
 
 
-@node
-def PendulumPolicy(
-    memory: BaseNode,
-    hidden: int,
-    features: BaseNode | None = None,
-) -> Node:
-    """A deterministic policy with an explicit memory lifecycle.
-
-    ``features`` narrows what the policy sees; the default reads the full
-    observation."""
-    members = Composite(
-        features=features or PendulumFeatures(),
-        encoder=nn.Linear(hidden) >> nn.silu,
-        memory=memory,
-        command=(
-            nn.Linear(hidden)
-            >> nn.silu
-            >> nn.Projection(weight_init=jax.nn.initializers.zeros)
-        ),
-    )
-
-    def apply(self, input):
-        encoded = self.encoder(self.features(input))
-        representation = self.memory(encoded)
-        command = self.command(representation)
-        return command, Aux(representation=representation)
-
-    return members(apply)
+DISCOUNT = 0.97
+TRACE = 0.95
+HIDDEN = 64
+MEMORY = 64
+N_POLICY_MEMBERS = 3
+N_CRITIC_MEMBERS = 3
+N_STEPS_PER_CHUNK = 20
+N_WORLDS = 64
+N_CHUNKS_PER_EPISODE = 15
+N_EPISODES = 40
+N_CRITIC_UPDATES = 4
+EMA_CRITIC_DECAY = 0.995
+ACTOR_RATE = 0.001
+CRITIC_RATE = 0.001
+DISTURBANCE_SCALE = 0.03
+N_EVALUATION_STEPS = 300
 
 
 @node
@@ -73,34 +67,6 @@ def ScalarMLP(hidden: int) -> Node:
         >> nn.tanh
         >> nn.Projection()
     )
-
-
-@node
-def PendulumCritic(residual: Node) -> Node:
-    """A pendulum value prior corrected by an injected scalar model."""
-    members = Composite(
-        features=PendulumFeatures(),
-        residual=residual,
-    )
-
-    def apply(self, input):
-        observed = self.features(input)
-        origin = Struct(
-            angle=jnp.zeros_like(input.angle),
-            velocity=jnp.zeros_like(input.velocity),
-        )
-        origin_features = self.features(origin)
-        phase_cost = (
-            2.0 * (1.0 - jnp.cos(input.angle))
-            + input.velocity**2
-        )
-        correction = (
-            self.residual(observed)
-            - self.residual(origin_features)
-        )
-        return phase_cost + correction
-
-    return members(apply)
 
 
 @node
@@ -137,7 +103,8 @@ def PendulumTrainingData(
         initial_state = jax.tree.map(
             lambda value: jnp.broadcast_to(
                 value[:, None, None],
-                (n_episodes, n_chunks_per_episode, n_steps_per_chunk) + value.shape[1:],
+                (n_episodes, n_chunks_per_episode, n_steps_per_chunk)
+                + value.shape[1:],
             ),
             initial,
         )
@@ -149,35 +116,79 @@ def PendulumTrainingData(
     return Leaf(apply)
 
 
-def policy_trajectory(
-    policy: PNode,
-    plant: BaseNode,
-    initial_state: Struct,
-    steps: int,
-) -> Struct:
-    """Evaluate from fresh state while preserving recurrent carry."""
-    n_worlds = tree_len(initial_state)
-    input = Struct(
-        disturbance=jnp.zeros((steps, n_worlds)),
-        initial_state=tile(initial_state, steps),
+def pendulum_policy(memory: BaseNode) -> Node:
+    """Build the example policy with an explicit memory lifecycle."""
+    return PendulumMean(memory=memory, hidden=HIDDEN)
+
+
+def policy_committee(policy: Node) -> Node:
+    """Choose mean ensembling as the policy architecture."""
+    return ensemble(policy, n=N_POLICY_MEMBERS) >> reduce(jnp.mean)
+
+
+def pendulum_critic() -> Node:
+    """Build the mean-valued terminal critic."""
+    return (
+        ensemble(
+            PendulumCritic(ScalarMLP(hidden=HIDDEN)),
+            n=N_CRITIC_MEMBERS,
+        )
+        >> reduce(jnp.mean)
+    ).with_input(Pendulum().initialize().state)
+
+
+def pendulum_training_program(
+    policy: Node,
+    critic: Node,
+    n_episodes: int,
+) -> Node:
+    """Assemble the complete Pendulum SHAC Node tree."""
+    learner = shac_learner(
+        policy,
+        critic,
+        Pendulum(),
+        discount=DISCOUNT,
+        trace=TRACE,
+        actor_optimizer=optax.adam(ACTOR_RATE),
+        critic_optimizer=optax.adam(CRITIC_RATE),
+        ema_critic_decay=EMA_CRITIC_DECAY,
+        n_worlds=N_WORLDS,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+        n_critic_updates=N_CRITIC_UPDATES,
     )
-    world = batch(
-        ControlledStep(drop_aux(policy), plant),
-        n=n_worlds,
-    ).parameterize()
-    rollout = world.initialize(input=tree_first(input))
-    _, trajectory = rollout.scan(bundle=input)
-    final_state = tree_last(trajectory.next_state)
-    state = jax.tree.map(
-        lambda value, final: jnp.concatenate((value, final[None]), axis=0),
-        trajectory.state,
-        final_state,
+    episode = scan(
+        learner,
+        boundary='episode',
+        n=N_CHUNKS_PER_EPISODE,
+    )
+    training = carried(episode)
+    data = PendulumTrainingData(
+        n_episodes=n_episodes,
+        n_chunks_per_episode=N_CHUNKS_PER_EPISODE,
+        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+        n_worlds=N_WORLDS,
+        disturbance_scale=DISTURBANCE_SCALE,
+    )
+    return serial(data=data, training=training)
+
+
+def train_pendulum_shac(n_episodes: int = N_EPISODES) -> Struct:
+    """Train the canonical recurrent Pendulum policy with fixed keys."""
+    critic = pendulum_critic()
+    program = pendulum_training_program(
+        policy_committee(pendulum_policy(nn.GRU(MEMORY))),
+        critic,
+        n_episodes=n_episodes,
+    )
+    outcome = shac_training(
+        program,
+        parameter_key=jax.random.PRNGKey(1),
+        training_key=jax.random.PRNGKey(11),
     )
     return Struct(
-        state=state,
-        action=trajectory.action,
-        cost=trajectory.cost,
-        final_state=final_state,
+        policy=outcome.policy,
+        critic=critic.bind(outcome.learner.ema_critic.state),
+        history=outcome.history,
     )
 
 
@@ -186,8 +197,9 @@ def pendulum_evaluation(
     plant: BaseNode,
     starts: Struct,
     steps: int,
+    rng: jax.Array,
 ) -> Struct:
-    trajectory = policy_trajectory(policy, plant, starts, steps)
+    trajectory = control.policy_trajectory(policy, plant, starts, steps, rng)
     return Struct(
         cost=jnp.mean(jnp.sum(trajectory.cost, axis=0)),
         final_angle=jnp.max(jnp.abs(trajectory.final_state.angle)),
@@ -197,28 +209,21 @@ def pendulum_evaluation(
 
 
 def plot_phase_space(
-    policy: PNode,
     terminal_value: PNode,
     trajectory: Struct,
-    plant: BaseNode,
+    filename: str = 'pendulum_shac_phase_space_energy.png',
 ) -> str:
-    """Render a policy slice, closed-loop rollouts, and the EMA critic."""
+    """Render real closed-loop rollouts beside the EMA critic."""
     import os
     import matplotlib
 
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import numpy as np
 
     grid_state = phase_grid()
     flat_state = jax.tree.map(lambda value: value.reshape(-1), grid_state)
     n_worlds = tree_len(flat_state)
 
-    # A recurrent policy has no state-only flow field. This is its first
-    # action from freshly initialized member states; the overlaid trajectories
-    # below are the real closed-loop paths with memory carried through time.
-    action = policy_trajectory(policy, plant, flat_state, steps=1).action[0]
-    actions = action.reshape(grid_state.angle.shape)
     value = batch(terminal_value, n=n_worlds).apply(flat_state)
     terminal_cost = drop_aux(value).reshape(grid_state.angle.shape)
 
@@ -228,7 +233,7 @@ def plot_phase_space(
         figsize=(13.2, 5.8),
         sharey=True,
     )
-    phase_portrait(axis, grid_state, actions)
+    phase_portrait(axis, grid_state)
     phase_surface(
         cost_axis,
         grid_state,
@@ -237,7 +242,6 @@ def plot_phase_space(
     )
 
     references = tree_len(downward_starts())
-    colors = plt.cm.viridis(np.linspace(0.05, 0.95, references))
     reference_state = jax.tree.map(
         lambda value: value[:, :references],
         trajectory.state,
@@ -246,18 +250,9 @@ def plot_phase_space(
         lambda value: value[:, references:],
         trajectory.state,
     )
-    random_colors = ('0.12',) * random_state.angle.shape[1]
     cyan_references = ('cyan',) * references
     cyan_random = ('cyan',) * random_state.angle.shape[1]
-    overlay_trajectories(axis, reference_state, colors)
-    overlay_trajectories(
-        axis,
-        random_state,
-        random_colors,
-        linewidth=0.75,
-        alpha=0.42,
-        mark_starts=False,
-    )
+    overlay_phase_trajectories(axis, trajectory.state)
     overlay_trajectories(
         cost_axis,
         reference_state,
@@ -274,30 +269,20 @@ def plot_phase_space(
         alpha=0.32,
         mark_starts=False,
     )
-    axis.scatter(
-        np.asarray(random_state.angle[0]),
-        np.asarray(random_state.velocity[0]),
-        facecolor='none',
-        edgecolor='0.15',
-        s=17,
-        linewidth=0.7,
-        zorder=3,
-        label='random rollout start',
-    )
     figure.suptitle(
-        'Ensemble SHAC pendulum control',
+        'SHAC pendulum control',
         y=0.98,
         fontweight='bold',
     )
     axis.set_title(
-        'fresh-state policy slice; real closed-loop rollouts, '
+        'real closed-loop rollouts from sampled starts, '
         rf'$|\tau| \leq {MAX_TORQUE:g}$',
         color='0.35',
         fontsize=10,
         pad=8,
     )
     cost_axis.set_title(
-        'EMA mean terminal cost across critic members',
+        'EMA terminal cost',
         color='0.35',
         fontsize=10,
         pad=8,
@@ -308,9 +293,39 @@ def plot_phase_space(
     output = os.path.join(
         os.path.dirname(__file__),
         'plots',
-        'pendulum_shac_phase_space.png',
+        filename,
     )
     os.makedirs(os.path.dirname(output), exist_ok=True)
     figure.savefig(output, dpi=160)
     plt.close(figure)
     return output
+
+
+def pendulum_swing_up() -> None:
+    """Train, evaluate, and plot the canonical Pendulum experiment."""
+    result = train_pendulum_shac()
+    outcome = pendulum_evaluation(
+        result.policy,
+        Pendulum(),
+        downward_starts(),
+        steps=N_EVALUATION_STEPS,
+        rng=jax.random.PRNGKey(21),
+    )
+    trajectory = control.policy_trajectory(
+        result.policy,
+        Pendulum(),
+        phase_starts(jax.random.PRNGKey(29)),
+        steps=N_EVALUATION_STEPS,
+        rng=jax.random.PRNGKey(30),
+    )
+    portrait = plot_phase_space(result.critic, trajectory)
+    print(
+        f'final error: {outcome.final_angle:.4f} rad, '
+        f'{outcome.final_velocity:.4f} rad/s'
+    )
+    print(f'mean training cost per step: {result.history.mean_cost[-1]:.4f}')
+    print(f'phase portrait: {portrait}')
+
+
+if __name__ == '__main__':
+    pendulum_swing_up()

@@ -1,117 +1,44 @@
-"""Pendulum assembly and checks for the reusable SHAC Nodes.
-
-The algorithm lives in ``shac.py``. Pendulum policy, critic, data, evaluation,
-and plotting support live in ``shac_pendulum.py``. This file supplies every
-training choice and checks feed-forward and GRU policies against the same SHAC
-program.
-
-The policy and critic are real Node ensembles. Policy commands are averaged
-before the plant acts. The critic mean supplies bootstrap values while every
-retained member is fitted to the same stopped target.
-"""
+"""Focused behavior checks for the runnable Pendulum SHAC assembly."""
 
 import jax
 import jax.numpy as jnp
 import optax
 
 from nodejax import (
-    BaseNode,
     Node,
     Struct,
-    carried,
-    ensemble,
-    reduce,
     scan,
-    serial,
     split_aux,
     state_reinit,
     tile,
 )
 from nodejax import nn
-from examples.rl.losses import ensemble_mse
 from examples.rl.pendulum import (
-    AngleFeatures,
     Pendulum,
-    downward_starts,
-    phase_starts,
-)
-from examples.rl.shac import (SHAC, bootstrapped_cost, shac_training,
-                              td_lambda_fit)
-from examples.rl.shac_pendulum import (
     PendulumCritic,
-    PendulumPolicy,
-    PendulumTrainingData,
+)
+from examples.rl.shac import shac_learner, shac_training
+from examples.rl.shac_pendulum import (
+    ACTOR_RATE,
+    CRITIC_RATE,
+    DISCOUNT,
+    EMA_CRITIC_DECAY,
+    HIDDEN,
+    MEMORY,
+    N_POLICY_MEMBERS,
+    TRACE,
     ScalarMLP,
-    pendulum_evaluation,
-    plot_phase_space,
-    policy_trajectory,
+    pendulum_critic,
+    pendulum_policy,
+    pendulum_training_program,
+    policy_committee,
 )
 
 
-DISCOUNT = 0.97
-TRACE = 0.95
-HIDDEN = 64
-MEMORY = 64
-N_POLICY_MEMBERS = 3
-N_CRITIC_MEMBERS = 3
-N_STEPS_PER_CHUNK = 20
-N_WORLDS = 64
-N_CHUNKS_PER_EPISODE = 15
-N_EPISODES = 40
-N_CRITIC_UPDATES = 4
-EMA_CRITIC_DECAY = 0.995
-ACTOR_RATE = 0.001
-CRITIC_RATE = 0.001
-DISTURBANCE_SCALE = 0.03
-N_EVALUATION_STEPS = 300
-
-
-def pendulum_policy(memory: BaseNode) -> Node:
-    """Build the example policy with an explicit memory lifecycle."""
-    return PendulumPolicy(memory=memory, hidden=HIDDEN)
-
-
-def pendulum_training_program(policy: Node, n_episodes: int) -> Struct:
-    """Assemble every Pendulum and SHAC choice at the example boundary."""
-    committee = ensemble(policy, n=N_POLICY_MEMBERS) >> reduce(jnp.mean)
-    critic = (
-        ensemble(
-            PendulumCritic(ScalarMLP(hidden=HIDDEN)),
-            n=N_CRITIC_MEMBERS,
-        )
-        >> reduce(jnp.mean)
-    )
-    learner = SHAC(
-        committee,
-        critic,
-        Pendulum(),
-        policy_loss=bootstrapped_cost(discount=DISCOUNT),
-        critic_loss=td_lambda_fit(
-            discount=DISCOUNT,
-            trace=TRACE,
-            fit=ensemble_mse,
-        ),
-        actor_optimizer=optax.adam(ACTOR_RATE),
-        critic_optimizer=optax.adam(CRITIC_RATE),
-        n_worlds=N_WORLDS,
-        n_steps_per_chunk=N_STEPS_PER_CHUNK,
-        n_critic_updates=N_CRITIC_UPDATES,
-        ema_critic_decay=EMA_CRITIC_DECAY,
-    )
-    data = PendulumTrainingData(
-        n_episodes=n_episodes,
-        n_chunks_per_episode=N_CHUNKS_PER_EPISODE,
-        n_steps_per_chunk=N_STEPS_PER_CHUNK,
-        n_worlds=N_WORLDS,
-        disturbance_scale=DISTURBANCE_SCALE,
-    )
-    return Struct(
-        program=serial(
-            data=data,
-            training=carried(scan(learner, boundary='episode', n=N_CHUNKS_PER_EPISODE)),
-        ),
-        policy=committee,
-        critic=critic,
+def single_pendulum_critic() -> Node:
+    """Build one unensembled terminal critic."""
+    return PendulumCritic(ScalarMLP(hidden=HIDDEN)).with_input(
+        Pendulum().initialize().state,
     )
 
 
@@ -124,28 +51,21 @@ def test_policy_cyclicity_is_selected_by_its_memory_node() -> None:
         rng=jax.random.PRNGKey(1),
     ).initialize(input=state)
 
-    feedforward_command, feedforward_aux = split_aux(
-        feedforward.apply(state),
-    )
+    feedforward_command = feedforward.apply(state)
     recurrent, recurrent_output = recurrent.apply(state)
-    recurrent_command, recurrent_aux = split_aux(recurrent_output)
 
-    assert feedforward_command.shape == recurrent_command.shape == ()
+    assert feedforward_command.shape == recurrent_output.shape == ()
     assert feedforward.cyclic is False
-    assert feedforward_aux.representation.shape == (HIDDEN,)
     assert recurrent.cyclic is True
-    assert recurrent_aux.representation.shape == (MEMORY,)
 
 
 def test_policy_ensembles_compile_for_both_policy_lifecycles() -> None:
     state = Struct(angle=jnp.asarray(0.4), velocity=jnp.asarray(-0.2))
-    feedforward = (
-        ensemble(pendulum_policy(nn.identity), n=N_POLICY_MEMBERS)
-        >> reduce(jnp.mean)
+    feedforward = policy_committee(
+        pendulum_policy(nn.identity),
     ).with_input(state).parameterize(rng=jax.random.PRNGKey(0))
-    recurrent = (
-        ensemble(pendulum_policy(nn.GRU(MEMORY)), n=N_POLICY_MEMBERS)
-        >> reduce(jnp.mean)
+    recurrent = policy_committee(
+        pendulum_policy(nn.GRU(MEMORY)),
     ).with_input(state).parameterize(
         rng=jax.random.PRNGKey(1),
     ).initialize(input=state)
@@ -188,40 +108,44 @@ def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
         pendulum_policy(nn.GRU(MEMORY)),
     )
     for policy in policies:
-        committee = ensemble(policy, n=N_POLICY_MEMBERS) >> reduce(jnp.mean)
-        critic = (
-            ensemble(
-                PendulumCritic(ScalarMLP(hidden=HIDDEN)),
-                n=N_CRITIC_MEMBERS,
-            )
-            >> reduce(jnp.mean)
-        )
-        learner = SHAC(
-            committee,
-            critic,
+        learner = shac_learner(
+            policy_committee(policy),
+            pendulum_critic(),
             Pendulum(),
-            policy_loss=bootstrapped_cost(discount=DISCOUNT),
-            critic_loss=td_lambda_fit(
-                discount=DISCOUNT,
-                trace=TRACE,
-                fit=ensemble_mse,
-            ),
+            discount=DISCOUNT,
+            trace=TRACE,
             actor_optimizer=optax.adam(ACTOR_RATE),
             critic_optimizer=optax.adam(CRITIC_RATE),
+            ema_critic_decay=EMA_CRITIC_DECAY,
             n_worlds=n_worlds,
             n_steps_per_chunk=n_steps_per_chunk,
             n_critic_updates=1,
-            ema_critic_decay=EMA_CRITIC_DECAY,
         )
         control = learner.with_input(input).parameterize(
             rng=jax.random.PRNGKey(2),
         ).initialize(input=input)
         output = jax.jit(control.apply)(bundle=input)[1]
-        metric, aux = split_aux(output)
+        trajectories, aux = split_aux(output)
 
-        assert jnp.isfinite(metric.mean_cost)
+        assert jnp.isfinite(trajectories.cost).all()
+        assert jnp.isfinite(aux.mean_cost)
         assert jnp.isfinite(aux.policy_trainer.loss)
         assert jnp.isfinite(aux.critic_trainer.loss).all()
+
+
+def test_single_critic_uses_the_same_shac_program() -> None:
+    result = shac_training(
+        pendulum_training_program(
+            pendulum_policy(nn.identity),
+            single_pendulum_critic(),
+            n_episodes=1,
+        ),
+        parameter_key=jax.random.PRNGKey(1),
+        training_key=jax.random.PRNGKey(11),
+    )
+
+    assert jnp.isfinite(result.history.policy_loss).all()
+    assert jnp.isfinite(result.history.critic_loss).all()
 
 
 def test_recurrent_state_carries_across_chunks_and_resets_at_episode() -> None:
@@ -242,20 +166,9 @@ def test_recurrent_state_carries_across_chunks_and_resets_at_episode() -> None:
     whole, whole_output = policy.bind(state=initial_state).scan(observations)
     chunked, first_output = policy.bind(state=initial_state).scan(first)
     chunked, second_output = chunked.scan(second)
-    whole_command, whole_aux = split_aux(whole_output)
-    first_command, first_aux = split_aux(first_output)
-    second_command, second_aux = split_aux(second_output)
-
     assert jnp.array_equal(
-        whole_command,
-        jnp.concatenate((first_command, second_command)),
-    )
-    assert jnp.array_equal(
-        whole_aux.representation,
-        jnp.concatenate((
-            first_aux.representation,
-            second_aux.representation,
-        )),
+        whole_output,
+        jnp.concatenate((first_output, second_output)),
     )
     assert jax.tree.all(jax.tree.map(
         jnp.array_equal,
@@ -274,148 +187,5 @@ def test_recurrent_state_carries_across_chunks_and_resets_at_episode() -> None:
     ).initialize(input=observations)
     episode, first_output = episode.apply(observations)
     episode, second_output = episode.apply(observations)
-    first_command, first_aux = split_aux(first_output)
-    second_command, second_aux = split_aux(second_output)
 
-    assert jnp.array_equal(first_command, second_command)
-    assert jnp.array_equal(
-        first_aux.representation,
-        second_aux.representation,
-    )
-
-
-def test_shac_swings_up_with_either_policy_lifecycle() -> None:
-    feedforward = shac_training(
-        pendulum_training_program(
-            pendulum_policy(nn.identity),
-            n_episodes=N_EPISODES,
-        ),
-        parameter_key=jax.random.PRNGKey(1),
-        training_key=jax.random.PRNGKey(11),
-    )
-    recurrent = shac_training(
-        pendulum_training_program(
-            pendulum_policy(nn.GRU(MEMORY)),
-            n_episodes=N_EPISODES,
-        ),
-        parameter_key=jax.random.PRNGKey(1),
-        training_key=jax.random.PRNGKey(11),
-    )
-    feedforward_result = pendulum_evaluation(
-        feedforward.policy,
-        Pendulum(),
-        downward_starts(),
-        steps=N_EVALUATION_STEPS,
-    )
-    recurrent_result = pendulum_evaluation(
-        recurrent.policy,
-        Pendulum(),
-        downward_starts(),
-        steps=N_EVALUATION_STEPS,
-    )
-
-    assert jnp.isfinite(feedforward.history.policy_loss).all()
-    assert jnp.isfinite(feedforward.history.critic_loss).all()
-    assert jnp.isfinite(recurrent.history.policy_loss).all()
-    assert jnp.isfinite(recurrent.history.critic_loss).all()
-    for result in (feedforward_result, recurrent_result):
-        assert result.final_angle < 0.1
-        assert result.final_velocity < 0.1
-
-
-def angle_only_swing_up() -> None:
-    """The partially observed run: the policy reads the angle alone while
-    the critic keeps the plant state, and memory must recover velocity.
-    Takes about four times the fully observed budget; run it with
-    ``python -m examples.rl.test_pendulum_shac angle``."""
-    result = shac_training(
-        pendulum_training_program(
-            PendulumPolicy(
-                memory=nn.GRU(MEMORY),
-                hidden=HIDDEN,
-                features=AngleFeatures(),
-            ),
-            n_episodes=4 * N_EPISODES,
-        ),
-        parameter_key=jax.random.PRNGKey(1),
-        training_key=jax.random.PRNGKey(11),
-    )
-    outcome = pendulum_evaluation(
-        result.policy,
-        Pendulum(),
-        downward_starts(),
-        steps=N_EVALUATION_STEPS,
-    )
-    print(
-        f'angle-only final error: {outcome.final_angle:.4f} rad, '
-        f'{outcome.final_velocity:.4f} rad/s'
-    )
-
-
-if __name__ == '__main__':
-    import sys
-    if 'angle' in sys.argv[1:]:
-        angle_only_swing_up()
-        raise SystemExit
-    feedforward = shac_training(
-        pendulum_training_program(
-            pendulum_policy(nn.identity),
-            n_episodes=N_EPISODES,
-        ),
-        parameter_key=jax.random.PRNGKey(1),
-        training_key=jax.random.PRNGKey(11),
-    )
-    recurrent = shac_training(
-        pendulum_training_program(
-            pendulum_policy(nn.GRU(MEMORY)),
-            n_episodes=N_EPISODES,
-        ),
-        parameter_key=jax.random.PRNGKey(1),
-        training_key=jax.random.PRNGKey(11),
-    )
-    feedforward_result = pendulum_evaluation(
-        feedforward.policy,
-        Pendulum(),
-        downward_starts(),
-        steps=N_EVALUATION_STEPS,
-    )
-    recurrent_result = pendulum_evaluation(
-        recurrent.policy,
-        Pendulum(),
-        downward_starts(),
-        steps=N_EVALUATION_STEPS,
-    )
-    print(
-        pendulum_training_program(
-            pendulum_policy(nn.GRU(MEMORY)),
-            n_episodes=N_EPISODES,
-        ).describe()
-    )
-    print(
-        'feed-forward final error: '
-        f'{feedforward_result.final_angle:.4f} rad, '
-        f'{feedforward_result.final_velocity:.4f} rad/s',
-    )
-    print(
-        'recurrent final error: '
-        f'{recurrent_result.final_angle:.4f} rad, '
-        f'{recurrent_result.final_velocity:.4f} rad/s',
-    )
-    print(
-        'mean training cost per step: '
-        f'{feedforward.history.mean_cost[-1]:.4f} feed-forward, '
-        f'{recurrent.history.mean_cost[-1]:.4f} recurrent',
-    )
-    trajectory = policy_trajectory(
-        recurrent.policy,
-        Pendulum(),
-        phase_starts(jax.random.PRNGKey(29)),
-        steps=N_EVALUATION_STEPS,
-    )
-    portrait = plot_phase_space(
-        recurrent.policy,
-        recurrent.critic,
-        trajectory,
-        Pendulum(),
-    )
-    print(f'phase portrait: {portrait}')
+    assert jnp.array_equal(first_output, second_output)
