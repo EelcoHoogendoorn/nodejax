@@ -159,3 +159,18 @@ def test_batch_splits_one_boundary_key_per_element():
     out = b.apply(x=jnp.ones((4, 3)), rng=jax.random.PRNGKey(1))
     assert out.shape == (4, 3)
     assert not jnp.allclose(out[0], out[1])       # each element its own draw
+
+
+def test_a_random_init_draws_once_per_batch_element():
+    """batch tiles a deterministic initial state; a random one is drawn per
+    element with its own key, as prime and ensemble already do."""
+    noisy = Leaf(
+        lambda state, input: (state, state + input),
+        init=lambda rng: jax.random.normal(rng.next(), (2,)),
+        name='noisy',
+    )
+    state = batch(noisy, n=3).parameterize().initialize(rng=jax.random.PRNGKey(0)).state
+
+    assert state.shape == (3, 2)
+    assert not jnp.allclose(state[0], state[1])
+    assert not jnp.allclose(state[1], state[2])
