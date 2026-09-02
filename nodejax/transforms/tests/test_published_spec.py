@@ -193,7 +193,7 @@ def test_the_instance_family_publishes_its_element(name, wrap):
     model = nn.Linear(2).with_input(ELEMENT).parameterize(
         rng=jax.random.PRNGKey(0)).initialize()
     wrapped = wrap(model)
-    assert wrapped.param.model.w.shape == (3, 2)   # bound before, riding through
+    assert wrapped.param.objective.model.w.shape == (3, 2)
     element = ELEMENT_FOR[name]
     if name == 'ttt':
         assert wrapped.contract.input_spec is None  # declared fields, data-sized

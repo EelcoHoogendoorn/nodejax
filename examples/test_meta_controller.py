@@ -335,9 +335,9 @@ def make_tasks(rs: np.random.RandomState, n_tasks: int, k: int):
 	input contract, packed:
 
 	    plant                 Struct of (n,) coefficients — plot labels
-	    tasks.support.input   Struct(motor=(n, k) per-plant draw,
-	                                 input=(n, k, T))
-	    tasks.support.target  (n, k, T)
+	    tasks.support         Struct(motor=(n, k) per-plant draw,
+	                                 input=(n, k, T),
+	                                 target=(n, k, T))
 	    tasks.query           Struct(motor=(n,), input=(n, T))
 	    query_target          (n, T)
 
@@ -363,8 +363,11 @@ def make_tasks(rs: np.random.RandomState, n_tasks: int, k: int):
 	sup_plant = Struct(**{nm: per_episode(v) for nm, v in plant.__items__})
 	q_plant = Struct(**{nm: jnp.asarray(v) for nm, v in plant.__items__})
 	tasks = Struct(
-		support=Struct(input=Struct(motor=sup_plant, input=jnp.asarray(sup_refs)),
-		               target=jnp.asarray(sup_refs)),
+		support=Struct(
+			motor=sup_plant,
+			input=jnp.asarray(sup_refs),
+			target=jnp.asarray(sup_refs),
+		),
 		query=Struct(motor=q_plant, input=jnp.asarray(q_refs)))
 	return plant, tasks, jnp.asarray(q_refs)
 
@@ -427,7 +430,12 @@ def test_meta_controller_adapts():
 
 	def fold(x):
 		return jax.tree.map(lambda a: a.reshape(META_STEPS, TASKS, *a.shape[1:]), x)
-	final, aux = trained(trainer).apply(input=fold(train_tasks), target=fold(q_t))
+	folded = fold(train_tasks)
+	final, aux = trained(trainer).apply(
+		support=folded.support,
+		query=folded.query,
+		target=fold(q_t),
+	)
 
 	assert jnp.all(jnp.isfinite(aux.loss))
 	assert jnp.mean(aux.loss[-20:]) < 0.5 * jnp.mean(aux.loss[:20])
@@ -436,7 +444,7 @@ def test_meta_controller_adapts():
 	plant, tasks, q_t = make_tasks(np.random.RandomState(99), TASKS, k=K)
 
 	_, adapted = final.apply(bundle=tasks)
-	init_model = batch(task).with_input(tasks.query).bind(final.param.model)
+	init_model = batch(task).with_input(tasks.query).bind(final.param.objective.model)
 	_, unadapted = init_model.initialize().apply(bundle=tasks.query)
 	random_adapted = batch(adapt).bind(model.param).apply(bundle=tasks)
 

@@ -180,7 +180,7 @@ def train(model, data):
     # both halves come out of one construct. This row wants the trace
     _, aux = trained(trainer).apply(
         rng=task.INIT_KEY,
-        input=tile(data, task.TRAIN_STEPS),          # the same rollout each step
+        signal=tile(data, task.TRAIN_STEPS),         # the same rollout each step
         target=tile(task.TARGET, task.TRAIN_STEPS))  # and the same target
     return aux.loss
 
@@ -212,7 +212,7 @@ def train_two_tags():
     run = scanned(scan(scan(trainer, boundary='recording'), boundary='session'))
 
     _, aux = run.apply(rng=task.INIT_KEY,
-                       input=task.SESS_SEQ,
+                       signal=task.SESS_SEQ,
                        target=task.SESS_TARGET)
     return aux.loss.reshape(-1)
 

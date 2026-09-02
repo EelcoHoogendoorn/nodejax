@@ -122,7 +122,12 @@ def main() -> None:
     sup_x, sup_y, qry_x, qry_y = make_tasks(jax.random.PRNGKey(2))
     tasks = Struct(support=Struct(input=sup_x, target=sup_y), query=qry_x)
     tile = lambda leaf: jnp.broadcast_to(leaf, (META_STEPS, *leaf.shape))
-    _, aux = run.apply(input=jax.tree.map(tile, tasks), target=tile(qry_y))
+    episodes = jax.tree.map(tile, tasks)
+    _, aux = run.apply(
+        support=episodes.support,
+        query=episodes.query,
+        target=tile(qry_y),
+    )
 
     print(f"tower loss {aux.loss[0]:.4f} -> {aux.loss[-1]:.4f}")
     assert aux.loss[-1] < 0.3 * aux.loss[0]

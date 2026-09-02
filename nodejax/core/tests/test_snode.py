@@ -78,7 +78,7 @@ def test_trained_hands_back_a_callable_model():
     struck. done(x) infers; done.pnode is the param-only view."""
     key = jax.random.PRNGKey(0)
     net = nn.Linear(1).with_input(jnp.zeros(3)).parameterize(rng=key).initialize()
-    trainer = train_step(net, lambda out, t: jnp.mean((out - t) ** 2),
+    trainer = train_step(net, lambda out, target: jnp.mean((out - target) ** 2),
                          optax.sgd(0.1))
     xs = jax.random.normal(key, (64, 3))
     w_true = jnp.asarray([[1.0], [-2.0], [0.5]])

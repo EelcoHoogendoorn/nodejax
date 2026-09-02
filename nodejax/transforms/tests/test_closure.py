@@ -91,7 +91,8 @@ def test_train_step_of_pipe():
     final, (_, aux) = trainer.scan(input=jnp.full(1000, 2.0),
                                    target=jnp.full(1000, 12.0))
 
-    product = final.state.opt.params.gain.scale * final.state.opt.params.gain_2.scale
+    product = (final.state.opt.params.model.gain.scale
+               * final.state.opt.params.model.gain_2.scale)
     assert jnp.allclose(product, 6.0, atol=0.1)
     assert aux.loss[-1] < 1e-2
 
@@ -110,7 +111,7 @@ def test_train_step_of_stateful_pipe():
     assert jnp.all(jnp.isfinite(aux.loss))
     assert aux.loss[-1] < aux.loss[0]
     # the model's own (EMA) state evolved inside the trainer state
-    assert jnp.any(final.state.model.ema != 0.0)
+    assert jnp.any(final.state.objective.model.ema != 0.0)
 
 
 def test_batch_of_pipe_with_state():

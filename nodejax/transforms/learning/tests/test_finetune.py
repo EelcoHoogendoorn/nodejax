@@ -139,11 +139,18 @@ def test_maml_convergence():
     )
 
     steps = 400
-    final, (_, aux) = trainer.scan(input=tile(task_batch, steps),
-                                   target=tile(a, steps))
+    final, (_, aux) = trainer.scan(
+        support=tile(task_batch.support, steps),
+        query=tile(task_batch.query, steps),
+        target=tile(a, steps),
+    )
 
     # meta-init converges to the analytic optimum: the task mean
-    assert jnp.allclose(final.state.opt.params.model.scale, 3.0, atol=0.05)
+    assert jnp.allclose(
+        final.state.opt.params.model.objective.model.scale,
+        3.0,
+        atol=0.05,
+    )
     # and the meta-loss to its analytic floor 0.8^(2k) = 0.2621
     assert jnp.allclose(aux.loss[-1], 0.8 ** (2 * k), atol=0.02)
     # starting loss, for reference: 0.2621 * ((0-3)^2 + 1) = 2.621
@@ -185,18 +192,25 @@ def test_meta_sgd_learns_newton_step():
         query=jnp.ones(2),
     )
     steps = 800
-    final, (_, aux) = trainer.scan(input=tile(task_batch, steps),
-                                   target=tile(a, steps))
+    final, (_, aux) = trainer.scan(
+        support=tile(task_batch.support, steps),
+        query=tile(task_batch.query, steps),
+        target=tile(a, steps),
+    )
 
     # analytic initial meta-loss: (1 - 2*0.1)^2 * ((0-3)^2 + 1) = 6.4
     assert jnp.allclose(aux.loss[0], 6.4, atol=0.01)
     # the learned lr is the Newton step for this quadratic
-    assert jnp.allclose(final.state.opt.params.opt.scale, 0.5, atol=0.05)
+    assert jnp.allclose(
+        final.state.opt.params.model.opt.model.scale,
+        0.5,
+        atol=0.05,
+    )
     assert aux.loss[-1] < 1e-2
 
     # with the learned lr, one inner step nails a task far outside the
     # training pair (a=7 vs training a in {2, 4})
-    solo = single.node.bind(final.state.opt.params)
+    solo = single.node.bind(final.state.opt.params.model)
     task = Struct(support=Struct(input=jnp.ones(1), target=jnp.full(1, 7.0)),
                   query=jnp.array(1.0))
     assert jnp.abs(solo.apply(bundle=task) - 7.0) < 0.5

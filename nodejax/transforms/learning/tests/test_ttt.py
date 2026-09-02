@@ -44,11 +44,11 @@ def test_ttt_adapts_toward_self_supervision():
     """Reconstruction drives the wrapped gain toward identity, one
     step per sample, weights carried as state."""
     trainer = train_step(Scale().parameterize().initialize(), mse, learned_sgd(0.1))
-    assert trainer.param.model.scale == 0.0
-    assert trainer.param.opt.scale == 0.1                 # per-leaf learned rates
+    assert trainer.param.objective.model.scale == 0.0
+    assert trainer.param.opt.model.scale == 0.1           # per-leaf learned rates
 
     _, (outs, aux) = scan(trainer, record=True).apply(bundle=tile(sample(1.0), 50))
-    scales = aux.state.opt.params.scale                  # the recorded trajectory
+    scales = aux.state.opt.params.model.scale            # the recorded trajectory
     assert outs[0] == 0.0                                # first prediction: untrained
     assert scales[0] > 0.0                               # ...and the update landed
     assert bool(jnp.all(jnp.diff(scales) >= 0))
@@ -62,7 +62,8 @@ def test_ttt_predicts_then_updates():
     trainer = train_step(Scale().parameterize().initialize(), mse, learned_sgd(0.5))
     successor, (out, _) = trainer.apply(bundle=sample(1.0))
     assert jnp.allclose(out, 0.0)                        # predicted at scale 0
-    assert jnp.allclose(successor.state.opt.params.scale, 1.0)    # -lr * d/ds (s-1)^2 at s=0
+    # -lr * d/ds (s-1)^2 at s=0
+    assert jnp.allclose(successor.state.opt.params.model.scale, 1.0)
 
 
 def test_ttt_under_scan_resets_per_sequence():
@@ -171,11 +172,11 @@ def test_both_deep_compositions_just_work():
     assert losses[-1] < 0.3 * losses[1]                       # the head learns the shift
     fast = state.ttt_train_step_stack_rnn
     drift = jnp.max(jnp.abs(
-        fast.opt.params.wx
-        - node.param.ttt_train_step_stack_rnn.model.wx), axis=1)
+        fast.opt.params.model.wx
+        - node.param.ttt_train_step_stack_rnn.objective.model.wx), axis=1)
     assert drift.shape == (2,) and bool(jnp.all(drift > 0))   # every layer's weights moved
-    assert fast.model.shape == (2, 4)                         # ...the hidden carrying beneath
-    assert bool(jnp.any(fast.model != 0))
+    assert fast.objective.model.shape == (2, 4)               # ...the hidden carrying beneath
+    assert bool(jnp.any(fast.objective.model != 0))
 
     # independent weight layers, each predicting its own signal's next
     # value: construct the cell unbound so stack parameterizes every layer
@@ -207,7 +208,7 @@ def test_next_step_ttt_learns_the_shift():
     signal = jnp.tile(jnp.array([-1.0, 1.0]), 10)
     bound = cell.initialize(input=signal[0])
     final, _ = scan(bound).apply(signal)
-    assert float(final.state.ttt_train_step_g.opt.params.scale) < -0.9
+    assert float(final.state.ttt_train_step_g.opt.params.model.scale) < -0.9
 
 
 def test_next_step_deep_compositions_just_work():
@@ -226,11 +227,11 @@ def test_next_step_deep_compositions_just_work():
     bound = deep.initialize(input=signal[0])
     final, _ = scan(bound).apply(signal)
     assert abs(float(jnp.prod(
-        final.state.ttt_train_step_stack_lin.opt.params.w)) + 1.0) < 1e-2
+        final.state.ttt_train_step_stack_lin.opt.params.model.w)) + 1.0) < 1e-2
 
     cell = next_step_ttt(train_step(Lin(), mse, learned_sgd(0.2)))
     layered = stack(cell, n=3)
     bound = layered.parameterize(rng=jax.random.PRNGKey(0)).initialize(input=signal[0])
     final, _ = scan(bound).apply(signal)
     assert bool(jnp.all(
-        final.state.ttt_train_step_lin.opt.params.w < -0.9))
+        final.state.ttt_train_step_lin.opt.params.model.w < -0.9))

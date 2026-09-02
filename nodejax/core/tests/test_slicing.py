@@ -115,11 +115,7 @@ def test_slicing_stops_at_the_mapping_layer():
 
 
 def test_the_trainer_slices_to_the_initialization():
-    """The generic slice reads the standard tree contract: trainer.model
-    is the model bound to param.model, the INITIALIZATION, because param
-    is what training starts from. The current weights live in state, and
-    that reading is the model() method's, the custom destructuring hook
-    that already wins the attribute precedence."""
+    """The objective's model slice carries the initial model weights."""
     import optax
     from nodejax import train_step
     trainer = train_step(
@@ -127,9 +123,9 @@ def test_the_trainer_slices_to_the_initialization():
             rng=jax.random.PRNGKey(0)).initialize(),
         lambda out, target: jnp.mean((out - target) ** 2),
         optax.sgd(0.1))
-    start = trainer.pnode.model
+    start = trainer.pnode.objective.model
     assert type(start) is PNode
-    assert jnp.allclose(start.param.w, trainer.param.model.w)
+    assert jnp.allclose(start.param.w, trainer.param.objective.model.w)
 
 
 def test_a_state_bound_tree_slices_members_with_their_state():
@@ -148,20 +144,18 @@ def test_a_state_bound_tree_slices_members_with_their_state():
 
 
 def test_the_trainer_slices_to_the_live_model():
-    """trainer.model at the state-bound stage is the LIVE model: the weights
-    training has reached ride the state slice, where the param slice
-    holds only what training started from."""
+    """The trainer's authored view returns the model at its current weights."""
     import optax
     from nodejax import PSNode, train_step
     trainer = train_step(
         nn.Linear(2).with_input(jnp.zeros(3)).parameterize(
             rng=jax.random.PRNGKey(0)).initialize(),
-        lambda out, t: jnp.mean((out - t) ** 2),
+        lambda out, target: jnp.mean((out - target) ** 2),
         optax.sgd(0.1))
     trainer, _ = trainer(input=jnp.ones(3), target=jnp.zeros(2))
-    live = trainer.opt                       # the optimizer member, live
+    live = trainer.trained()
     assert type(live) is PSNode
-    assert jnp.allclose(live.state.params.w, trainer.state.opt.params.w)
+    assert jnp.allclose(live.param.w, trainer.state.opt.params.model.w)
 
 
 def test_batch_refuses_the_state_slice_and_allows_the_acyclic_one():

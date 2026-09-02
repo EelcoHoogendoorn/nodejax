@@ -152,10 +152,10 @@ def test_train_linear_norm():
     # the still-moving weights). A state re-initialized every step
     # would sit at momentum * batch_mean — an order of magnitude
     # smaller and the decisive signature of broken threading.
-    pre_norm = (x @ final.state.opt.params.linear.w
-                + final.state.opt.params.linear.b)
+    pre_norm = (x @ final.state.opt.params.model.linear.w
+                + final.state.opt.params.model.linear.b)
     batch_mean = jnp.mean(pre_norm, axis=0)
-    running = final.state.model.batch_norm.mean   # single_batch_state: unbatched 1D stats
+    running = final.state.objective.model.batch_norm.mean
     assert jnp.linalg.norm(running) > 5 * jnp.linalg.norm(0.1 * batch_mean)
 
 

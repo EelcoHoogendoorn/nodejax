@@ -6,8 +6,10 @@ from nodejax.core.pnode import PNode
 from nodejax.core.spec import add_axis, element_spec
 from nodejax.struct import Struct
 from nodejax.tree import tree_first
-from nodejax.transforms.transform import scan_steps
-from nodejax.transforms.learning.train_step import _require_train_step
+from nodejax.transforms.transform import bind, scan_steps
+from nodejax.transforms.learning.train_step import (
+    _model_contract, _require_train_step,
+)
 from nodejax.core.wrapper import Wrapper
 
 
@@ -19,28 +21,28 @@ def finetune(step: BaseNode) -> Node | PNode:
     outer optimization can differentiate through the support updates.
     """
     step_node = _require_train_step(step, 'finetune')
-    model = step_node.members.model
+    model = _model_contract(step_node.contract)
 
     apply_takes_rng = (
         step_node.contract.init_takes_rng
         or step_node.contract.apply_takes_rng
-        or model.contract.apply_takes_rng)
+        or model.apply_takes_rng)
 
     def apply_fn(contract, param, input, rng):
         """Reset from ``param``, train on support, then evaluate the query."""
         current = contract.members.step
-        current_model = current.members.model
+        current_model = _model_contract(current)
         init_rng = rng.child(current.init_takes_rng)
         first = tree_first(input.support)
         start = current.prime(param, Struct(), first, init_rng)
         final, _ = scan_steps(
             current, param, start, input.support, rng)
-        query_rng = rng.child(current_model.apply_takes_rng)
-        _, output = current_model.apply(
-            final.opt.params,
-            final.model,
-            current_model.feed(input.query),
-            query_rng,
+        fitted = bind(current, param, state=final).trained()
+        _, output = fitted.contract.apply(
+            fitted.param,
+            fitted.state,
+            fitted.contract.feed(input.query),
+            rng.child(current_model.apply_takes_rng),
         )
         return output
 
@@ -59,10 +61,10 @@ def finetune(step: BaseNode) -> Node | PNode:
     episode_spec = (
         Struct(
             support=add_axis(step_node.contract.input_spec),
-            query=model.contract.intake(model.contract.input_spec),
+            query=model.intake(model.input_spec),
         )
         if (step_node.contract.input_spec is not None
-            and model.contract.input_spec is not None)
+            and model.input_spec is not None)
         else None
     )
     episode = Wrapper(step=step_node).roles(

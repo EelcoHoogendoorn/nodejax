@@ -62,7 +62,11 @@ def test_remat_composes_where_depth_is_spelled():
     trained. remat sits at the layer, inside the stack that makes depth."""
     layer = remat(_layer())
     model = _tower(layer, n=6).initialize()
-    trainer = train_step(model, lambda p, t: jnp.mean((p - t) ** 2), optax.adam(1e-2))
+    trainer = train_step(
+        model,
+        lambda prediction, target: jnp.mean((prediction - target) ** 2),
+        optax.adam(1e-2),
+    )
     steps = 20
     final, (_, aux) = trainer.scan(input=jnp.broadcast_to(X, (steps, *X.shape)),
                                    target=jnp.zeros((steps, 4, 8)))

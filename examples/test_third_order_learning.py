@@ -49,8 +49,8 @@ def quartic(output: jax.Array, target: jax.Array) -> jax.Array:
     return 0.25 * error ** 4
 
 
-def terminal_quadratic(output: PyTree, target: jax.Array) -> jax.Array:
-    return 0.5 * (output[-1] - target) ** 2
+def terminal_quadratic(output: PyTree, terminal_target: jax.Array) -> jax.Array:
+    return 0.5 * (output[-1] - terminal_target) ** 2
 
 
 def third_order_learner() -> Node:
@@ -64,18 +64,24 @@ def third_order_learner() -> Node:
 def task() -> Struct:
     sequence = Struct(input=jnp.ones(2), target=jnp.zeros(2))
     support = Struct(
-        input=Struct(input=jnp.ones((1, 2)), target=jnp.zeros((1, 2))),
-        target=jnp.zeros(1),
+        input=jnp.ones((1, 2)),
+        target=jnp.zeros((1, 2)),
+        terminal_target=jnp.zeros(1),
     )
     return Struct(support=support, query=sequence)
 
 
 def run() -> Struct:
-    trainer = third_order_learner().parameterize(weight=1.0).initialize()
-    successor, (_, aux) = jax.jit(trainer.apply)(input=task(), target=jnp.asarray(0.0))
+    trainer = third_order_learner().parameterize().initialize()
+    episode = task()
+    successor, (_, aux) = jax.jit(trainer.apply)(
+        support=episode.support,
+        query=episode.query,
+        terminal_target=jnp.asarray(0.0),
+    )
 
-    initial_weight = trainer.state.opt.params.model.model
-    updated_weight = successor.state.opt.params.model.model
+    initial_weight = trainer.state.opt.params.model.objective.model.objective.model
+    updated_weight = successor.state.opt.params.model.objective.model.objective.model
     observed = (initial_weight - updated_weight) / META_RATE
 
     weight = jnp.asarray(1.0)

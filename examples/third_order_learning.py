@@ -164,9 +164,17 @@ def make_tasks(rng: jax.Array) -> tuple[Struct, jax.Array]:
 def run() -> Struct:
     episodes, target = make_tasks(jax.random.PRNGKey(1))
     learner = third_order_learning().with_input(
-        bundle=Struct(input=episodes, target=target)
+        bundle=Struct(
+            support=episodes.support,
+            query=episodes.query,
+            target=target,
+        )
     ).parameterize(rng=jax.random.PRNGKey(0))
-    final, aux = jax.jit(learner.apply)(input=episodes, target=target)
+    final, aux = jax.jit(learner.apply)(
+        support=episodes.support,
+        query=episodes.query,
+        target=target,
+    )
     return Struct(initial=learner, final=final, aux=aux)
 
 

@@ -31,8 +31,7 @@ def test_param_paths_are_named():
 
 
 def test_freeze_by_path_with_plain_optax():
-    """Freeze a member by name via optax.multi_transform — no framework
-    surgery API, and train_step consumes the composed optimizer as-is."""
+    """Freeze a model member through the objective's plain Optax mask."""
     pipe = Gain() >> Gain()
     model = pipe.parameterize(gain=Struct(scale=jnp.asarray(1.0)),
                               gain_2=Struct(scale=jnp.asarray(1.0)))
@@ -40,7 +39,8 @@ def test_freeze_by_path_with_plain_optax():
     def label(path, leaf):
         return 'frozen' if 'gain_2' in jax.tree_util.keystr(path) else 'train'
 
-    labels = jax.tree_util.tree_map_with_path(label, model.param)
+    model_labels = jax.tree_util.tree_map_with_path(label, model.param)
+    labels = Struct(model=model_labels)
     optimizer = optax.multi_transform(
         {'train': optax.adam(0.1), 'frozen': optax.set_to_zero()}, labels)
 

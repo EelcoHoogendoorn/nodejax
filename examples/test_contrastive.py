@@ -107,10 +107,9 @@ def sequence_of(key: jax.Array, codes: jax.Array, steps: int):
     return views_of(draw, codes[rows])                      # [steps, B, V, DIM_IN]
 
 
-def mean_score(per_identity, target: jax.Array) -> jax.Array:
+def mean_score(per_identity) -> jax.Array:
     """The objective is target-free: the batched node composed its own
-    supervision and already scored itself, so the loss only averages and
-    the target slot's placeholder is ignored."""
+    supervision and already scored itself, so the loss only averages."""
     return jnp.mean(per_identity)
 
 
@@ -138,10 +137,8 @@ def test_the_batch_axis_carries_the_objective():
     start = batched.parameterize(rng=k[2]).param
 
     trainer = train_step(batched, mean_score, optax.adam(3e-3))
-    trainer = trainer.bind(Struct(model=start))
-    final, aux = trained(trainer).apply(
-        input=sequence_of(k[3], train_c, STEPS),
-        target=jnp.zeros(STEPS))                      # a placeholder: see mean_score
+    trainer = trainer.bind(Struct(objective=Struct(model=start)))
+    final, aux = trained(trainer).apply(input=sequence_of(k[3], train_c, STEPS))
 
     enc_before = start.without('infonce')
     enc_after = final.param.without('infonce')

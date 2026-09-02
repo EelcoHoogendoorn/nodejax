@@ -163,8 +163,11 @@ def test_generic_under_train_step():
     trainer trains: later rungs refuse to bind on a generic, and
     train_step consumes the model fully bound."""
     model = Gain().specialize(scale=1.0).parameterize(factor=0.0).initialize()
-    trainer = train_step(model, lambda p, y: jnp.mean((p - y) ** 2),
-                         optax.sgd(0.1))
+    trainer = train_step(
+        model,
+        lambda prediction, target: jnp.mean((prediction - target) ** 2),
+        optax.sgd(0.1),
+    )
     done, aux = trained(trainer).apply(input=jnp.ones((20, 2)),
                                        target=jnp.full((20, 2), 3.0))
     assert aux.loss[-1] < aux.loss[0]

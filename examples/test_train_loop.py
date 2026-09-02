@@ -55,8 +55,8 @@ def test_chunked_loop_with_host_side_stats():
         log.append(Struct(
             chunk=i,
             loss=float(jnp.mean(aux.loss)),
-            w_err=float(jnp.linalg.norm(trainer.state.opt.params.w - w_true)),
-            w_norm=float(jnp.linalg.norm(trainer.state.opt.params.w)),
+            w_err=float(jnp.linalg.norm(trainer.state.opt.params.model.w - w_true)),
+            w_norm=float(jnp.linalg.norm(trainer.state.opt.params.model.w)),
         ))
         print(f"[loop] chunk {i}: loss {log[-1].loss:.2e} "
               f"|w-w*| {log[-1].w_err:.2e}")

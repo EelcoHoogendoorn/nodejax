@@ -66,7 +66,7 @@ def test_bptt_system_identification():
     final, (_, aux) = trainer.scan(input=tile(xs, steps),
                                    target=tile(target_ys, steps))
 
-    assert jnp.allclose(final.state.opt.params.decay, 0.7, atol=0.01)
+    assert jnp.allclose(final.state.opt.params.model.decay, 0.7, atol=0.01)
     assert aux.loss[-1] < 1e-6
 
 
@@ -80,7 +80,7 @@ def test_deep_ensemble_training():
     final, (_, aux) = trainer.scan(input=tile(jnp.array(2.0), steps),
                                    target=tile(jnp.array(6.0), steps))
 
-    assert jnp.allclose(final.state.opt.params.scale, jnp.full(3, 3.0), atol=0.01)
+    assert jnp.allclose(final.state.opt.params.model.scale, jnp.full(3, 3.0), atol=0.01)
 
 
 def test_gradient_pid_tuning():
@@ -108,8 +108,8 @@ def test_gradient_pid_tuning():
 
     assert jnp.all(jnp.isfinite(aux.loss))          # training never destabilized the loop
     assert aux.loss[-1] < 0.3 * aux.loss[0]           # tracking substantially improved
-    assert final.state.opt.params.pipe.pd.kp > 1.0    # stiffer P gain to fight spring droop
-    assert final.state.opt.params.pipe.pd.kd > 0.0    # learned to add damping
+    assert final.state.opt.params.model.pipe.pd.kp > 1.0  # stiffer P gain to fight spring droop
+    assert final.state.opt.params.model.pipe.pd.kd > 0.0  # learned to add damping
 
 
 def test_feedback_mimo():

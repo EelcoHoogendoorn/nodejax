@@ -59,8 +59,8 @@ def Discriminator() -> Node:
     return mlp().with_input(jnp.zeros((BATCH, 1)))
 
 
-def bce(logits: jax.Array, labels: jax.Array) -> jax.Array:
-    return jnp.mean(optax.sigmoid_binary_cross_entropy(logits, labels))
+def bce(logits: jax.Array, target: jax.Array) -> jax.Array:
+    return jnp.mean(optax.sigmoid_binary_cross_entropy(logits, target))
 
 
 @node
@@ -90,12 +90,12 @@ def GAN(discriminator_opt, generator_opt) -> Node:
     def apply(self, tick, rng):
         # D round: real against the previous round's generator's fakes
         real = MU + SIGMA * jax.random.normal(rng.next(), (BATCH, 1))
-        fake = generator.apply(self.state.generator.opt.params,
+        fake = generator.apply(self.state.generator.opt.params.model,
                                rng=rng.next())
         self.discriminator(input=jnp.concatenate([real, fake]),
                            target=real_labels)
         # G round: the previous round's critic rides the input bundle
-        self.generator(input=self.state.discriminator.opt.params,
+        self.generator(critic=self.state.discriminator.opt.params.model,
                        target=jnp.ones((BATCH, 1)))
 
     return members(apply, name='gan')
@@ -114,7 +114,7 @@ def test_gan_learns_a_gaussian():
                                  tick=jnp.zeros(500))
         samples_output, losses = split_aux(output)
 
-        samples = generator.apply(game.state.generator.opt.params,
+        samples = generator.apply(game.state.generator.opt.params.model,
                                   rng=jax.random.PRNGKey(99))
         log.append(Struct(mean=float(jnp.mean(samples)), std=float(jnp.std(samples)),
                           discriminator=float(losses.discriminator.loss[-1]),
@@ -153,7 +153,7 @@ def test_gan_population_by_ensemble():
     means = jax.vmap(
         lambda member: jnp.mean(generator.apply(
             member, rng=jax.random.PRNGKey(99))))(
-        tournament.state.generator.opt.params)
+        tournament.state.generator.opt.params.model)
     assert means.shape == (4,)
     assert jnp.unique(means).size == 4                # four independent games
     assert jnp.all(jnp.abs(means - MU) < 0.5)         # all found the mode
@@ -182,7 +182,7 @@ def test_meta_learn_the_learning_rates():
             # cannot ride the xs (see the rng doctrine in scan)
             game = gan.parameterize(rng=rng.next()).initialize()
             game, _ = game.scan(rng=rng.next(), tick=jnp.zeros(ROUNDS))
-            samples = generator.apply(game.state.generator.opt.params,
+            samples = generator.apply(game.state.generator.opt.params.model,
                                       rng=rng.next())
             return Struct(mean=jnp.mean(samples), std=jnp.std(samples))
 
@@ -198,7 +198,7 @@ def test_meta_learn_the_learning_rates():
     # ONE key rides the sequence: scan splits it per meta-step and the
     # trainer hands the drawing model its share; nothing rides the input
     final, aux = jax.jit(trained(meta).apply)(
-        input=Struct(), rng=jax.random.PRNGKey(3),
+        rng=jax.random.PRNGKey(3),
         target=tile(Struct(mean=jnp.asarray(MU), std=jnp.asarray(SIGMA)),
                     META_STEPS))
     meta_losses = aux.loss

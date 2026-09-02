@@ -96,7 +96,11 @@ def test_aux_loss_in_training():
                                    target=tile(jnp.asarray(6.0), steps))
 
     # d/dw [(2w-6)^2 + lam*(2w)^2] = 0  ->  w = 24/(8 + 8*lam) = 8/3
-    assert jnp.allclose(final.state.opt.params.w, 24.0 / (8.0 + 8.0 * lam), atol=0.01)
+    assert jnp.allclose(
+        final.state.opt.params.model.w,
+        24.0 / (8.0 + 8.0 * lam),
+        atol=0.01,
+    )
 
 
 def test_split_aux_is_the_whole_convention():

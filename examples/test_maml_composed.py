@@ -60,7 +60,7 @@ def Adapted(trainer: PSNode) -> PNode:
     # means exactly “reset, scan the support set, return the finished model”.
     # The wrapper contributes only the query that model answers.
     run = trained(trainer.pnode)
-    model = trainer.members.model
+    model = trainer.members.objective.members.model
 
     def answer(self, support, query, rng):
         done = self.run(input=support.input, target=support.target)
@@ -90,11 +90,14 @@ def test_maml_is_two_train_steps():
         query=jnp.ones(2))
 
     steps = 400
-    final, aux = trained(trainer).apply(input=tile(tasks, steps),
-                                  target=tile(a, steps))
+    final, aux = trained(trainer).apply(
+        support=tile(tasks.support, steps),
+        query=tile(tasks.query, steps),
+        target=tile(a, steps),
+    )
 
     # the meta-init converges to the analytic optimum, the task mean
-    meta_init = final.param.model.scale
+    meta_init = final.param.objective.model.scale
     assert jnp.allclose(meta_init, 3.0, atol=0.05), meta_init
     assert jnp.allclose(aux.loss[-1], 0.2621, atol=0.01), aux.loss[-1]
 
@@ -117,11 +120,14 @@ def test_meta_sgd_is_the_same_composition_with_a_learned_rate():
                    query=jnp.ones(2))
 
     steps = 300
-    final, aux = trained(trainer).apply(input=tile(tasks, steps),
-                                  target=tile(a, steps))
+    final, aux = trained(trainer).apply(
+        support=tile(tasks.support, steps),
+        query=tile(tasks.query, steps),
+        target=tile(a, steps),
+    )
 
     # one step at the learned rate reaches the task from a shared init: the
     # rate moved off where it started, which is the thing being learned
-    rate = final.param.opt.scale
+    rate = final.param.opt.model.scale
     assert not jnp.allclose(rate, 0.1), rate
     assert aux.loss[-1] < aux.loss[0]

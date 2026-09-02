@@ -35,8 +35,8 @@ def test_metasgd_learns_init_and_rates():
     a = jax.random.uniform(rng, (steps, tasks), minval=-2.0, maxval=2.0)
     ones = jnp.ones((steps, tasks, k))
     sequence = Struct(
-        input=Struct(support=Struct(input=ones, target=a[:, :, None] * ones),
-                     query=jnp.full((steps, tasks), 2.0)),
+        support=Struct(input=ones, target=a[:, :, None] * ones),
+        query=jnp.full((steps, tasks), 2.0),
         target=2.0 * a)
     final, aux = trained(trainer).apply(bundle=sequence)
 
@@ -51,4 +51,4 @@ def test_metasgd_learns_init_and_rates():
     assert jnp.allclose(out, 2.0 * a_new, atol=0.1)
 
     # the step sizes are meta-params and moved off their starting value
-    assert not jnp.allclose(final.param.opt.scale, 0.1)
+    assert not jnp.allclose(final.param.opt.model.scale, 0.1)

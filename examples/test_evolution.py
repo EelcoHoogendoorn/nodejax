@@ -3,16 +3,13 @@
 The file is split on purpose to show a boundary. The top half is
 differential evolution in plain jax, the two functions you would write
 with no framework anywhere: propose and select, trees of stacked
-candidate weights in and out. The bottom half wraps them into the
-train_step family's SHAPE: a cyclic parametric composite holding the
-model at opt and model, param what optimization starts from, state
-where it has got to, one improvement step per apply with its score
-riding aux. The population is carried where an optimizer carries its
-moments, the reigning champion sits at state.opt.params exactly where
-train_step keeps the live weights, and the generation key is entropy
-held as state. Because the family checks only the shape, trained()
-finalizes an evolution run to the champion as a callable model and
-.scan runs generations, with neither knowing that no gradient was ever
+candidate weights in and out. The bottom half wraps them into a cyclic
+parametric Node with one improvement step per apply and its score riding
+Aux. The population is carried where an optimizer carries its moments,
+the reigning champion sits at state.opt.params, and the generation key
+is entropy held as state. Its trained() view lets the stock trained
+transform finalize an evolution run to the champion as a callable model;
+scan runs generations, with neither knowing that no gradient was ever
 taken.
 """
 
@@ -216,7 +213,18 @@ def evolve(model: PSNode, fitness: Callable, optimizer: Node | PNode,
         )
         return None, Aux(loss=best)
 
-    trainer = members(apply, name=f'evolve({model.name})')
+    def trained(node, state):
+        """Bind the reigning champion as the optimized model."""
+        return node.members.model.bind(
+            state.opt.params,
+            state=state.model,
+        )
+
+    trainer = members(
+        apply,
+        name=f'evolve({model.name})',
+        methods={'trained': trained},
+    )
     return trainer.parameterize().initialize(rng=rng)
 
 

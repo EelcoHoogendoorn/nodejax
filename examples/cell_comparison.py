@@ -91,7 +91,7 @@ def run(name: str, cell: Node, layers: int) -> None:
     adapt = finetune(train_step(task, mc.mse, learned_sgd(mc.INNER_LR0)))
     trainer = train_step(batch(adapt), mc.mse, optax.adam(mc.META_LR)).parameterize(
         rng=jax.random.PRNGKey(0))
-    start = trainer.param.model              # the un-meta-trained inits
+    start = trainer.param.objective.model    # the un-meta-trained inits
 
     _, train_tasks, q_t = mc.make_tasks(np.random.RandomState(0),
                                         mc.META_STEPS * mc.TASKS, k=mc.K)
@@ -99,7 +99,12 @@ def run(name: str, cell: Node, layers: int) -> None:
     def fold(x):
         return jax.tree.map(lambda a: a.reshape(mc.META_STEPS, mc.TASKS, *a.shape[1:]), x)
 
-    final, aux = trained(trainer).apply(input=fold(train_tasks), target=fold(q_t))
+    folded = fold(train_tasks)
+    final, aux = trained(trainer).apply(
+        support=folded.support,
+        query=folded.query,
+        target=fold(q_t),
+    )
 
     plant, tasks, q_t = mc.make_tasks(np.random.RandomState(99), mc.TASKS, k=mc.K)
     # three probes on FRESH tasks, isolating what meta-training bought:
@@ -109,7 +114,7 @@ def run(name: str, cell: Node, layers: int) -> None:
     # 2) the inits alone: the meta-learned weights predict the query with
     #    NO per-task adaptation (the recurrent cells still get their
     #    fresh start state)
-    init_model = batch(task).with_input(tasks.query).bind(final.param.model)
+    init_model = batch(task).with_input(tasks.query).bind(final.param.objective.model)
     _, init_only = init_model.initialize()(tasks.query)
     # 3) adaptation alone: the same inner loop from RANDOM inits, meta-
     #    training ablated
@@ -117,7 +122,7 @@ def run(name: str, cell: Node, layers: int) -> None:
 
     settled = mc.mse(meta_adapted[:, mc.T // 2:], q_t[:, mc.T // 2:])
     bias = jnp.mean(meta_adapted[:, -20:] - q_t[:, -20:], axis=1)
-    n_weights = sum(x.size for x in jax.tree.leaves(final.param.model))
+    n_weights = sum(x.size for x in jax.tree.leaves(final.param.objective.model))
     mc.plot_tuning(f'cells_{name}.png',
                    f'{name}: {layers} layers, {n_weights} weights | '
                    f'settled mse {settled:.5f}, worst bias {jnp.max(jnp.abs(bias)):.3f}',

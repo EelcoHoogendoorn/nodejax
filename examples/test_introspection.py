@@ -93,19 +93,19 @@ def test_describe_writes_the_bound_model_out():
 
 
 def test_the_trainer_prints_its_two_members():
-    """train_step of the bound model is a two-member composite, and
-    describe says so: opt beside model, the weights under both readings
-    (param.model is what training starts from, state.opt.params where
-    it has got to)."""
+    """train_step is a two-member composite, and describe says so: the
+    model and loss form one objective beside the optimizer, with weights
+    under both readings (param.objective.model is what training starts from,
+    state.opt.params.model where it has got to)."""
     import optax
     model = committee_tower().specialize(**{'sample.step.layer.width': 8}).parameterize(
         rng=jax.random.PRNGKey(0)).initialize()
     trainer = train_step(model, mse, optax.sgd(0.1))
     written = trainer.describe()
     print(written)
-    assert 'opt:' in written and 'model:' in written
-    assert 'model.w = float32(3, 8, 8)' in written
-    assert 'opt.params.w = float32(3, 8, 8)' in written
+    assert 'objective:' in written and 'opt:' in written
+    assert 'objective.model.w = float32(3, 8, 8)' in written
+    assert 'opt.params.model.w = float32(3, 8, 8)' in written
 
 
 def test_configuring_by_path():

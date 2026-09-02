@@ -50,7 +50,7 @@ from nodejax import (
 from nodejax.struct import Struct
 
 IMAGE, HIDDEN, EMBED = 8, 64, 32
-BATCH, STEPS = 125, 600
+BATCH, STEPS = 125, 1000
 TAU = 0.99
 
 
@@ -145,16 +145,17 @@ def BYOL(enc: Node, pred: Node, augment: Callable,
         out because two of the three want something the walk cannot provide:
         the ema starts AT the online encoder's weights, which live in the
         trainer's param, and the view maker wants a key of its own."""
+        train_state = members.train.bind(param.train).init()
         return Struct(
-            train=members.train.bind(param.train).init(),
-            ema=members.ema.init(input=param.train.model.enc),
+            train=train_state,
+            ema=members.ema.init(input=train_state.opt.params.model.enc),
             views=members.views.init(rng=rng.next()))
 
     def apply(self, input: jax.Array):
         pair = self.views(input)
         targets = enc.apply(self.state.ema, pair.v2)
         step_loss = self.train(input=pair.v1, target=targets)
-        self.ema(self.state.train.opt.params.enc)
+        self.ema(self.state.train.opt.params.model.enc)
         return step_loss
 
     return members(apply, param=param, init=init)
@@ -195,7 +196,7 @@ def test_byol_learns_a_representation():
     # STATE, drawn at init. As a leaf both came out of one init
     byol = byol.with_input(jnp.zeros((1, IMAGE * IMAGE))).parameterize(
         rng=jax.random.PRNGKey(0)).initialize(rng=jax.random.PRNGKey(1))
-    random_enc_params = byol.state.train.opt.params.enc   # the untrained encoder
+    random_enc_params = byol.state.train.opt.params.model.enc  # the untrained encoder
 
     shuffle = np.random.RandomState(1)
     batch_indices = np.concatenate(
