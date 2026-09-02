@@ -229,12 +229,21 @@ def _build_train_step(model: Node, loss_fn: LossFn, opt: Node) -> Node:
         return initialized(
             contract, param, opt_input, model_state, rng)
 
+    def params(state):
+        """The model parameters as the optimizer currently holds them."""
+        return state.opt.params
+
+    def trained(node, state):
+        """The model bound to the parameters and state this step has reached."""
+        return node.members.model.bind(state.opt.params, state=state.model)
+
     return Composite(opt=opt, model=model)._roles_with_forms(
         apply_fn,
         param=param_fn,
         init=init_fn,
         prime=prime_fn,
         name=f'train_step({model.name})',
+        methods={'params': params, 'trained': trained},
         param_form=(model._def.calls.param.form
                     if model.parametric
                     else CallForm.from_values(Struct())),

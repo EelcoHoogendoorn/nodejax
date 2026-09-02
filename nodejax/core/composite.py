@@ -11,6 +11,7 @@ from nodejax.core.contract import (
 from nodejax.core.definition import Captures, Def, Layout
 from nodejax.frozendict import frozendict
 from nodejax.core.generic import Generic, is_generic
+from nodejax.core.lifting import _check_methods
 from nodejax.core.node import Node, _is_node, _view
 from nodejax.struct import Struct
 
@@ -32,7 +33,8 @@ def _member_roles(definitions: Struct, captures: Captures, apply, *,
                   input_spec=_DEFAULT, open: bool = False,
                   requires_input=None,
                   param_takes_rng=None, init_takes_rng=None,
-                  apply_takes_rng=None, tags=()) -> Def:
+                  apply_takes_rng=None, tags=(),
+                  methods: Mapping = _EMPTY_MAPPING) -> Def:
     """Lower bundle-based role functions for one named member structure."""
     from nodejax.core.binding import REQUIRED
 
@@ -118,6 +120,7 @@ def _member_roles(definitions: Struct, captures: Captures, apply, *,
         members=definitions,
         captures=captures,
         tags=frozenset(tags),
+        methods=_check_methods(methods),
         layout=Layout(kind='composite'),
     )
 
@@ -219,7 +222,8 @@ class Members(Mapping):
             input_spec=_DEFAULT, open: bool = False,
             requires_input=None,
             param_takes_rng=None, init_takes_rng=None,
-            apply_takes_rng=None, tags=()):
+            apply_takes_rng=None, tags=(),
+            methods: Mapping = _EMPTY_MAPPING):
         """Build roles from canonical construction forms."""
         members = dict(self._members.__items__)
         role_options = dict(
@@ -230,6 +234,7 @@ class Members(Mapping):
             param_takes_rng=param_takes_rng,
             init_takes_rng=init_takes_rng,
             apply_takes_rng=apply_takes_rng, tags=tags,
+            methods=methods,
         )
         if any(is_generic(member) for member in members.values()):
             return Generic(

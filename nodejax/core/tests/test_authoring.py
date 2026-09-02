@@ -67,8 +67,6 @@ def test_authored_node_channel_is_a_restricted_view():
     assert observed['input_shape'] == (3,)
     with pytest.raises(AttributeError):
         observed['node'].contract
-    with pytest.raises(AttributeError):
-        observed['node'].members
 
 
 def test_struct_valued_constructor_defaults_are_complete_values():

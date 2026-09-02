@@ -30,6 +30,16 @@ class AuthorNode:
         return self._def.name
 
     @property
+    def members(self):
+        """The member definitions as unbound Node views, for a method that
+        binds one of them to values it holds."""
+        from nodejax.core.node import _view
+        from nodejax.struct import Struct
+        return Struct(**{
+            name: _view(member) for name, member in self._def.members.__items__
+        })
+
+    @property
     def input_spec(self):
         """Resolved input specification projected to the authored call."""
         spec = self._def.contract.input_spec
