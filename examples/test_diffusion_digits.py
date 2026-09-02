@@ -28,22 +28,19 @@ import optax
 from sklearn.datasets import load_digits
 
 from nodejax import (
-    BaseNode,
-    Composite,
     Leaf,
     Node,
     PNode,
-    PyTree,
     Struct,
     batch,
     node,
     nn,
-    repeat,
     serial,
     train_step,
     trained,
     tree_first,
 )
+from examples.diffusion import Denoiser, linear_alpha_bar
 
 
 IMAGE = 8
@@ -59,130 +56,7 @@ TRAIN_IMAGES = 1_400
 TEST_IMAGES = 200
 
 
-def linear_alpha_bar(steps: int, floor: float = 0.6) -> tuple[float, ...]:
-    """Linear cumulative alphas from clean down to ``floor``. The 0.6
-    default keeps corruption recoverable for the reconstruction demo; a
-    floor near zero trains the predictor for generation from pure
-    noise (exactly zero would divide the clean estimate away)."""
-    values = np.linspace(1.0, floor, steps + 1)
-    return tuple(float(value) for value in values)
-
-
-def cosine_alpha_bar(steps: int, floor: float = 2e-3) -> tuple[float, ...]:
-    """Cosine cumulative alphas (Nichol and Dhariwal): log
-    signal-to-noise falls evenly across the schedule, which a linear
-    ramp does not, so this is the full schedule for generation. The
-    floor keeps the clean estimate's division finite at the noisiest
-    step."""
-    time = np.arange(steps + 1) / steps
-    offset = 0.008
-    values = np.cos((time + offset) / (1.0 + offset) * np.pi / 2.0) ** 2
-    values = np.clip(values / values[0], floor, 1.0)
-    return tuple(float(value) for value in values)
-
-
-ALPHA_BAR = linear_alpha_bar(DIFFUSION_STEPS)
-
-
-def assert_matching_shapes(reference: PyTree, candidate: PyTree, label: str) -> None:
-    """Require the same shape at every leaf. A structure mismatch fails
-    loudly in tree.map on its own; equal structures with different leaf
-    shapes would broadcast silently, and that is the case worth a
-    guard."""
-    matches = jax.tree.map(
-        lambda reference_leaf, candidate_leaf: (
-            jnp.shape(reference_leaf) == jnp.shape(candidate_leaf)
-        ),
-        reference,
-        candidate,
-    )
-    assert all(jax.tree.leaves(matches)), (
-        f'{label} must preserve every sample leaf shape'
-    )
-
-
-@node
-def DenoisingStep(
-    predictor: BaseNode,
-    clean: BaseNode,
-    alpha_bar: tuple[float, ...],
-) -> Node:
-    """One epsilon-prediction DDIM update over an arbitrary sample pytree."""
-    schedule = jnp.asarray(alpha_bar, dtype=jnp.float32)
-    steps = len(alpha_bar) - 1
-    members = Composite(predictor=predictor, clean=clean)
-
-    def apply(self, input):
-        assert input.reverse.shape == ()
-        time = input.reverse.astype(jnp.float32) / steps
-        current_alpha = schedule[input.reverse]
-        previous_alpha = schedule[input.reverse - 1]
-        predicted_noise = self.predictor(Struct(
-            condition=input.condition,
-            sample=input.sample,
-            time=time,
-            alpha_bar=current_alpha,
-        ))
-        assert_matching_shapes(input.sample, predicted_noise, 'predictor output')
-
-        clean_sample = jax.tree.map(
-            lambda sample, noise: (
-                sample - jnp.sqrt(1.0 - current_alpha) * noise
-            ) / jnp.sqrt(current_alpha),
-            input.sample,
-            predicted_noise,
-        )
-        clean_sample = self.clean(clean_sample)
-        assert_matching_shapes(input.sample, clean_sample, 'clean output')
-
-        next_sample = jax.tree.map(
-            lambda clean_value, noise: (
-                jnp.sqrt(previous_alpha) * clean_value
-                + jnp.sqrt(1.0 - previous_alpha) * noise
-            ),
-            clean_sample,
-            predicted_noise,
-        )
-        return input.replace(
-            sample=next_sample,
-            reverse=input.reverse - 1,
-        )
-
-    return members(apply)
-
-
-@node
-def Denoiser(
-    predictor: BaseNode,
-    alpha_bar: tuple[float, ...],
-    clean: BaseNode = nn.identity,
-) -> Node:
-    """Run deterministic epsilon-prediction DDIM from an explicit sample.
-
-    Input is ``Struct(condition=<pytree>, sample=<pytree>)``. The predictor
-    receives the condition, current sample, normalized time, and current
-    cumulative alpha. Its output and the optional clean-estimate Node must
-    match the sample pytree exactly.
-    """
-    steps = len(alpha_bar) - 1
-    if steps < 1:
-        raise ValueError('Denoiser needs at least one reverse step')
-
-    def countdown(input) -> Struct:
-        return Struct(
-            condition=input.condition,
-            sample=input.sample,
-            reverse=jnp.asarray(steps, dtype=jnp.int32),
-        )
-
-    return serial(
-        countdown=Leaf(countdown, name='countdown'),
-        iterations=repeat(
-            DenoisingStep(predictor, clean, alpha_bar),
-            n=steps,
-        ),
-        sample=Leaf(lambda input: input.sample, name='sample'),
-    )
+ALPHA_BAR = linear_alpha_bar(DIFFUSION_STEPS, floor=0.6)
 
 
 @node
