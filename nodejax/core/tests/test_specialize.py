@@ -130,13 +130,21 @@ def test_static_replay_rebuilds_from_canonical_members():
 def test_node_names_the_def_from_the_factory():
     """A node the factory left unnamed takes the factory's own name,
     lowercased; an explicit node name wins untouched."""
-    from nodejax import node
+    from nodejax import node, Wrapper
 
     @node
     def Blip():
         return Leaf(lambda input: input + 1.0)
 
+    @node
+    def Wrapped(body):
+        def apply(self, input):
+            return self.body(input)
+
+        return Wrapper(body=body)(apply)
+
     assert Blip().name == 'blip'
+    assert Wrapped(Leaf(lambda input: input)).name == 'wrapped'
     assert nn.Dropout(0.3).name == 'drop'    # explicit, untouched
 
 

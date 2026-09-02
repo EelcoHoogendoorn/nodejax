@@ -153,8 +153,16 @@ def node(fn: Callable | None = None, *, name: str | None = None):
             return product
 
         definition = product._def
+        construction = definition.construction
+        unnamed_wrapper = (
+            definition.layout.transparent_member is not None
+            and construction is not None
+            and 'name' in construction.arguments
+            and construction.arguments.name is None
+        )
         weak_name = (definition.name in ('apply', '<lambda>', 'composite')
-                     or definition.name.startswith('composite('))
+                     or definition.name.startswith('composite(')
+                     or unnamed_wrapper)
         actual_name = (name if name is not None else
                        _snake(fn.__name__) if weak_name else definition.name)
 
