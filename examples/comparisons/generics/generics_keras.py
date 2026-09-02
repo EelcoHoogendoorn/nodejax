@@ -193,7 +193,7 @@ def retempered(model, temperature: float):
                 for member in layer.members
             ]
             config = layer.get_config()
-            del config['members']
+            config.pop('members')
             return Ensemble(members, **config)
 
         config = layer.get_config()

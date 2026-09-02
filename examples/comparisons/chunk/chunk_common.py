@@ -136,7 +136,6 @@ def weights(key: jax.Array=None):
     to a constructor, nodejax to the param function. torch is passed nothing,
     because torch has nothing to pass, which is its answer here as it was for
     the carry."""
-    del key                                      # deliberately, see above
     kx, kh = jax.random.split(PARAM_KEY)
     return (jax.random.normal(kx, (W, H)) / jnp.sqrt(W),
             jax.random.normal(kh, (H, H)) / jnp.sqrt(H),
