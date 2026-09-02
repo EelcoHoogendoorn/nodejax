@@ -26,15 +26,15 @@ from nodejax.core.definition import Captures, Construction, Def, Layout
 from nodejax.frozendict import frozendict
 from nodejax.core.generic import Generic, is_generic
 from nodejax.core.lifting import (
-    _check_methods, _compile_init, _compile_param, _keys_only,
+    _check_methods, _compile_init, _compile_param,
 )
 from nodejax.core.node import BaseNode, Node, _is_node, _view
-from nodejax.core.rng import MaybeKeyStream, _reject_no_rng
+from nodejax.core.rng import MaybeKeyStream
 from nodejax.core.spec import materialize, spec_of
 from nodejax.struct import Struct
 from nodejax.tree import tree_first
 from nodejax.core.wiring import (
-    _BuildingWired, _InitWired, _Member, _authored, _wrap_apply,
+    _BuildingWired, _InitWired, _authored,
 )
 
 
@@ -83,8 +83,9 @@ def _init_takes_rng(members: Struct, captures: Captures) -> bool:
         for name, member in members.__items__)
 
 
-def _wiring_takes_rng(members: Struct, authored) -> bool:
-    return authored.author_rng or any(
+def _wiring_takes_rng(members: Struct, authored,
+                      rng_from: bool | None = None) -> bool:
+    return (authored.author_rng and rng_from is not False) or any(
         member.contract.apply_takes_rng for member in members)
 
 
@@ -456,9 +457,8 @@ def serial(members: Struct, captures: Captures):
         captures=captures, layout=Layout(kind='serial')))
 
 
-def _member_init(members, apply, param, evidence, rng, inputs, *,
+def _member_init(members, authored, param, evidence, rng, inputs, *,
                  prime, captures):
-    authored = _authored(apply)
     if evidence is not None and authored.wired:
         wired = _InitWired(
             members, param, rng, inputs, dict(captures.state),
@@ -532,16 +532,20 @@ def _checked_init(call: InitCall, members, name):
 @node
 def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
               init=None, apply_input_spec=None, name=None,
-              methods: Mapping = _EMPTY_MAPPING):
+              methods: Mapping = _EMPTY_MAPPING,
+              rng_from: bool | None = None, scope: Callable | None = None):
+    """``rng_from`` is the authored rng policy (see ``_Wired``) and ``scope``
+    the author's view of each walk object; both serve the one-member
+    wrapper, which is this composite without a nesting level."""
     definitions, captures = _promote_members(members)
     reserved = {'param', 'state'} & set(definitions.__keys__)
     if reserved:
         raise TypeError(f'member names shadow self fields: {sorted(reserved)}')
-    authored = _authored(apply)
+    authored = _authored(apply, scope=scope)
     marker = (_bundle_spec_from_sig(apply, drop=('self',))
               if authored.fields else None)
     author_rng = marker is not None and 'rng' in marker
-    lifted = _wrap_apply(apply, definitions)
+    lifted = authored.lift(definitions, rng_from=rng_from)
     self_form = authored.wired
 
     def apply_impl(definition, param, state, formed_input, rng):
@@ -587,7 +591,7 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
         elif evidence is not None and prime and self_form:
             evidence = definition.contract.feed(evidence)
         return _member_init(
-            current, apply, param, evidence, rng, inputs,
+            current, authored, param, evidence, rng, inputs,
             prime=prime, captures=captures)
 
     any_param = any(member.parametric for member in definitions)
@@ -621,7 +625,7 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
             takes_rng=(
                 _init_takes_rng(definitions, captures)
                 or (requires_input and self_form
-                    and _wiring_takes_rng(definitions, authored))))
+                    and _wiring_takes_rng(definitions, authored, rng_from))))
         if custom_init is not None:
             init_role = _checked_init(custom_init, definitions, name)
 
@@ -639,7 +643,7 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
             init=init_role,
             apply=apply_call(
                 apply_impl, form, input_spec=input_spec,
-                takes_rng=(_wiring_takes_rng(definitions, authored)
+                takes_rng=(_wiring_takes_rng(definitions, authored, rng_from)
                            if self_form else False)),
         ),
         members=definitions,
@@ -653,7 +657,8 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
             apply, members={field: Node(child)
                             for field, child in replacements.__items__},
             param=param, init=init, apply_input_spec=apply_input_spec,
-            name=name, methods=checked_methods)
+            name=name, methods=checked_methods, rng_from=rng_from,
+            scope=scope)
         return rebuilt._def
 
     return _view(definition.copy(tree=bind))
@@ -661,132 +666,138 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
 
 def _defer_wrapper(build):
     @wraps(build)
-    def entry(apply, operand, *, member, init=None, name=None, rng_from=None):
+    def entry(apply, operand, *, member, init=None, name=None, rng_from=None,
+              input_spec=None):
         if is_generic(operand):
             return Generic(
                 name or f'wrapper({operand.name})',
                 lambda **filled: entry(
-                    apply, filled[member], member=member,
-                    init=init, name=name, rng_from=rng_from),
+                    apply, filled[member], member=member, init=init,
+                    name=name, rng_from=rng_from, input_spec=input_spec),
                 Struct(**{member: operand}),
             )
-        return build(apply, operand, member=member,
-                     init=init, name=name, rng_from=rng_from)
+        return build(apply, operand, member=member, init=init, name=name,
+                     rng_from=rng_from, input_spec=input_spec)
     return entry
 
 
 @_defer_wrapper
 @node
 def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
-                rng_from: bool | None = None):
-    from nodejax.core.wrapper import Wrapper, _transparent_calls
+                rng_from: bool | None = None, input_spec=None):
+    """An authored wrapper is the one-member composite without a nesting
+    level: the composite builds, initializes, and runs the member; this
+    presents its keyed param, state, and aux as the member's own.
+    ``input_spec`` is the wrapper's own declared input wire, as for a
+    composite; a wrapper publishes nothing it is not told."""
+    from nodejax.core.wrapper import _transparent_def
 
-    authored = _authored(apply)
-    if not authored.wired:
+    if not _authored(apply).wired:
         raise TypeError('wrapper apply must call its named member through self')
-    signature = tuple(inspect.signature(apply).parameters)
-    if not signature or signature[0] != 'self':
-        raise TypeError('wrapper apply begins with self')
-    marker = _bundle_spec_from_sig(apply, drop=('self',))
-    inject_rng = 'rng' in marker
-    if rng_from is not None and type(rng_from) is not bool:
-        raise TypeError('rng_from must be a bool')
-    if rng_from is not None and not inject_rng:
+    if rng_from is not None and 'rng' not in _bundle_spec_from_sig(
+            apply, drop=('self',)):
         raise TypeError('rng_from requires an rng parameter')
-    body_takes_rng = inject_rng and (rng_from is None or rng_from)
-    data = marker.without('rng') if inject_rng else marker
     child = operand._def
-    fields = tuple(data.__keys__)
-    declared = data
-    child_spec = child.contract.input_spec
-    if len(fields) == 1 and child_spec is not None:
-        declared = Struct(**{
-            fields[0]: child.contract.intake(child_spec),
-        })
-    takes_rng = body_takes_rng or child.contract.apply_takes_rng
+    # Over a stateless member a declared init is vacuous: the empty state is
+    # the only state such a subtree has, so the declaration drops and
+    # callers need not fork on the member's lifecycle.
+    declared_init = (None if init is None or child.calls.init is None
+                     else _transparent_init(init, member))
+    inner = composite(
+        apply, members={member: operand}, init=declared_init,
+        apply_input_spec=input_spec, name=name or f'wrapper({child.name})',
+        rng_from=rng_from, scope=lambda wired: _TransparentScope(wired, member),
+    )._def
 
-    def impl(definition, param, state, formed_input, rng):
-        current = getattr(definition.members, member)
-        scope = _WrapStep(
-            current, member, param, state, rng,
-            inject_rng=inject_rng, rng_from=rng_from)
-        arguments = {
-            field: (scope._boundary if field == 'rng' else formed_input[field])
-            for field in signature[1:]
-            if field == 'rng' or field in formed_input
+    def keyed(value):
+        return Struct(**{member: value})
+
+    calls = inner.calls
+    if calls.param is not None:
+        inner_param = calls.param
+
+        def param_impl(definition, formed_input, rng):
+            return getattr(
+                inner_param.impl(definition, keyed(formed_input), rng), member)
+
+        calls = calls.with_param(impl=param_impl, form=child.calls.param.form)
+    if calls.init is not None:
+        inner_init = calls.init
+        # A generated init takes the member's bundle under its name; a
+        # declared one takes the wrapper's own fields as they are.
+        generated = declared_init is None
+        formed = keyed if generated else (lambda formed_input: formed_input)
+        if inner_init.requires_input:
+            def init_impl(definition, param, formed_input, input, rng):
+                return getattr(inner_init.impl(
+                    definition, keyed(param), formed(formed_input), input, rng,
+                ), member)
+        else:
+            def init_impl(definition, param, formed_input, rng):
+                return getattr(inner_init.impl(
+                    definition, keyed(param), formed(formed_input), rng,
+                ), member)
+        calls = calls.with_init(
+            impl=init_impl,
+            form=child.calls.init.form if generated else inner_init.form)
+    inner_apply = calls.apply
+
+    def apply_impl(definition, param, state, formed_input, rng):
+        next_state, output = inner_apply.impl(
+            definition, keyed(param), keyed(state), formed_input, rng)
+        value, aux = split_aux(output)
+        entries = dict(aux.__items__) if type(aux) is Aux else {}
+        member_aux = entries.pop(member, None)
+        flattened = {
+            **(dict(member_aux.__items__) if member_aux is not None else {}),
+            **entries,
         }
-        output = _keys_only(apply(scope, **arguments),
-                            f'wrapper({current.name})')
-        _reject_no_rng(output, f'wrapper({current.name})')
-        clean, direct = split_aux(output)
-        aux = {}
-        if type(direct) is Aux:
-            aux.update(dict(direct.__items__))
-        aux.update(scope._aux)
-        return scope._current, ((clean, Aux(**aux)) if aux else clean)
-
-    calls = _transparent_calls(member, child).with_apply(
-        impl=impl, form=CallForm.from_values(data), input_spec=declared,
-        takes_rng=takes_rng)
-    if init is not None and child.calls.init is not None:
-        # Over a stateless member the declared init is vacuous: the empty
-        # state is the only state such a subtree has, so the declaration
-        # drops and callers need not fork on the member's lifecycle.
-        calls = calls.copy(init=_compile_init(
-            init,
-            owner=f'wrapper({child.name})',
-        ))
-    product = Wrapper(**{member: operand})(
-        name=name or f'wrapper({child.name})', contract=calls,
-        tags=child.tags, methods=child.methods)
+        return getattr(next_state, member), (
+            (value, Aux(**flattened)) if flattened else value)
 
     def bind(replacements):
         rebuilt = _wrap_build(
-            apply, Node(replacements[member]), member=member,
-            init=init, name=name, rng_from=rng_from)
+            apply, Node(replacements[member]), member=member, init=init,
+            name=name, rng_from=rng_from, input_spec=input_spec)
         return rebuilt._def
 
-    definition = product._def.copy(tree=bind)
+    definition = _transparent_def(
+        member, child, name=inner.name, captures=inner.captures,
+        tags=child.tags, methods=child.methods,
+    ).copy(calls=calls.with_apply(impl=apply_impl), tree=bind)
     return operand._with_definition(definition)
 
 
-class _WrapStep:
-    def __init__(self, member, name, param, state, rng, *,
-                 inject_rng, rng_from):
-        self._node = member
-        self._member = name
-        self.param = param
-        self.state = state
-        self._current = state
-        self._aux = {}
-        self._rng = rng
-        self._boundary = (
-            None if not inject_rng else
-            MaybeKeyStream() if rng_from is False else
-            rng if rng_from is True else
-            rng._require()
-        )
+def _transparent_init(init: Callable, member: str) -> Callable:
+    """A wrapper's declared init, written against the member's own param
+    and returning the member's own state, in the composite's keyed form."""
+    def keyed(**arguments):
+        if 'param' in arguments:
+            arguments['param'] = getattr(arguments['param'], member)
+        return Struct(**{member: init(**arguments)})
+
+    keyed.__signature__ = inspect.signature(init)
+    return keyed
+
+
+class _TransparentScope:
+    """The wrapper's ``self``: a one-member walk object whose ``param`` and
+    ``state`` are the member's own slot rather than a keyed Struct."""
+
+    def __init__(self, wired, member: str):
+        self._wired = wired
+        self._member = member
+
+    @property
+    def param(self):
+        return getattr(self._wired.param, self._member)
+
+    @property
+    def state(self):
+        return getattr(self._wired.state, self._member)
 
     def __getattr__(self, name):
-        if name != self._member:
-            raise AttributeError(name)
-
-        def call(bundle):
-            child = self._rng.child(
-                self._node.contract.apply_takes_rng)
-            self._current, output = self._node.contract.apply(
-                self.param, self._current, bundle, child)
-            output, aux = split_aux(output)
-            if type(aux) is Aux:
-                self._aux.update(dict(aux.__items__))
-            return output
-
-        return _Member(
-            call, self._node, self.param, lambda: self._current,
-            (lambda: self._boundary) if self._boundary is not None else None)
-
-    def sow(self, **fields):
-        self._aux.update(fields)
+        return getattr(self._wired, name)
 
 
 def _ident(name):

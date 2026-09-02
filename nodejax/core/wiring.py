@@ -4,9 +4,9 @@ Everything here exists ONLY inside the sugared context of an authored
 composite apply/init — self.member(x) advances a member, self.param /
 self.state read the live slices, mutation local to the step. The classes
 below implement that syntax and its param/init-time twins (shape and state
-discovery by running the wiring); _wrap_apply lowers the self-form function
-to a canonical call over raw Def values. Public Node views never enter this
-machinery.
+discovery by running the wiring); the authored apply object lowers the
+self-form function to a canonical call over raw Def values. Public Node
+views never enter this machinery.
 """
 
 from __future__ import annotations
@@ -66,14 +66,21 @@ class _Wired:
     apply signature. Its state and RNG cursors are invocation-local."""
 
     def __init__(self, obj, state, members, rng: MaybeKeyStream, *,
-                 author_rng: bool = False):
+                 author_rng: bool = False, rng_from: bool | None = None):
         self._obj = obj
         self._state = state
         self._members = members
         self._new = {}
         self._aux = {}
         self._rng = rng
-        self._boundary = rng._require() if author_rng else None
+        # rng_from decides what the authored rng argument is: None narrows
+        # the invocation stream to a KeyStream, True forwards the stream
+        # as it is, keyed or empty, and False hands over an empty one.
+        self._boundary = (
+            None if not author_rng else
+            MaybeKeyStream() if rng_from is False else
+            rng if rng_from is True else
+            rng._require())
 
     @property
     def param(self):
@@ -556,7 +563,8 @@ class _RawApply:
     def __init__(self, apply: Callable):
         self._apply = apply
 
-    def lift(self, definitions: Struct) -> Callable:
+    def lift(self, definitions: Struct, *,
+             rng_from: bool | None = None) -> Callable:
         apply = self._apply
         return lambda definition, p, s, i, rng: apply(p, s, i)
 
@@ -565,13 +573,16 @@ class _WiredApply:
     """An apply authored against `self`: the wiring builds the transient step
     object, and the same call drives the param- and init-time discovery runs.
 
-    Subclasses differ only in how the input slot reaches the author."""
-    __slots__ = ('_apply',)
+    ``scope`` is the author's view of each walk object; None hands the walk
+    object over as it is. Subclasses differ only in how the input slot
+    reaches the author."""
+    __slots__ = ('_apply', '_scope')
     fields: tuple[str, ...] = ()
     wired = True
 
-    def __init__(self, apply: Callable):
+    def __init__(self, apply: Callable, scope: Callable | None = None):
         self._apply = apply
+        self._scope = scope
 
     @property
     def author_rng(self) -> bool:
@@ -580,7 +591,8 @@ class _WiredApply:
     def run(self, wired, input):
         raise NotImplementedError
 
-    def lift(self, definitions: Struct) -> Callable:
+    def lift(self, definitions: Struct, *,
+             rng_from: bool | None = None) -> Callable:
         author_rng = self.author_rng
         run = self.run
 
@@ -588,7 +600,7 @@ class _WiredApply:
             members = (definitions if definition is None else
                        definition.members)
             self = _Wired(
-                p, s, members, rng, author_rng=author_rng)
+                p, s, members, rng, author_rng=author_rng, rng_from=rng_from)
             out = _keys_only(
                 run(self, input),
                 f"{definition.name if definition is not None else 'composite'}.apply")
@@ -615,8 +627,9 @@ class _FieldApply(_WiredApply):
     member calls share the invocation's ordered RNG cursor."""
     __slots__ = ('fields',)
 
-    def __init__(self, apply: Callable, fields: tuple[str, ...]):
-        super().__init__(apply)
+    def __init__(self, apply: Callable, fields: tuple[str, ...],
+                 scope: Callable | None = None):
+        super().__init__(apply, scope)
         self.fields = fields
 
     def run(self, wired, input):
@@ -632,25 +645,21 @@ class _FieldApply(_WiredApply):
                 kw[f] = wired._boundary
             else:
                 kw[f] = input[f]
-        return self._apply(wired, **kw)
+        view = wired if self._scope is None else self._scope(wired)
+        return self._apply(view, **kw)
 
 
-def _authored(apply: Callable) -> _RawApply | _WiredApply:
+def _authored(apply: Callable, *,
+              scope: Callable | None = None) -> _RawApply | _WiredApply:
     """Which of the three authored apply forms this is, as an object that
     answers for itself: how to run the wiring, what fields it declares, and
-    how to lift it into the contract impl."""
+    how to lift it into the contract impl. ``scope`` is the author's view of
+    each walk object, when the plain walk object is not it."""
     sig = tuple(inspect.signature(apply).parameters)
     if sig == ('param', 'state', 'input'):
         return _RawApply(apply)          # the contract form: the bundle whole
     if sig[:1] == ('self',) and len(sig) > 1:
         # trailing names are the input fields, `input` one like any other
-        return _FieldApply(apply, sig[1:])
+        return _FieldApply(apply, sig[1:], scope)
     raise TypeError('composite apply is (self, <fields...>) or the raw '
                     f'(param, state, input) -> (state, output); got {sig}')
-
-
-def _wrap_apply(apply: Callable, definitions: Struct) -> Callable:
-    """Transform a composite apply into contract shape: the authored form
-    knows how to lift itself. ``definitions`` is the member table used by
-    construction walks before the enclosing Def exists."""
-    return _authored(apply).lift(definitions)

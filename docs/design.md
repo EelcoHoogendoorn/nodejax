@@ -86,7 +86,11 @@ state traversal, and lifetime handling follow one definition tree.
 A wrapper is the one-member structural form. It changes the contract around a
 Node without pretending that the wrapper owns a separate parameter or
 state subtree. A transparent wrapper can retain the member's value layout
-while changing its behavior, metadata, or transform semantics.
+while changing its behavior, metadata, or transform semantics. An authored
+wrapper is the one-member authored composite without the nesting level: the
+same construction walks build the member at the input the apply feeds it,
+and its param, state, and aux are the member's own rather than a Struct
+keyed by the member's name.
 
 Earlier NodeJAX versions allowed a composite Node to own local params and state
 beside member-owned values. That added no expressivity because local values
