@@ -82,3 +82,19 @@ def test_externalize_whole_node() -> None:
         bound.apply(input=input, critic=weights),
         critic.bind(weights).apply(input),
     )
+
+
+def test_externalized_call_stays_flat_beside_the_node_fields() -> None:
+    """A node with several call fields keeps them; the parameter field joins."""
+    members = Composite(gain=Gain(), offset=Gain())
+
+    def apply(self, input, shift):
+        return self.gain(input) + self.offset(shift)
+
+    model = members(apply, name='model').with_input(Struct(input=0.0, shift=0.0))
+    external = externalize(model, 'gain').parameterize(
+        gain=Struct(scale=jnp.asarray(0.0)), offset=Struct(scale=jnp.asarray(2.0)))
+    out = external.apply(input=3.0, shift=1.0, gain=Struct(scale=jnp.asarray(5.0)))
+
+    assert external.contract.apply_fields == ('input', 'shift', 'gain')
+    assert jnp.allclose(out, 3.0 * 5.0 + 1.0 * 2.0)
