@@ -557,7 +557,8 @@ class Contract:
         applies, their call forms, and their public RNG requirements.
         ``requires_input`` may explicitly switch an existing initializer
         between those forms when the corresponding replacement is supplied.
-        ``init=False`` removes state from the result. ``apply_fields``
+        ``init=False`` removes state from the result and ``param=False``
+        removes parameters. ``apply_fields``
         declares a replacement required-field form; ``open`` also permits
         undeclared side fields.
         """
@@ -568,7 +569,9 @@ class Contract:
             if calls.init is None:
                 raise TypeError(
                     'requires_input cannot describe an absent init role')
-        if calls.param is not None and param is not None:
+        if param is False:
+            calls = calls.copy(param=None)
+        elif calls.param is not None and param is not None:
             calls = calls.copy(param=_lower_param(param, calls.param))
         if init is False:
             if prime is not None or requires_input is not None:

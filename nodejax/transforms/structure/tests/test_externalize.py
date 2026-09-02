@@ -68,3 +68,17 @@ def test_externalize_composite_subtree() -> None:
         bound.apply(critic=critic_param, input=input),
         model.bind(Struct(critic=critic_param)).apply(input),
     )
+
+
+def test_externalize_whole_node() -> None:
+    critic = (nn.Linear(4) >> nn.tanh >> nn.Linear(1)).with_input(jnp.zeros(3))
+    external = externalize(critic, field='critic')
+    weights = critic.parameterize(rng=jax.random.PRNGKey(1)).param
+    input = jnp.arange(3.0)
+
+    assert not external.parametric
+    bound = external.parameterize()
+    assert jnp.allclose(
+        bound.apply(input=input, critic=weights),
+        critic.bind(weights).apply(input),
+    )
