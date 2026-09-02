@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import pytest
 
 from nodejax import (Node, Leaf, serial, Composite, at, batch, stack, ensemble,
-                     repeat, sum_junction, parallel, residual, remat, drop_aux,
+                     repeat, sum_junction, parallel, residual, remat,
                      state_reinit)
 from nodejax.struct import Struct
 
@@ -96,7 +96,6 @@ CASES = {
     'parallel': lambda: parallel(a=Primed()).with_input(bundle=Struct(a=X)),
     'residual': lambda: residual(Primed()).with_input(X),
     'remat': lambda: remat(Primed()).with_input(X),
-    'drop_aux': lambda: drop_aux(Primed()).with_input(X),
     'state_reinit': lambda: state_reinit(Primed()).with_input(X),
 }
 

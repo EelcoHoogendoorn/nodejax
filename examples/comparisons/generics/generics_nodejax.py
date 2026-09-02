@@ -84,8 +84,7 @@ def configured(config: dict) -> Node:
 def mean_squared(output, target: jax.Array) -> jax.Array:
     """The committee sows its member population to aux; the objective
     scores the mean it emitted."""
-    clean, _ = split_aux(output)
-    return jnp.mean((clean - target) ** 2)
+    return jnp.mean((output - target) ** 2)
 
 
 def fit(model, rows: jax.Array, targets: jax.Array) -> tuple:

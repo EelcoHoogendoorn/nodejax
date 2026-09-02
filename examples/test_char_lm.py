@@ -8,8 +8,8 @@ both uses accumulate through the expansion.
 
 AUX LOSS — the mixture-of-experts layer emits its load-balance statistic
 on the aux stream: (output, aux) from the block, diverted under the
-member's name by the pipe, stacked over time by scan, split by the LOSS
-function and fed to the optimizer.
+member's name by the pipe, stacked over time by scan, and supplied to the
+loss through its declared ``aux`` argument.
 
 GENERATION — sampling is a feedback loop: a cyclic node whose state
 carries (model state, last char, rng); each step feeds the model its own
@@ -23,8 +23,9 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import (node, trained, Node, Leaf, Composite, serial, stack, scan, scanned, residual,
-                     train_step, tie, split_aux, ambient, nn)
+from nodejax import (Aux, node, trained, Node, Leaf, Composite, serial, stack,
+                     scan, scanned, residual, train_step, tie, split_aux,
+                     ambient, nn)
 from nodejax.control import Delay
 from nodejax.core.types import Param
 from nodejax.struct import Struct
@@ -59,8 +60,7 @@ def build(vocab: int) -> Node:
 
 # --- loss: cross-entropy + the aux load-balance term ---
 
-def lm_loss(pred: tuple, target: jax.Array) -> jax.Array:
-    logits, aux = split_aux(pred)          # the aux stream arrives IN the loss
+def lm_loss(logits: jax.Array, target: jax.Array, *, aux: Aux) -> jax.Array:
     ce = jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits, target))
     return ce + 0.01 * jnp.mean(aux.moe.balance)
 
@@ -149,8 +149,7 @@ def test_trains_generates():
     # The TRAINED lm composes in as a bound member (the transport
     # container), and the bare parameterize fills every slot from that
     # storage, owing no key. The rollout emits (characters, aux); the
-    # MoE's load-balance term is a training concern, destructured away
-    # at the call
+    # MoE's load-balance term remains outside the sampler's primary output
     gen = scanned(Sampler(fitted)).parameterize()
     ticks = jnp.zeros(160)
     sample_a, _ = gen.apply(rng=jax.random.PRNGKey(7), tick=ticks)

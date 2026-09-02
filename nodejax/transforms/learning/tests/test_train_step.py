@@ -6,11 +6,12 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from nodejax import (batch, scan, scanned, state_reinit, Leaf, PSNode, Wrapper,
-                     train_step, trained, serial, nn, map_members, tree_detach)
+from nodejax import (Aux, batch, scan, scanned, state_reinit, Leaf, PSNode,
+                     Wrapper, train_step, trained, serial, nn, map_members,
+                     tree_detach)
 from nodejax.struct import Struct
 from nodejax.control import Gain
-from nodejax.transforms.learning import optimizer, opt_reinit
+from nodejax.transforms.learning import map_loss_target, optimizer, opt_reinit
 
 
 def test_train_step_convergence():
@@ -26,6 +27,131 @@ def test_train_step_convergence():
 
     assert jnp.allclose(final.state.opt.params.scale, 3.0, atol=0.01)
     assert aux.loss[-1] < 1e-3
+
+
+def test_plain_loss_receives_clean_model_output():
+    def param(weight):
+        return jnp.asarray(weight)
+
+    def apply(param, input):
+        output = param * input
+        return output, Aux(activity=output ** 2)
+
+    model = Leaf(apply, param=param, name='watched').parameterize(
+        weight=jnp.asarray(1.0)).initialize()
+    trainer = train_step(
+        model,
+        lambda output, target: (output - target) ** 2,
+        optax.sgd(0.1),
+    )
+
+    successor, (output, aux) = trainer.apply(
+        input=jnp.asarray(2.0), target=jnp.asarray(6.0))
+
+    assert output == 2.0
+    assert aux.model.activity == 4.0
+    assert aux.loss == 16.0
+    assert jnp.allclose(successor.state.opt.params, 2.6)
+
+
+def test_loss_may_declare_model_aux():
+    def param(weight):
+        return jnp.asarray(weight)
+
+    def apply(param, input):
+        output = param * input
+        return output, Aux(activity=output ** 2)
+
+    def loss(output, target, aux):
+        return (output - target) ** 2 + 0.125 * aux.activity
+
+    model = Leaf(apply, param=param, name='watched').parameterize(
+        weight=jnp.asarray(1.0)).initialize()
+    trainer = train_step(model, loss, optax.sgd(0.1))
+
+    successor, (output, aux) = trainer.apply(
+        input=jnp.asarray(2.0), target=jnp.asarray(6.0))
+
+    assert output == 2.0
+    assert aux.model.activity == 4.0
+    assert aux.loss == 16.5
+    assert jnp.allclose(successor.state.opt.params, 2.5)
+
+
+def test_aux_aware_loss_receives_empty_aux_from_plain_model():
+    def loss(output, target, *, aux):
+        assert type(aux) is Aux
+        assert not aux
+        return (output - target) ** 2
+
+    model = Gain().parameterize(scale=jnp.asarray(1.0)).initialize()
+    trainer = train_step(model, loss, optax.sgd(0.1))
+
+    successor, (_, aux) = trainer.apply(
+        input=jnp.asarray(2.0), target=jnp.asarray(6.0))
+
+    assert aux.loss == 16.0
+    assert jnp.allclose(successor.state.opt.params.scale, 2.6)
+
+
+def test_train_step_rejects_an_unbound_loss_argument():
+    def loss(output, target, coefficient):
+        return coefficient * (output - target) ** 2
+
+    model = Gain().parameterize(scale=jnp.asarray(1.0)).initialize()
+    with pytest.raises(TypeError, match=r'\(output, target\)'):
+        train_step(model, loss, optax.sgd(0.1))
+
+
+def test_map_loss_target_preserves_a_plain_fit():
+    def fit(output, target):
+        return (output - target) ** 2
+
+    loss = map_loss_target(fit, lambda data: 2.0 * data)
+
+    assert loss(5.0, 2.0) == 1.0
+
+
+def test_map_loss_target_preserves_an_aux_aware_fit():
+    def fit(output, target, *, aux):
+        return (output - target) ** 2 + aux.penalty
+
+    loss = map_loss_target(fit, lambda data: 2.0 * data)
+
+    assert loss(5.0, 2.0, aux=Aux(penalty=3.0)) == 4.0
+
+
+def test_mapped_aux_fit_updates_every_contributing_parameter():
+    def param(values):
+        return jnp.asarray(values)
+
+    def apply(param, input):
+        population = param * input
+        return jnp.min(population), Aux(population=population)
+
+    def fit(_output, target, *, aux):
+        return jnp.mean((aux.population - target) ** 2)
+
+    model = Leaf(apply, param=param, name='population').parameterize(
+        values=jnp.asarray([1.0, 2.0, 3.0]),
+    ).initialize()
+    trainer = train_step(
+        model,
+        map_loss_target(fit, lambda data: data.value),
+        optax.sgd(0.1),
+    )
+
+    successor, (output, aux) = trainer.apply(
+        input=jnp.asarray(1.0),
+        target=Struct(value=jnp.asarray(0.0)),
+    )
+
+    assert output == 1.0
+    assert jnp.allclose(aux.model.population, jnp.asarray([1.0, 2.0, 3.0]))
+    assert jnp.allclose(
+        successor.state.opt.params,
+        jnp.asarray([0.9333333, 1.8666667, 2.8]),
+    )
 
 
 def test_train_step_rebuilds_through_its_members():

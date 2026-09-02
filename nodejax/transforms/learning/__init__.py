@@ -3,6 +3,7 @@
 from nodejax.transforms.learning.finetune import finetune
 from nodejax.transforms.learning.train_step import (
     learned_sgd,
+    map_loss_target,
     optimizer,
     opt_reinit,
     trained,
@@ -23,6 +24,7 @@ __all__ = [
     'trained',
     'optimizer',
     'learned_sgd',
+    'map_loss_target',
     'opt_reinit',
     'finetune',
     'ttt',

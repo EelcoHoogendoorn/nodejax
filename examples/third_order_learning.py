@@ -42,7 +42,6 @@ from nodejax import (
     residual,
     scanned,
     serial,
-    split_aux,
     stack,
     taps,
     tie,
@@ -96,13 +95,11 @@ def Decoder(features: int, width: int) -> Node:
 
 
 def token_loss(output: PyTree, target: jax.Array) -> jax.Array:
-    prediction, _ = split_aux(output)
-    return jnp.mean((prediction - target) ** 2)
+    return jnp.mean((output - target) ** 2)
 
 
 def sequence_loss(output: PyTree, target: jax.Array) -> jax.Array:
-    prediction, _ = split_aux(output)
-    return jnp.mean((prediction[..., 1:, :] - target[..., 1:, :]) ** 2)
+    return jnp.mean((output[..., 1:, :] - target[..., 1:, :]) ** 2)
 
 
 def predictor() -> Node:

@@ -381,6 +381,12 @@ def split_aux(output: Output) -> tuple[Output, Any]:
     return output, None
 
 
+def drop_aux(output: Output) -> Output:
+    """Discard Aux from a concrete runtime output."""
+    clean, _ = split_aux(output)
+    return clean
+
+
 def _freeze_mapping(values: Mapping) -> frozendict:
     """Freeze a nested mapping after local assembly."""
     return frozendict({

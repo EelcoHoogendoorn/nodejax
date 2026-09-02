@@ -22,7 +22,6 @@ from nodejax import (
     batch,
     finetune,
     scanned,
-    split_aux,
     supervised_ttt,
     train_step,
 )
@@ -51,8 +50,7 @@ def quartic(output: jax.Array, target: jax.Array) -> jax.Array:
 
 
 def terminal_quadratic(output: PyTree, target: jax.Array) -> jax.Array:
-    prediction, _ = split_aux(output)
-    return 0.5 * (prediction[-1] - target) ** 2
+    return 0.5 * (output[-1] - target) ** 2
 
 
 def third_order_learner() -> Node:

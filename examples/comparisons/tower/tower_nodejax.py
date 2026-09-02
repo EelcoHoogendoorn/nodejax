@@ -34,7 +34,7 @@ import jax.numpy as jnp
 import optax
 
 from nodejax import (Node, node, Leaf, stack, residual, ensemble, reduce, scanned,
-                     trained, batch, train_step, finetune, split_aux)
+                     trained, batch, train_step, finetune)
 from nodejax.struct import Struct
 from examples.comparisons.tower.tower_common import (
     HIDDEN, LAYERS, MEMBERS, INNER_LR, OUTER_LR, META_STEPS, MOMENTUM,
@@ -91,9 +91,8 @@ def Readout(hidden: int) -> Node:
 
 
 def mse(out: jax.Array, target: jax.Array) -> jax.Array:
-    """Scores the mean; the sown population passes through the split."""
-    pred, _ = split_aux(out)
-    return jnp.mean((pred - target) ** 2)
+    """Score the committee's clean mean output."""
+    return jnp.mean((out - target) ** 2)
 
 
 def tower() -> Node:

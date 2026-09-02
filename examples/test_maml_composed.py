@@ -28,7 +28,7 @@ import jax.numpy as jnp
 import optax
 
 from nodejax import (
-    node, batch, train_step, trained, Wrapper, PNode, PSNode, split_aux,
+    node, batch, train_step, trained, Wrapper, PNode, PSNode,
 )
 from nodejax.struct import Struct
 from nodejax.control import Gain
@@ -36,11 +36,8 @@ from nodejax import tile
 
 
 def mse(pred: jax.Array, target: jax.Array) -> jax.Array:
-    # the aux stream arrives IN the loss, which is how an auxiliary head
-    # contributes to an objective. This one has nothing to say about the
-    # inner run's loss trace, so it takes the clean output and drops it
-    clean, _ = split_aux(pred)
-    return jnp.mean((clean - target) ** 2)
+    """Score the clean query output, excluding inner training telemetry."""
+    return jnp.mean((pred - target) ** 2)
 
 
 @node

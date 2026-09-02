@@ -69,10 +69,9 @@ def sequence_nll(out: jax.Array, target: jax.Array) -> jax.Array:
 def query_xent(out: jax.Array, target: jax.Array) -> jax.Array:
     """The shared meta-objective: mean next-token cross-entropy over the
     query region. The adapting cell reports its own loss on the aux
-    channel; this objective scores the query window and nothing else.
+    output; this objective scores the clean query window and nothing else.
     The first position is the register's primed pair and lies deep in
     the support region, so the slice never sees it."""
-    out, _ = split_aux(out)
     return jnp.mean(sequence_nll(out, target)[..., QUERY0:])
 
 

@@ -243,8 +243,8 @@ def test_recording_does_not_change_what_the_node_is():
     assert jnp.allclose(recorded, outs)                  # the output is untouched
     assert jnp.allclose(aux.state, jnp.array([1.0, 2.0, 3.0, 4.0]))
 
-    # and the trace comes back off, leaving exactly the unrecorded node
-    assert jnp.allclose(drop_aux(scanned(Accum(), record=True)).parameterize().apply(xs),
+    # and dropping the aux from runtime output leaves exactly the unrecorded output
+    assert jnp.allclose(drop_aux(scanned(Accum(), record=True).parameterize().apply(xs)),
                         outs)
 
 

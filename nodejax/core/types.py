@@ -19,6 +19,6 @@ Output = PyTree
 ParamFn = Callable[..., Param]                            # (*args, **kwargs) -> param
 InitFn = Callable[..., State]                             # (param, *args, **kwargs) -> state
 ApplyFn = Callable[[Param, State, Input], tuple[State, Output]]
-LossFn = Callable[[Output, PyTree], jax.Array]            # (output, target) -> scalar loss
+LossFn = Callable[..., jax.Array]                         # (output, target[, aux]) -> loss
 
 StaticTree = dict[str, Any]  # nested static kwargs, keyed by pipe member name

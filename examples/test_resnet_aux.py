@@ -62,10 +62,9 @@ def test_stacked_resnet_training_with_aux_loss():
     dim = 4
     model_def = StackedResNet(dim=dim, depth=depth)
 
-    def loss_fn(output, target):
-        pred, aux = output
+    def loss_fn(output, target, *, aux):
         total_act_penalty = jnp.sum(aux.act_l2)
-        return mse(pred, target) + 0.01 * total_act_penalty
+        return mse(output, target) + 0.01 * total_act_penalty
 
     # the trainer takes the model FULLY BOUND, and trained() is the run
     trainer = train_step(

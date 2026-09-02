@@ -82,14 +82,12 @@ def test_aux_stacks_under_scan():
 
 
 def test_aux_loss_in_training():
-    """The sow-a-regularizer use case: the loss destructures the pair, and
-    the trained weight lands at the analytic compromise."""
+    """An aux-aware loss reaches the expected analytic compromise."""
     model = Watched()   # y = w*x, aux.activity = y^2
     lam = 0.125
 
-    def loss(output, target):
-        y, aux = output
-        return mse(y, target) + lam * aux.activity
+    def loss(output, target, *, aux):
+        return mse(output, target) + lam * aux.activity
 
     trainer = train_step(model.parameterize(w=jnp.asarray(0.0)).initialize(),
                          loss, optax.adam(0.05))

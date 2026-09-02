@@ -38,11 +38,10 @@ closure.
 import jax
 import jax.numpy as jnp
 import optax
-from nodejax.core.binding import (split_aux)
 from nodejax.transforms.learning import learned_sgd
 from nodejax import (
-    Leaf, Node, batch, closed_loop, ensemble, nn, node, reduce, residual,
-    scanned, stack, train_step, trained,
+    Leaf, Node, batch, closed_loop, drop_aux, ensemble, nn, node, reduce,
+    residual, scanned, stack, train_step, trained,
 )
 from nodejax.struct import Struct
 
@@ -99,11 +98,8 @@ def build() -> Node:
     return loop, rollout
 
 
-def tracking_loss(pred: jax.Array, target: jax.Array):
-    # a loss receives what the model emitted, aux included -> jax.Array: a gradient cell
-    # inside the pipe reports its own loss on that channel, and this
-    # objective has nothing to say about it
-    pred, _ = split_aux(pred)
+def tracking_loss(pred: jax.Array, target: jax.Array) -> jax.Array:
+    """Score the clean velocity trajectory."""
     return jnp.mean((pred - target) ** 2)
 
 
@@ -181,7 +177,8 @@ def test_closed_loop_training():
     # generalization: an unseen setpoint, trained vs untrained params
     def track_mse(params, setpoint):
         ref = setpoint * jnp.ones((T, 1))
-        return tracking_loss(rollout.apply(params, ref), ref[..., 0])
+        return tracking_loss(
+            drop_aux(rollout.apply(params, ref)), ref[..., 0])
 
     assert track_mse(final.param, 0.8) < 0.5 * track_mse(model.param, 0.8)
 

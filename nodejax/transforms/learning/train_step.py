@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import inspect
+from typing import TYPE_CHECKING, Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -107,9 +108,44 @@ def _require_train_step(step: Any, who: str) -> Node:
     return node
 
 
+def _loss_takes_aux(loss_fn: LossFn) -> bool:
+    """Whether a loss explicitly declares the model's Aux."""
+    try:
+        signature = inspect.signature(loss_fn)
+    except (TypeError, ValueError) as error:
+        raise TypeError(
+            f'train_step loss {loss_fn!r} must have an inspectable signature'
+        ) from error
+    takes_aux = 'aux' in signature.parameters
+    keyword = {'aux': object()} if takes_aux else {}
+    try:
+        signature.bind(object(), object(), **keyword)
+    except TypeError as error:
+        raise TypeError(
+            f'train_step loss {signature} must accept (output, target) or '
+            "accept those arguments plus an 'aux' keyword") from error
+    return takes_aux
+
+
+def map_loss_target(
+    loss_fn: LossFn,
+    target_fn: Callable[[Any], Any],
+) -> LossFn:
+    """Map loss data to a target while preserving explicit Aux opt-in."""
+    if _loss_takes_aux(loss_fn):
+        def loss(output, data, *, aux):
+            return loss_fn(output, target_fn(data), aux=aux)
+    else:
+        def loss(output, data):
+            return loss_fn(output, target_fn(data))
+    return loss
+
+
 @node
 def _build_train_step(model: Node, loss_fn: LossFn, opt: Node) -> Node:
     """Build the stateful ``train_step`` node over ``model`` and ``opt``."""
+    loss_takes_aux = _loss_takes_aux(loss_fn)
+
     def apply_fn(contract, param, state, input, rng):
         current_model = contract.members.model
         current_opt = contract.members.opt
@@ -121,7 +157,12 @@ def _build_train_step(model: Node, loss_fn: LossFn, opt: Node) -> Node:
         def loss_wrapper(weights):
             model_state, output = current_model.apply(
                 weights, state.model, model_input, model_rng)
-            return loss_fn(output, input.target), Struct(
+            clean, model_aux = split_aux(output)
+            loss_aux = Aux() if model_aux is None else model_aux
+            loss = (loss_fn(clean, input.target, aux=loss_aux)
+                    if loss_takes_aux else
+                    loss_fn(clean, input.target))
+            return loss, Struct(
                 state=model_state, output=output)
 
         (loss, model_call), grads = jax.value_and_grad(
@@ -206,7 +247,12 @@ def _build_train_step(model: Node, loss_fn: LossFn, opt: Node) -> Node:
 @node
 def train_step(model: BaseNode, loss_fn: LossFn,
                tx: optax.GradientTransformation) -> BaseNode:
-    """Internalize one optimizer update per call while preserving the rung."""
+    """Internalize one optimizer update per call while preserving bindings.
+
+    The loss receives clean ``output`` and ``target``. A loss that declares
+    ``aux`` also receives the model's Aux, or an empty ``Aux()`` when the
+    model emitted none.
+    """
     if not _is_node(model):
         raise TypeError(
             'train_step takes a Node, PNode, or PSNode; '
