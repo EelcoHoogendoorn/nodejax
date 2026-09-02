@@ -107,10 +107,10 @@ def PlanningStarts(
             initial_state=tree_broadcast_axis(
                 starts,
                 n_steps_per_iteration,
-                axis=1,
+                axis=2,
             ),
             disturbance=jnp.zeros(
-                (n_iterations, n_steps_per_iteration, n_worlds)),
+                (n_iterations, n_worlds, n_steps_per_iteration)),
         )
 
     return Leaf(apply)
@@ -252,12 +252,12 @@ def evaluate_receding(trajectory: Struct) -> Struct:
     """Summarize the reference starts without changing the plot sample."""
     references = tree_len(downward_starts())
     tail = jax.tree.map(
-        lambda value: value[-50:, :references],
+        lambda value: value[:references, -50:],
         trajectory.state,
     )
     upright = (jnp.abs(tail.angle) < 0.2) & (jnp.abs(tail.velocity) < 0.5)
     result = Struct(
-        cost=jnp.mean(jnp.sum(trajectory.cost[:, :references], axis=0)),
+        cost=jnp.mean(jnp.sum(trajectory.cost[:references], axis=1)),
         final_angle=jnp.max(jnp.abs(
             trajectory.final_state.angle[:references])),
         final_velocity=jnp.max(jnp.abs(

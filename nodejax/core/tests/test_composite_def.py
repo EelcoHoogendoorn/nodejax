@@ -846,24 +846,28 @@ def test_authored_init_accepts_an_empty_slot_for_a_stateless_member():
     assert held.state.register == 6.0
 
 
-def test_wrapper_init_over_a_stateless_member_is_vacuous():
+def test_wrapper_init_over_a_stateless_member_keeps_its_state_input():
     """An adopt-this-field init may be declared unconditionally: over a
-    stateless member the declaration is vacuous, because the empty state
-    is the only state such a subtree has. Callers therefore never fork on
-    the member's lifecycle."""
+    stateless member the state it adopts is the empty slot, but its
+    state-input field stays part of the call form, so callers never fork
+    on the member's lifecycle."""
     def Double() -> Node:
         return Leaf(lambda input: 2.0 * input, name='double').node
 
-    def apply(self, input, initial):
+    def apply(self, input):
         return self.double(input)
 
-    def init(input):
-        return input.initial
+    def init(param, initial):
+        return initial
 
     adopted = Wrapper(double=Double())(apply, init=init).parameterize()
 
-    assert not adopted.cyclic
-    assert adopted.apply(3.0, initial=()) == 6.0
+    assert adopted.cyclic
+    started = adopted.initialize(initial=())
+    assert started.state == ()
+    started, output = started.apply(3.0)
+    assert output == 6.0
+    assert started.state == ()
 
 
 def test_authored_self_names_a_parameterless_member_as_empty():

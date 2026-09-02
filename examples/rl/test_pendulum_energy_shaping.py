@@ -14,7 +14,7 @@ the plant is the same stateful Node used by SHAC and PPO, and ``scanned`` plus
 import jax
 import jax.numpy as jnp
 
-from nodejax import Leaf, Node, PNode, Struct, batch, node, scanned, tile, tree_last
+from nodejax import Leaf, Node, PNode, Struct, batch, node, scanned, tree_broadcast_axis, tree_last
 from examples.rl.control import ControlledStep
 from examples.rl.pendulum import (
     Pendulum,
@@ -77,7 +77,7 @@ def PendulumEnergyController(
 def energy_shaping_program(worlds: int) -> PNode:
     """Build fresh parallel rollouts of the analytic controller."""
     world = ControlledStep(PendulumEnergyController(), Pendulum())
-    return scanned(batch(world, n=worlds))
+    return batch(scanned(world), n=worlds)
 
 
 def energy_trajectory(
@@ -87,8 +87,8 @@ def energy_trajectory(
     """Run deterministic closed-loop trajectories from supplied states."""
     worlds = initial_state.angle.shape[0]
     input = Struct(
-        disturbance=jnp.zeros((steps, worlds)),
-        initial_state=tile(initial_state, steps),
+        disturbance=jnp.zeros((worlds, steps)),
+        initial_state=tree_broadcast_axis(initial_state, steps, axis=1),
     )
     return jax.jit(energy_shaping_program(worlds).apply)(bundle=input)
 
@@ -160,8 +160,8 @@ def test_energy_shaping_swings_up_from_every_downward_start() -> None:
         trajectory,
         replay,
     ))
-    assert jnp.max(jnp.abs(trajectory.next_state.angle[-50:])) < 1e-3
-    assert jnp.max(jnp.abs(trajectory.next_state.velocity[-50:])) < 1e-3
+    assert jnp.max(jnp.abs(trajectory.next_state.angle[:, -50:])) < 1e-3
+    assert jnp.max(jnp.abs(trajectory.next_state.velocity[:, -50:])) < 1e-3
 
 
 if __name__ == '__main__':

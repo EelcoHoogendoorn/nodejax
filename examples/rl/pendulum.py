@@ -195,7 +195,7 @@ def PendulumTrainingData(
                 velocity=VELOCITY_SCALE * (2.0 * sample[1] - 1.0),
             ),
             disturbance=jnp.zeros(
-                (iterations, n_chunks, n_steps_per_chunk, n_worlds),
+                (iterations, n_chunks, n_worlds, n_steps_per_chunk),
             ),
         )
 
@@ -213,9 +213,9 @@ def pendulum_evaluation(
         policy,
         plant,
         starts,
-        jnp.zeros((steps, tree_len(starts))),
+        jnp.zeros((tree_len(starts), steps)),
     )
-    final = tree_last(trajectory.state)
+    final = tree_last(trajectory.state, axis=1)
     return Struct(
         mean_cost=jnp.mean(trajectory.cost),
         final_angle=jnp.max(jnp.abs(final.angle)),
@@ -330,7 +330,8 @@ def overlay_trajectories(
     alpha: float = 1.0,
     mark_starts: bool = True,
 ) -> None:
-    """Overlay closed-loop rollouts, splitting at the angle wrap."""
+    """Overlay closed-loop rollouts shaped (world, time), splitting at the
+    angle wrap."""
     import matplotlib.pyplot as plt
     import numpy as np
     from matplotlib.collections import LineCollection
@@ -339,11 +340,11 @@ def overlay_trajectories(
         (np.asarray(state.angle), np.asarray(state.velocity)),
         axis=-1,
     )
-    worlds = states.shape[1]
+    worlds = states.shape[0]
     if colors is None:
         colors = plt.cm.viridis(np.linspace(0.05, 0.95, worlds))
     for index in range(worlds):
-        points = states[:, index]
+        points = states[index]
         segments = [
             (points[step], points[step + 1])
             for step in range(points.shape[0] - 1)
@@ -357,8 +358,8 @@ def overlay_trajectories(
         ))
     if mark_starts:
         axis.scatter(
-            states[0, :, 0],
-            states[0, :, 1],
+            states[:, 0, 0],
+            states[:, 0, 1],
             color=colors,
             s=38,
             edgecolor='white',
@@ -375,11 +376,11 @@ def overlay_phase_trajectories(axis, state: Struct) -> None:
 
     references = downward_starts().angle.shape[0]
     reference_state = jax.tree.map(
-        lambda value: value[:, :references],
+        lambda value: value[:references],
         state,
     )
     random_state = jax.tree.map(
-        lambda value: value[:, references:],
+        lambda value: value[references:],
         state,
     )
     colors = plt.cm.viridis(np.linspace(0.05, 0.95, references))
@@ -387,15 +388,15 @@ def overlay_phase_trajectories(axis, state: Struct) -> None:
     overlay_trajectories(
         axis,
         random_state,
-        (RANDOM_TRAJECTORY_COLOR,) * random_state.angle.shape[1],
+        (RANDOM_TRAJECTORY_COLOR,) * random_state.angle.shape[0],
         linewidth=0.75,
         alpha=0.52,
         mark_starts=False,
     )
-    if random_state.angle.shape[1]:
+    if random_state.angle.shape[0]:
         axis.scatter(
-            np.asarray(random_state.angle[0]),
-            np.asarray(random_state.velocity[0]),
+            np.asarray(random_state.angle[:, 0]),
+            np.asarray(random_state.velocity[:, 0]),
             facecolor='none',
             edgecolor=RANDOM_TRAJECTORY_COLOR,
             s=17,

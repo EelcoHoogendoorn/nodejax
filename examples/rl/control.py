@@ -14,8 +14,7 @@ from nodejax import (
     drop_aux,
     node,
     scanned,
-    tile,
-    tree_first,
+    tree_broadcast_axis,
     tree_last,
     tree_len,
 )
@@ -77,9 +76,7 @@ def mean_rollout_program(
 ) -> PNode:
     """Build a fresh deterministic rollout from an injected policy and plant."""
     mean_policy = policy >> ProposalMean()
-    return scanned(
-        batch(ControlledStep(mean_policy, plant), n=n_worlds)
-    ).parameterize()
+    return batch(scanned(ControlledStep(mean_policy, plant)), n=n_worlds).parameterize()
 
 
 def mean_rollout(
@@ -88,12 +85,13 @@ def mean_rollout(
     starts: Struct,
     disturbance: jax.Array,
 ) -> Struct:
-    """Run a deterministic closed loop from the given starts."""
+    """Run a deterministic closed loop from the given starts under a
+    ``disturbance`` shaped (world, time); the trajectory shares those axes."""
     n_worlds = tree_len(starts)
-    steps = tree_len(disturbance)
+    steps = disturbance.shape[1]
     input = Struct(
         disturbance=disturbance,
-        initial_state=tile(starts, steps),
+        initial_state=tree_broadcast_axis(starts, steps, axis=1),
     )
     rollout = mean_rollout_program(policy, plant, n_worlds)
     trajectory = drop_aux(rollout.apply(bundle=input))
@@ -111,27 +109,24 @@ def policy_trajectory(
     steps: int,
     rng: jax.Array,
 ) -> Struct:
-    """Evaluate from fresh state while preserving recurrent carry."""
+    """Evaluate from fresh state while preserving recurrent carry.
+
+    The trajectory is shaped (world, time), its ``state`` holding the final
+    state as one extra step."""
     n_worlds = tree_len(initial_state)
     input = Struct(
-        disturbance=jnp.zeros((steps, n_worlds)),
-        initial_state=tile(initial_state, steps),
+        disturbance=jnp.zeros((n_worlds, steps)),
+        initial_state=tree_broadcast_axis(initial_state, steps, axis=1),
     )
-    world = batch(
-        ControlledStep(policy, plant),
-        n=n_worlds,
-    ).parameterize()
-    init_key, apply_key = jax.random.split(rng)
-    rollout = (world.initialize(input=tree_first(input), rng=init_key)
-               if world.contract.init_takes_rng else
-               world.initialize(input=tree_first(input)))
-    _, trajectory = (rollout.scan(bundle=input, rng=apply_key)
-                     if rollout.contract.apply_takes_rng else
-                     rollout.scan(bundle=input))
+    rollout = batch(scanned(ControlledStep(policy, plant)), n=n_worlds).parameterize()
+    if rollout.contract.apply_takes_rng:
+        trajectory = rollout.apply(bundle=input, rng=rng)
+    else:
+        trajectory = rollout.apply(bundle=input)
     trajectory = drop_aux(trajectory)
-    final_state = tree_last(trajectory.next_state)
+    final_state = tree_last(trajectory.next_state, axis=1)
     state = jax.tree.map(
-        lambda value, final: jnp.concatenate((value, final[None]), axis=0),
+        lambda value, final: jnp.concatenate((value, final[:, None]), axis=1),
         trajectory.state,
         final_state,
     )

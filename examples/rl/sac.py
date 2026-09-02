@@ -39,10 +39,7 @@ from nodejax import (
     scanned,
     split_aux,
     tile,
-    tree_broadcast_axis,
-    tree_len,
     tree_reshape,
-    tree_swap_axes,
     tree_tail,
     train_step,
 )
@@ -55,12 +52,12 @@ from examples.rl.replay import Buffer
 def SampledCommand(policy: Node) -> Node:
     """Replay stored observations, drawing a fresh command at every step.
 
-    A recurrent chunk's starting state arrives as data: init adopts
-    ``initial`` verbatim, so replay resumes the memory observed during
-    collection; over a stateless policy the declaration is vacuous and
-    the field rides unread. It rides every step and is read once.
+    A recurrent chunk's starting state is a state input, ``initial``: init
+    adopts it verbatim, so replay resumes the memory observed during
+    collection, and a run internalized by ``scanned`` takes it once beside
+    the sequence; over a stateless policy it is the empty slot.
     """
-    def apply(self, observation, initial, rng):
+    def apply(self, observation, rng):
         proposal = self.policy(observation)
         drawn = self.policy.sample(proposal, rng=rng.next())
         return Struct(
@@ -69,8 +66,8 @@ def SampledCommand(policy: Node) -> Node:
             logprob=drawn.logprob,
         )
 
-    def init(input):
-        return input.initial
+    def init(param, initial):
+        return initial
 
     return Wrapper(policy=policy)(apply, init=init)
 
@@ -149,7 +146,8 @@ def SACUpdate(
     *,
     discount: float,  # per-step discount on the soft Bellman target
 ) -> Node:
-    """One SAC gradient update over one replayed minibatch of chunks.
+    """One SAC gradient update over one replayed minibatch of chunks, shaped
+    (chunk, time) with the recorded chunk starts shaped (chunk, ...).
 
     ``actor_trainer`` differentiates a valued replay under an externalized
     ``critic`` and returns the fresh commands and log-probabilities it
@@ -173,21 +171,18 @@ def SACUpdate(
         alpha = self.temperature_trainer.trained().value()
         critic_param = self.critic_trainer.params()
         ema_critic_param = self.ema_critic(critic_param)
-        # Chunk rows arrive row-major; replay scans time.
-        steps = tree_swap_axes(Struct(observation=observation, command=command, cost=cost), 0, 1)
-        rider = tree_broadcast_axis(initial, tree_len(steps.observation), axis=0)
         replayed = self.actor_trainer(
-            observation=steps.observation,
-            initial=rider,
+            observation=observation,
+            initial=initial,
             critic=critic_param,
             temperature=alpha,
         )
         # The Bellman target reads the same replay one step later.
         tail = tree_tail(Struct(
-            observation=steps.observation,
+            observation=observation,
             command=replayed.command,
             logprob=replayed.logprob,
-        ))
+        ), axis=1)
         future = self.target_critic(
             input=Struct(
                 observation=tail.observation,
@@ -195,9 +190,9 @@ def SACUpdate(
             ),
             critic=ema_critic_param,
         )
-        targets = steps.cost + discount * (future + alpha * tail.logprob)
-        head = jax.tree.map(lambda value: value[:-1], steps.observation)
-        self.critic_trainer(input=Struct(observation=head, command=steps.command), target=targets)
+        targets = cost + discount * (future + alpha * tail.logprob)
+        head = jax.tree.map(lambda value: value[:, :-1], observation)
+        self.critic_trainer(input=Struct(observation=head, command=command), target=targets)
         self.temperature_trainer(logprob=replayed.logprob)
         return replayed, Aux(temperature=alpha)
 
@@ -249,16 +244,16 @@ def SAC(
         # One overlap step lets a single replay pass serve both the fresh commands and the
         # shifted Bellman targets. The buffer's currency is one chunk per row: flattening the
         # (chunk, world) axes decorrelates sampling across both.
-        last = jax.tree.map(lambda value: value[:, -1:], record.next_observation)
+        last = jax.tree.map(lambda value: value[:, :, -1:], record.next_observation)
         sequence = jax.tree.map(
-            lambda head, end: jnp.concatenate((head, end), axis=1),
+            lambda head, end: jnp.concatenate((head, end), axis=2),
             record.observation,
             last,
         )
         chunks = Struct(observation=sequence, command=record.command, cost=record.cost)
-        rows = tree_reshape(tree_swap_axes(chunks, 1, 2), (-1,), axes=2)
+        rows = tree_reshape(chunks, (-1,), axes=2)
         chunk_starts = tree_reshape(
-            jax.tree.map(lambda value: value[:, 0], record.policy_state),
+            jax.tree.map(lambda value: value[:, :, 0], record.policy_state),
             (-1,),
             axes=2,
         )
@@ -316,19 +311,17 @@ def sac_learner(
         initial=memory,
     )
     sampler = externalize(
-        scanned(scan(batch(SamplingStep(policy, plant), n=n_worlds), n=n_steps_per_chunk)),
+        scanned(batch(scan(SamplingStep(policy, plant), n=n_steps_per_chunk), n=n_worlds)),
         'policy',
     )
-    replay = scanned(batch(SampledCommand(policy), n=n_chunks_per_minibatch))
+    replay = batch(scanned(SampledCommand(policy)), n=n_chunks_per_minibatch)
     minibatch_critic = batch(
-        batch(critic_model, n=n_chunks_per_minibatch),
-        n=n_steps_per_chunk,
-        axis='time',
+        batch(critic_model, n=n_steps_per_chunk, axis='time'),
+        n=n_chunks_per_minibatch,
     )
     sequence_critic = batch(
-        batch(critic_model, n=n_chunks_per_minibatch),
-        n=n_steps_per_chunk + 1,
-        axis='time',
+        batch(critic_model, n=n_steps_per_chunk + 1, axis='time'),
+        n=n_chunks_per_minibatch,
     )
     update = SACUpdate(
         actor_trainer=train_step(

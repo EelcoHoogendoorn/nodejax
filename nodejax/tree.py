@@ -17,19 +17,24 @@ def tile(tree: PyTree, n: int) -> PyTree:
     )
 
 
-def tree_first(tree: PyTree) -> PyTree:
-    """Take the first leading-axis element from every pytree leaf."""
-    return jax.tree.map(lambda leaf: leaf[0], tree)
+def _along(axis: int, index) -> tuple:
+    """A leaf index applying ``index`` along one non-negative ``axis``."""
+    return (slice(None),) * axis + (index,)
 
 
-def tree_last(tree: PyTree) -> PyTree:
-    """Take the last leading-axis element from every pytree leaf."""
-    return jax.tree.map(lambda leaf: leaf[-1], tree)
+def tree_first(tree: PyTree, axis: int = 0) -> PyTree:
+    """Take the first element along one axis of every pytree leaf."""
+    return jax.tree.map(lambda leaf: leaf[_along(axis, 0)], tree)
 
 
-def tree_tail(tree: PyTree) -> PyTree:
-    """Drop the first leading-axis element from every leaf."""
-    return jax.tree.map(lambda leaf: leaf[1:], tree)
+def tree_last(tree: PyTree, axis: int = 0) -> PyTree:
+    """Take the last element along one axis of every pytree leaf."""
+    return jax.tree.map(lambda leaf: leaf[_along(axis, -1)], tree)
+
+
+def tree_tail(tree: PyTree, axis: int = 0) -> PyTree:
+    """Drop the first element along one axis of every leaf."""
+    return jax.tree.map(lambda leaf: leaf[_along(axis, slice(1, None))], tree)
 
 
 def tree_len(tree: PyTree) -> int:

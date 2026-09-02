@@ -170,7 +170,7 @@ def plot_phase_space(
         policy,
         Pendulum(),
         starts,
-        jnp.zeros((N_EVALUATION_STEPS, tree_len(starts))),
+        jnp.zeros((tree_len(starts), N_EVALUATION_STEPS)),
     )
     figure, axis = plt.subplots(figsize=(7.2, 5.8))
     phase_portrait(axis, phase_grid())

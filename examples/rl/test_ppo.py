@@ -10,7 +10,6 @@ from nodejax import (
     drop_aux,
     scan,
     scanned,
-    tree_broadcast_axis,
     tree_first,
 )
 from nodejax import nn
@@ -31,7 +30,7 @@ def test_replay_reproduces_the_rollout() -> None:
     policy = pendulum_policy(nn.GRU(MEMORY))
     plant = Pendulum()
     sampler = scanned(
-        scan(batch(SamplingStep(policy, plant), n=N_WORLDS), n=N_STEPS_PER_CHUNK),
+        batch(scan(SamplingStep(policy, plant), n=N_STEPS_PER_CHUNK), n=N_WORLDS),
     )
     observation = plant.initialize().observe()
     weights = policy.with_input(observation).parameterize(
@@ -67,10 +66,10 @@ def test_replay_reproduces_the_rollout() -> None:
         initial_state=initial_state,
         rng=jax.random.PRNGKey(1),
     ))
-    starts = jax.tree.map(lambda value: value[:, 0], record.policy_state)
-    ends = jax.tree.map(lambda value: value[:, -1], record.policy_state)
+    starts = jax.tree.map(lambda value: value[:, :, 0], record.policy_state)
+    ends = jax.tree.map(lambda value: value[:, :, -1], record.policy_state)
     replay = batch(
-        scanned(batch(ReplayStep(policy), n=N_WORLDS)),
+        batch(scanned(ReplayStep(policy)), n=N_WORLDS),
         n=N_CHUNKS_PER_EPOCH,
     ).bind(weights)
 
@@ -78,7 +77,7 @@ def test_replay_reproduces_the_rollout() -> None:
         bundle = Struct(
             observation=record.observation,
             command=record.command,
-            initial=tree_broadcast_axis(policy_state, N_STEPS_PER_CHUNK, axis=1),
+            initial=policy_state,
         )
         return drop_aux(replay.apply(bundle=bundle)).logprob
 

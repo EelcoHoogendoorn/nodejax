@@ -82,7 +82,7 @@ def PendulumTrainingData(
     def apply(rng):
         disturbance = disturbance_scale * jax.random.normal(
             rng.next(),
-            (n_episodes, n_chunks_per_episode, n_steps_per_chunk, n_worlds),
+            (n_episodes, n_chunks_per_episode, n_worlds, n_steps_per_chunk),
         )
         initial = Struct(
             angle=jax.random.uniform(
@@ -102,9 +102,9 @@ def PendulumTrainingData(
         # duplicated initial state.
         initial_state = jax.tree.map(
             lambda value: jnp.broadcast_to(
-                value[:, None, None],
-                (n_episodes, n_chunks_per_episode, n_steps_per_chunk)
-                + value.shape[1:],
+                value[:, None, :, None],
+                (n_episodes, n_chunks_per_episode, n_worlds, n_steps_per_chunk)
+                + value.shape[2:],
             ),
             initial,
         )
@@ -201,7 +201,7 @@ def pendulum_evaluation(
 ) -> Struct:
     trajectory = control.policy_trajectory(policy, plant, starts, steps, rng)
     return Struct(
-        cost=jnp.mean(jnp.sum(trajectory.cost, axis=0)),
+        cost=jnp.mean(jnp.sum(trajectory.cost, axis=1)),
         final_angle=jnp.max(jnp.abs(trajectory.final_state.angle)),
         final_velocity=jnp.max(jnp.abs(trajectory.final_state.velocity)),
         max_torque=jnp.max(jnp.abs(trajectory.action)),
@@ -243,15 +243,15 @@ def plot_phase_space(
 
     references = tree_len(downward_starts())
     reference_state = jax.tree.map(
-        lambda value: value[:, :references],
+        lambda value: value[:references],
         trajectory.state,
     )
     random_state = jax.tree.map(
-        lambda value: value[:, references:],
+        lambda value: value[references:],
         trajectory.state,
     )
     cyan_references = ('cyan',) * references
-    cyan_random = ('cyan',) * random_state.angle.shape[1]
+    cyan_random = ('cyan',) * random_state.angle.shape[0]
     overlay_phase_trajectories(axis, trajectory.state)
     overlay_trajectories(
         cost_axis,

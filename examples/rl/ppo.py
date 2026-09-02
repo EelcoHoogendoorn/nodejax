@@ -25,10 +25,10 @@ being the ambient scope, so no divisibility constraints exist and
 ``n_chunks_per_epoch = n_minibatches_per_epoch * n_chunks_per_minibatch``
 is also the number of chunks collected.
 
-Rollout records are shaped (n_chunks_per_epoch, n_steps_per_chunk, n_worlds, ...);
+Rollout records are shaped (n_chunks_per_epoch, n_worlds, n_steps_per_chunk, ...);
 gathered update tensors are (n_epochs, n_minibatches_per_epoch,
-n_chunks_per_minibatch, n_steps_per_chunk, n_worlds, ...), replayed
-time-major within each chunk after one axis move.
+n_chunks_per_minibatch, n_worlds, n_steps_per_chunk, ...), each chunk
+replayed from its recorded start.
 """
 
 import jax
@@ -49,30 +49,31 @@ from nodejax import (
     scan,
     scanned,
     split_aux,
-    tree_broadcast_axis,
     tree_take,
     train_step,
 )
 from examples.rl.control import SamplingStep
+from examples.rl.losses import discounted_backward_sum
 
 
 @node
 def ReplayStep(policy: Node) -> Node:
     """Re-evaluate one stored transition under the current parameters.
 
-    A recurrent chunk's starting state arrives as data. Prime adopts
-    ``initial`` verbatim so replay resumes from the memory observed during
-    collection. The field rides every step of the chunk and is read once.
+    A recurrent chunk's starting state is a state input, ``initial``: init
+    adopts it verbatim, so replay resumes from the memory observed during
+    collection, and a run internalized by ``scanned`` takes it once beside
+    the sequence.
     """
-    def apply(self, observation, command, initial):
+    def apply(self, observation, command):
         proposal = self.policy(observation)
         return Struct(
             logprob=self.policy.logprob(proposal, command),
             entropy=self.policy.entropy(proposal),
         )
 
-    def init(input):
-        return input.initial
+    def init(param, initial):
+        return initial
 
     return Wrapper(policy=policy)(apply, init=init)
 
@@ -88,11 +89,7 @@ def clipped_surrogate(
     The approximate KL to the recorded policy, the fraction of clipped
     ratios, and the mean entropy ride on aux.
     """
-    def apply(
-        output: Struct,
-        old_logprob: jax.Array,
-        advantage: jax.Array,
-    ) -> tuple[jax.Array, Aux]:
+    def apply(output: Struct, old_logprob, advantage):
         log_ratio = output.logprob - old_logprob
         ratio = jnp.exp(log_ratio)
         clipped = jnp.clip(ratio, 1.0 - clip, 1.0 + clip)
@@ -115,24 +112,21 @@ def advantage_estimates(
     discount: float,
     trace: float,
 ) -> tuple[jax.Array, jax.Array]:
-    """Generalized advantage estimation over chunk-major rollout data.
+    """Generalized advantage estimation over rollout data shaped (chunk, world, time).
 
     ``next_values`` values each step's next observation, so the recursion
     runs across chunk boundaries as one contiguous run per world.
     Advantages come back normalized for the clipped surrogate; returns
     stay in cost units, being the critic's regression target."""
-    shape = rewards.shape
-    flat = (shape[0] * shape[1],) + shape[2:]
-    deltas = (rewards + discount * next_values - values).reshape(flat)
+    def chunk(carry, deltas):
+        advantages = discounted_backward_sum(deltas, discount * trace, carry)
+        return advantages[:, 0], advantages
 
-    def step(carry, delta):
-        estimate = delta + discount * trace * carry
-        return estimate, estimate
-
-    advantages = jax.lax.scan(step, jnp.zeros(flat[1:]), deltas, reverse=True)[1]
-    returns = advantages.reshape(shape) + values
+    deltas = rewards + discount * next_values - values
+    advantages = jax.lax.scan(chunk, jnp.zeros(deltas.shape[1]), deltas, reverse=True)[1]
+    returns = advantages + values
     advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-8)
-    return advantages.reshape(shape), returns
+    return advantages, returns
 
 
 def shuffled_minibatches(
@@ -147,23 +141,24 @@ def shuffled_minibatches(
     """The actor trainer's bundle: one random order of all chunks per epoch,
     cut into minibatches, with each chunk replayed from its recorded start.
 
-    ``record`` is a rollout shaped (chunk, time, world, ...); the result holds
+    ``record`` is a rollout shaped (chunk, world, time, ...); the result holds
     the replay's three inputs beside its old log-probability and advantage, shaped
-    (epoch, minibatch, chunk, time, world, ...).
+    (epoch, minibatch, chunk, world, time, ...), the recorded chunk starts
+    shaped (epoch, minibatch, chunk, world, ...).
     """
-    n_chunks, n_steps_per_chunk = record.cost.shape[:2]
+    n_chunks = record.cost.shape[0]
     order = jax.random.permutation(
         key,
         jnp.broadcast_to(jnp.arange(n_chunks), (n_epochs, n_chunks)),
         axis=1,
         independent=True,
     ).reshape(n_epochs, n_minibatches_per_epoch, n_chunks_per_minibatch)
-    chunk_starts = jax.tree.map(lambda value: value[:, 0], record.policy_state)
+    chunk_starts = jax.tree.map(lambda value: value[:, :, 0], record.policy_state)
     rows = tree_take(record.replace(advantage=advantages, policy_state=chunk_starts), order)
     return Struct(
         observation=rows.observation,
         command=rows.command,
-        initial=tree_broadcast_axis(rows.policy_state, n_steps_per_chunk, axis=3),
+        initial=rows.policy_state,
         old_logprob=rows.logprob,
         advantage=rows.advantage,
     )
@@ -261,14 +256,14 @@ def ppo_learner(
     value_model = value.model.with_input(observation)
 
     sampler = externalize(
-        scanned(scan(batch(SamplingStep(policy, plant), n=n_worlds), n=n_steps_per_chunk)),
+        scanned(batch(scan(SamplingStep(policy, plant), n=n_steps_per_chunk), n=n_worlds)),
         'policy',
     )
     # Every optimizer call starts each selected chunk from recorded state. No
     # replay memory survives into the next minibatch or epoch.
-    replay = batch(scanned(batch(ReplayStep(policy), n=n_worlds)), n=n_chunks_per_minibatch)
+    replay = batch(batch(scanned(ReplayStep(policy)), n=n_worlds), n=n_chunks_per_minibatch)
     trajectory_value = batch(
-        batch(batch(value_model, n=n_worlds), n=n_steps_per_chunk, axis='time'),
+        batch(batch(value_model, n=n_steps_per_chunk, axis='time'), n=n_worlds),
         n=n_chunks_per_epoch,
         axis='chunk',
     )

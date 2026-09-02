@@ -76,7 +76,7 @@ def angle_only_swing_up() -> None:
         result.policy,
         Pendulum(),
         plotted_starts,
-        jnp.zeros((N_EVALUATION_STEPS, tree_len(plotted_starts))),
+        jnp.zeros((tree_len(plotted_starts), N_EVALUATION_STEPS)),
     )
     overlay_phase_trajectories(axis, plotted_rollouts.state)
     axis.set_title('angle-only recurrent PPO: real rollouts from sampled starts')

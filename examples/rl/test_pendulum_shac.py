@@ -10,7 +10,7 @@ from nodejax import (
     scan,
     split_aux,
     state_reinit,
-    tile,
+    tree_broadcast_axis,
 )
 from nodejax import nn
 from examples.rl.pendulum import (
@@ -99,8 +99,8 @@ def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
         velocity=jnp.asarray((-0.2, 0.3)),
     )
     input = Struct(
-        disturbance=jnp.zeros((n_steps_per_chunk, n_worlds)),
-        initial_state=tile(initial, n_steps_per_chunk),
+        disturbance=jnp.zeros((n_worlds, n_steps_per_chunk)),
+        initial_state=tree_broadcast_axis(initial, n_steps_per_chunk, axis=1),
     )
 
     policies = (

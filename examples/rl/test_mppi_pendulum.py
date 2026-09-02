@@ -34,21 +34,18 @@ def open_loop_trajectory(
     starts: Struct,
     plant: BaseNode,
 ) -> Struct:
-    """Roll out one world-major control plan from each matching start.
+    """Roll out one control plan per world from each matching start.
 
     ``controls`` has shape ``[world, time]`` and every leaf in ``starts`` has
-    leading shape ``[world]``. The rollout is ``scanned(batch(step))``, so its
-    sequence input is time-major: scan consumes the first axis and batch
-    consumes the second. The starts are the step's state input, given once.
-    Pendulum has no disturbance in this check, but its step contract still
-    requires the field.
+    leading shape ``[world]``. The rollout is ``batch(scanned(step))``: batch
+    consumes the world axis and scan the time axis. The starts are the
+    step's state input, given once. Pendulum has no disturbance in this
+    check, but its step contract still requires the field.
     """
-    n_worlds = tree_len(starts)
-    n_steps = controls.shape[1]
-    rollout = scanned(batch(OpenLoopStep(plant), n=n_worlds)).parameterize()
+    rollout = batch(scanned(OpenLoopStep(plant)), n=tree_len(starts)).parameterize()
     return drop_aux(rollout.apply(
-        command=jnp.swapaxes(controls, 0, 1),
-        disturbance=jnp.zeros((n_steps, n_worlds)),
+        command=controls,
+        disturbance=jnp.zeros_like(controls),
         initial_state=starts,
     ))
 
@@ -77,9 +74,7 @@ def test_gaussian_refinement_improves_the_plan() -> None:
         return jnp.zeros_like(terminal_state.angle)
 
     zero_value = Leaf(zero_terminal_value, name='zero_terminal_value')
-    open_loop_rollouts = scanned(
-        batch(OpenLoopStep(plant), n=n_candidates + 1),
-    )
+    open_loop_rollouts = batch(scanned(OpenLoopStep(plant)), n=n_candidates + 1)
     refinement = MPPIStep(
         proposal=proposal,
         rollouts=CandidateRollouts(open_loop_rollouts),

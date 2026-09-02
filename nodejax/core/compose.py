@@ -698,11 +698,10 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
             apply, drop=('self',)):
         raise TypeError('rng_from requires an rng parameter')
     child = operand._def
-    # Over a stateless member a declared init is vacuous: the empty state is
-    # the only state such a subtree has, so the declaration drops and
-    # callers need not fork on the member's lifecycle.
-    declared_init = (None if init is None or child.calls.init is None
-                     else _transparent_init(init, member))
+    # A declared init stays over a stateless member: its state is the empty
+    # slot either way, but its state-input fields are part of the wrapper's
+    # call form, so callers need not fork on the member's lifecycle.
+    declared_init = None if init is None else _transparent_init(init, member)
     inner = composite(
         apply, members={member: operand}, init=declared_init,
         apply_input_spec=input_spec, name=name or f'wrapper({child.name})',
@@ -711,6 +710,10 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
 
     def keyed(value):
         return Struct(**{member: value})
+
+    def member_state(state):
+        """The member's slot of a keyed state; a stateless member has none."""
+        return getattr(state, member) if child.cyclic else ()
 
     calls = inner.calls
     if calls.param is not None:
@@ -729,14 +732,14 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
         formed = keyed if generated else (lambda formed_input: formed_input)
         if inner_init.requires_input:
             def init_impl(definition, param, formed_input, input, rng):
-                return getattr(inner_init.impl(
+                return member_state(inner_init.impl(
                     definition, keyed(param), formed(formed_input), input, rng,
-                ), member)
+                ))
         else:
             def init_impl(definition, param, formed_input, rng):
-                return getattr(inner_init.impl(
+                return member_state(inner_init.impl(
                     definition, keyed(param), formed(formed_input), rng,
-                ), member)
+                ))
         calls = calls.with_init(
             impl=init_impl,
             form=child.calls.init.form if generated else inner_init.form)
@@ -752,7 +755,7 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
             **(dict(member_aux.__items__) if member_aux is not None else {}),
             **entries,
         }
-        return getattr(next_state, member), (
+        return member_state(next_state), (
             (value, Aux(**flattened)) if flattened else value)
 
     def bind(replacements):

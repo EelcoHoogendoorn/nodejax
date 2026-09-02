@@ -41,7 +41,7 @@ from examples.rl.losses import bootstrapped_costs, mse, td_lambda
 def bootstrapped_cost(discount: float) -> Node:
     """SHAC's policy objective over a rollout that carries its terminal values.
 
-    ``output`` is a trajectory with ``cost`` on a leading time axis and
+    ``output`` is a trajectory with ``cost`` shaped (world, time) and
     ``terminal`` for the same worlds. No separate target enters this objective.
     """
     def apply(output: Struct) -> jax.Array:
@@ -59,8 +59,8 @@ def TerminalCritic(rollout: Node, critic: Node) -> Node:
     """Value the final states of a rollout with a critic.
 
     ``rollout`` maps a chunk input to trajectories with ``cost`` and
-    ``next_state`` on a leading time axis; ``critic`` maps a state pytree on
-    the remaining axes to a scalar per world. The output is the trajectories
+    ``next_state`` shaped (world, time); ``critic`` maps a state pytree on
+    the world axis to a scalar per world. The output is the trajectories
     with the critic's values of the last ``next_state`` added as
     ``terminal``. Externalizing ``critic`` lets a caller supply the target
     critic's parameters on every call.
@@ -69,7 +69,7 @@ def TerminalCritic(rollout: Node, critic: Node) -> Node:
 
     def apply(self, input):
         trajectories = self.rollout(bundle=input)
-        terminal = self.critic(tree_last(trajectories.next_state))
+        terminal = self.critic(tree_last(trajectories.next_state, axis=1))
         return trajectories.replace(terminal=terminal)
 
     def init(param, input):
@@ -157,14 +157,14 @@ def shac_learner(
 
     Physical and policy state carry across chunks and reset when an
     enclosing scan claims the episode. The critic is batched to the
-    rollout's world axis for terminal values and to its time axis for
+    rollout's world axis for terminal values and to both its axes for
     targets; both uses receive the EMA target parameters as data, and the
-    same time-batched critic is what the critic trainer fits.
+    same trajectory critic is what the critic trainer fits.
     """
     transition = state_reinit(ControlledStep(policy, plant), boundary='episode')
-    rollout = scan(batch(transition, n=n_worlds), n=n_steps_per_chunk)
+    rollout = batch(scan(transition, n=n_steps_per_chunk), n=n_worlds)
     terminal_critic = batch(critic, n=n_worlds)
-    trajectory_critic = batch(terminal_critic, n=n_steps_per_chunk, axis='time')
+    trajectory_critic = batch(batch(critic, n=n_steps_per_chunk, axis='time'), n=n_worlds)
     policy_trainer = train_step(
         externalize(TerminalCritic(rollout, terminal_critic), 'critic'),
         bootstrapped_cost(discount=discount),

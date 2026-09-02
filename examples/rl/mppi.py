@@ -94,7 +94,7 @@ def MPPIStep(
 
     ``proposal`` maps controls shaped ``[time]`` to candidates shaped
     ``[candidate, time]``. ``rollouts`` accepts that candidate array and one
-    initial plant state; it returns ``cost`` shaped ``[time, candidate]`` and
+    initial plant state; it returns ``cost`` shaped ``[candidate, time]`` and
     a matching ``next_state`` pytree. The rollout Node owns any environment
     inputs and axis preparation. ``critics`` maps the candidate-axis terminal
     state pytree to values shaped ``[candidate]``. The current plan is included
@@ -115,7 +115,7 @@ def MPPIStep(
             candidates=candidates,
         )
         terminals = drop_aux(
-            self.critics(tree_last(trajectories.next_state)))
+            self.critics(tree_last(trajectories.next_state, axis=1)))
         costs = bootstrapped_costs(
             trajectories.cost,
             terminals,
@@ -168,7 +168,7 @@ def MPPIUpdate(
     ``SHACUpdate`` has this same apply with a policy trainer in the sampler's
     place; the two stay separate so each example reads on its own.
     ``sampler`` accepts an ``input`` Struct containing ``initial_state`` as a
-    time-by-world pytree and ``disturbance`` shaped ``[time, world]``. It also
+    world-by-time pytree and ``disturbance`` shaped ``[world, time]``. It also
     accepts the target critic's parameter pytree through its externalized
     ``critics`` field and returns a trajectory with ``state`` and ``cost`` on
     the same axes. ``target_critic`` values that trajectory's next states,
@@ -216,19 +216,18 @@ def MPPIUpdate(
 
 @node
 def CandidateRollouts(rollouts: Node) -> Node:
-    """Adapt candidate-major scalar plans to an open-loop rollout's input.
+    """Roll one start out open loop under every candidate plan.
 
-    The wrapped Node is ``scanned(batch(OpenLoopStep))``: scan consumes time
-    and batch consumes candidates, so commands move to time-major order, the
+    The wrapped Node is ``batch(scanned(OpenLoopStep))``: batch consumes
+    candidates and scan consumes time, the order the plans arrive in. The
     one start is repeated over candidates, and the disturbance is zero at
     every step.
     """
     def apply(self, initial_state, candidates):
-        n_candidates, n_steps = candidates.shape
         return self.rollouts(
-            command=jnp.swapaxes(candidates, 0, 1),
-            disturbance=jnp.zeros((n_steps, n_candidates)),
-            initial_state=tile(initial_state, n_candidates),
+            command=candidates,
+            disturbance=jnp.zeros_like(candidates),
+            initial_state=tile(initial_state, candidates.shape[0]),
         )
 
     return Wrapper(rollouts=rollouts)(apply)
@@ -259,7 +258,7 @@ def mppi_controller(
         GaussianProposal(noise_scale=noise_scale, correlation=noise_correlation, clean=clean),
         n=n_candidates,
     )
-    rollouts = CandidateRollouts(scanned(batch(OpenLoopStep(plant), n=n_candidates + 1)))
+    rollouts = CandidateRollouts(batch(scanned(OpenLoopStep(plant)), n=n_candidates + 1))
     refinement = MPPIStep(
         proposal=proposal,
         rollouts=rollouts,
@@ -295,10 +294,10 @@ def mppi_learner(
     target critic.
     """
     sampler = externalize(
-        scanned(batch(ControlledStep(controller, plant), n=n_worlds)),
+        batch(scanned(ControlledStep(controller, plant)), n=n_worlds),
         'policy.refinements.critics',
     )
-    trajectory_critic = batch(batch(critic, n=n_worlds), n=n_steps_per_iteration, axis='time')
+    trajectory_critic = batch(batch(critic, n=n_steps_per_iteration, axis='time'), n=n_worlds)
     critic_trainer = iterated(
         train_step(trajectory_critic, mse, critic_optimizer),
         n=n_critic_updates,
