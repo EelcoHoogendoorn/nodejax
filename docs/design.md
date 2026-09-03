@@ -69,7 +69,9 @@ each tree where it contributes a value.
 
 A composite supports two authoring forms. In the routed form, the body defines
 dataflow by calling `self.member(...)`, and the invocation scope supplies each
-member's params and state. In the raw form,
+member's params and state: `self.member` is the member's bound view as of the
+read, and a call, `bind`, or `reset` through it stores its result in the
+member's slot while the view itself does not move. In the raw form,
 `(param, state, input) -> (next_state, output)`, the author operates on the
 complete member-shaped trees directly. Both forms may use ordinary JAX
 operations, but neither changes the declared member structure during

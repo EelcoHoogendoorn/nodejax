@@ -286,7 +286,14 @@ def Highway(dim: int):
     return members(apply)
 ```
 
-Inside `apply(self, ...)`, calling `self.member_name(...)` automatically slices the member's parameters and state, steps the member, and records updated state seamlessly.
+Inside `apply(self, ...)`, `self` is the composite's state, the one mutable thing in the step, and `self.member_name` is the member's bound view as of that read: it has a view's `param`, `state`, `bind`, `reset`, and `scan`, and its methods and members. Calling it runs the member from the view's state and stores the successor in the member's slot, so a later read of `self.member_name` sees the advance and repeated calls chain, while a view kept from before the call does not move. `bind(state=...)` and `reset(...)` store their state the same way and return the rebound view, which is how a run starts from state that arrives as data:
+
+```python
+def apply(self, observation, command, start):
+    return self.replay.bind(state=start)(observation=observation, command=command)
+```
+
+The one difference from a view at the harness is deliberate: there, a call returns the successor beside the output; here the successor goes into the slot, so the same line serves a cyclic and an acyclic member.
 
 ---
 
