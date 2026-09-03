@@ -87,6 +87,11 @@ class BaseNode:
         """An unbound view contributes no bindings to ``target``."""
         return target
 
+    def _internalized_state(self) -> tuple['BaseNode', Any]:
+        """The view without its state binding, and the state a run may
+        start from; an unbound view has none."""
+        return self, None
+
     def with_input(self, input_spec: Any = _UNSET, /, *,
                    bundle: Struct = _UNSET) -> 'Node':
         """Re-enter input binding and discard later runtime bindings.

@@ -129,9 +129,12 @@ call formation. `Wrapper.roles` turns those role functions into another
 complete definition.
 
 `@transform(preserves=...)` declares whether existing parameter or state
-bindings may be reattached to the result. The transform builder itself always
-works from the unbound definition, so binding-stage behavior is handled once
-instead of being repeated in every transform.
+bindings may be reattached to the result. `internalizes='state'` marks a
+transform whose result owns a run: a bound state is handed to the builder as
+the state the run starts from instead of being reattached, which is how
+`scanned` and `carried` run a state-bound step from its state. The transform
+builder itself always works from the unbound definition, so binding-stage
+behavior is handled once instead of being repeated in every transform.
 
 ## Framework-level authoring
 

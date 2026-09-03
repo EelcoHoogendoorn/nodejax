@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from nodejax.core.binding import REQUIRED, split_aux
+from nodejax.core.binding import REQUIRED, _has_rng_deep, split_aux
 from nodejax.core.contract import Contract
+from nodejax.core.definition import Captures
 from nodejax.core.node import Node
 from nodejax.core.pnode import PNode
 from nodejax.core.spec import add_axis, element_spec
+from nodejax.frozendict import frozendict
 from nodejax.struct import Struct
 from nodejax.tree import tree_first
 from nodejax.transforms.transform import bind, scan_inputs, scan_steps, transform
@@ -110,6 +112,35 @@ def _fresh_step_state(step: Contract, param, state_input, inputs, rng):
         step, param, state_input, inputs, child_rng, bundled=True)
 
 
+def _run_start(contract: Contract, param, state_input, sequence, rng):
+    """The carry an internalized run starts from: the state the run was
+    given, held as its step's capture, else fresh state from the state
+    inputs and the first sequence element."""
+    current = contract.members.step
+    captured = contract._def.captures.state
+    if 'step' in captured:
+        return contract.member_init('step', param, captured['step'], rng)
+    if not current.cyclic:
+        return ()
+    return _fresh_step_state(current, param, state_input, sequence, rng)
+
+
+def _from_state(run: Node, state) -> Node:
+    """Hold the state a run starts from as its step's capture, so it is
+    rekeyed and described like any bound member value."""
+    if state is None:
+        return run
+    definition = run._def
+    return run._with_definition(definition.copy(captures=Captures(
+        param=definition.captures.param, state=frozendict(step=state))))
+
+
+def _run_takes_rng(inner: Contract, state) -> bool:
+    if state is None:
+        return inner.init_takes_rng or inner.apply_takes_rng
+    return inner.apply_takes_rng or _has_rng_deep(state)
+
+
 def _check_claim(inner: Contract, boundary):
     """Reject a boundary name that no node in the step declares."""
     if boundary is None:
@@ -208,71 +239,72 @@ def scan(step: Node, record: bool = False,
     )
 
 
-@transform(preserves='param')
-def scanned(step: Node, record: bool = False) -> Node | PNode:
+@transform(preserves='param', internalizes='state')
+def scanned(step: Node, record: bool = False, *, state=None) -> Node | PNode:
     """Run ``step`` over a sequence with fresh state on every call.
 
-    The state is built from the step's state-input fields, which the call
-    takes beside the sequence fields, once and unbatched over time, and from
-    the first sequence element; the per-step outputs are returned and the
-    final state is discarded. ``record=True`` adds the state trajectory to
-    the auxiliary output without changing the ordinary output. An acyclic
-    step has unit state, so this is its ordinary sequence map.
+    A state-bound step runs from its bound state, which ``state`` gives
+    directly for an unbound step. Otherwise the state is built from the
+    step's state-input fields, which the call takes beside the sequence
+    fields, once and unbatched over time, and from the first sequence
+    element. The per-step outputs are returned and the final state is
+    discarded. ``record=True`` adds the state trajectory to the auxiliary
+    output without changing the ordinary output. An acyclic step has unit
+    state, so this is its ordinary sequence map.
     """
-    fields = _state_fields(step.contract)
+    fields = () if state is not None else _state_fields(step.contract)
 
     def apply_fn(contract, param, input, rng):
         current = contract.members.step
         state_input, sequence = _split_state_fields(input, fields)
-        initial = (
-            _fresh_step_state(current, param, state_input, sequence, rng)
-            if current.cyclic else ()
-        )
+        initial = _run_start(contract, param, state_input, sequence, rng)
         _, outputs = scan_steps(
             current, param, initial, sequence, rng, record=record)
         return outputs
 
-    return Wrapper(step=step).roles(
+    run = Wrapper(step=step).roles(
         name=f'scanned({step.name})',
         param=_sequence_parameterize('step', fields),
         init=False,
         apply=apply_fn,
         **_internalized_form(step.contract, fields),
-        apply_takes_rng=(step.contract.init_takes_rng
-                         or step.contract.apply_takes_rng),
+        apply_takes_rng=_run_takes_rng(step.contract, state),
     )
+    return _from_state(run, state)
 
 
-@transform(preserves='param')
-def carried(step: Node) -> Node | PNode:
+@transform(preserves='param', internalizes='state')
+def carried(step: Node, *, state=None) -> Node | PNode:
     """Run ``step`` from fresh state and return it bound to its final state.
 
-    The state is built from the step's state-input fields, which the call
-    takes beside the sequence fields, and from the first sequence element.
-    Per-step outputs are discarded. Any auxiliary values emitted by the step
-    remain available alongside the bound step, whose members and methods
-    read the final state.
+    A state-bound step runs from its bound state, which ``state`` gives
+    directly for an unbound step. Otherwise the state is built from the
+    step's state-input fields, which the call takes beside the sequence
+    fields, and from the first sequence element. Per-step outputs are
+    discarded. Any auxiliary values emitted by the step remain available
+    alongside the bound step, whose members and methods read the final
+    state.
     """
     if not step.cyclic:
         raise TypeError(f'carried requires a cyclic node, got {step!r}')
-    fields = _state_fields(step.contract)
+    fields = () if state is not None else _state_fields(step.contract)
 
     def apply_fn(contract, param, input, rng):
         current = contract.members.step
         state_input, sequence = _split_state_fields(input, fields)
-        initial = _fresh_step_state(current, param, state_input, sequence, rng)
+        initial = _run_start(contract, param, state_input, sequence, rng)
         final, outputs = scan_steps(
             current, param, initial, sequence, rng)
         _, aux = split_aux(outputs)
         done = bind(current, param, state=final)
         return done if aux is None else (done, aux)
 
-    return Wrapper(step=step).roles(
+    run = Wrapper(step=step).roles(
         name=f'carried({step.name})',
         param=_sequence_parameterize('step', fields),
         init=False,
         apply=apply_fn,
         **_internalized_form(step.contract, fields),
-        apply_takes_rng=(step.contract.init_takes_rng
-                         or step.contract.apply_takes_rng),
+        apply_takes_rng=_run_takes_rng(step.contract, state),
     )
+    return _from_state(run, state)

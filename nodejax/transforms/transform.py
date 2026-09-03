@@ -214,34 +214,42 @@ def _preserved_roles(preserves) -> tuple[str, ...]:
     return roles
 
 
-def transform(builder: Callable | None = None, *, preserves=()) -> Callable:
+def transform(builder: Callable | None = None, *, preserves=(),
+              internalizes: str | None = None) -> Callable:
     """Record a node transform and lift the bindings it preserves.
 
     ``preserves=()`` accepts only an unbound :class:`Node` because the
     transform changes parameter or state layout. ``'param'`` also accepts a
     :class:`PNode` and reattaches its parameters. ``'param,state'`` does the
-    same for a :class:`PSNode` and its state.  The decorated builder itself
-    always receives an unbound Node.
+    same for a :class:`PSNode` and its state. ``internalizes='state'`` also
+    accepts a :class:`PSNode` whose state the builder consumes instead of
+    the result carrying it: the state reaches the builder as its ``state``
+    keyword and only the parameters are reattached. The decorated builder
+    itself always receives an unbound Node.
     """
     roles = _preserved_roles(preserves)
+    if internalizes not in (None, 'state'):
+        raise TypeError("internalizes must be None or 'state'")
 
     def decorate(fn: Callable) -> Callable:
         @wraps(fn)
         def lifted(inner, *args, **kwargs):
-            def build(current):
-                product = fn(current, *args, **kwargs)
-                if not _is_node(product):
-                    raise TypeError(
-                        f"transform '{fn.__name__}' did not return a Node")
-                return product
-
             if not _is_node(inner):
                 raise TypeError('a transform expects a Node, PNode, or PSNode')
+            if internalizes == 'state':
+                inner, state = inner._internalized_state()
+                if state is not None:
+                    # The same construction as spelling the state directly.
+                    return registered(inner, *args, state=state, **kwargs)
+            product = fn(inner.node, *args, **kwargs)
+            if not _is_node(product):
+                raise TypeError(
+                    f"transform '{fn.__name__}' did not return a Node")
             return inner._transfer_bindings(
-                build(inner.node), roles, strict=True,
-                operation='this transform')
+                product, roles, strict=True, operation='this transform')
 
-        return node(lifted)
+        registered = node(lifted)
+        return registered
 
     return decorate if builder is None else decorate(builder)
 

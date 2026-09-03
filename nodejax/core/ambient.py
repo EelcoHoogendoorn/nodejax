@@ -154,6 +154,10 @@ def node(fn: Callable | None = None, *, name: str | None = None):
 
         definition = product._def
         construction = definition.construction
+        if construction is not None and construction.factory is factory:
+            # An inner call of this same factory built the product and
+            # recorded the arguments it was actually built with.
+            recorded = construction.arguments
         unnamed_wrapper = (
             definition.layout.transparent_member is not None
             and construction is not None

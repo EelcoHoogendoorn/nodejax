@@ -47,6 +47,10 @@ class PSNode(BaseNode):
             return PNode(target._def, self.param)
         return target
 
+    def _internalized_state(self) -> tuple[BaseNode, Any]:
+        """A state-bound view hands its state to a run and keeps its params."""
+        return self.pnode, self.state
+
     @property
     def pnode(self) -> PNode:
         return PNode(self._def, self.param)

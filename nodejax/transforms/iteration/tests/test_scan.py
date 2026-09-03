@@ -353,6 +353,29 @@ def test_carried_returns_the_step_bound_to_its_final_state():
     assert done.count.step.state == 6.0
 
 
+def test_internalized_runs_start_from_a_bound_state():
+    """A state-bound step is scanned from its bound state: the same run as
+    scan from that state, the state internalized and the params kept."""
+    from nodejax import PNode, carried, nn
+
+    features = 2
+    cell = (nn.GRU(4) >> nn.GRU(3)).with_input(jnp.zeros(features)).parameterize(
+        rng=jax.random.PRNGKey(0))
+    blank = cell.initialize(input=jnp.zeros(features))
+    started = blank.bind(state=jax.tree.map(jnp.ones_like, blank.state))
+    sequence = jnp.linspace(0.0, 1.0, 5 * features).reshape(5, features)
+    ended, expected = scan(started).apply(sequence)
+
+    run = scanned(started)
+    assert type(run) is PNode and not run.cyclic
+    assert jnp.allclose(run.apply(sequence), expected)
+    assert jnp.allclose(scanned(cell, state=started.state).apply(sequence), expected)
+    assert not jnp.allclose(scanned(blank).apply(sequence), expected)
+
+    done = carried(started).apply(sequence)
+    assert jax.tree.all(jax.tree.map(jnp.allclose, done.state, ended.state))
+
+
 def test_an_internalized_run_takes_the_step_state_inputs_beside_the_sequence():
     """A step declaring init(initial) is scanned from that start, given once."""
     counter = Leaf(
