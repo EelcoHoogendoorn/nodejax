@@ -1,7 +1,7 @@
 """Semantic transform families with one flat public import surface."""
 
 from nodejax.transforms.axes import batch, ensemble, reduce, unbatched
-from nodejax.transforms.iteration import (carried, iterated, repeat, scan,
+from nodejax.transforms.iteration import (carried, iterated, repeat, repeated, scan,
                                            scanned, stack)
 from nodejax.transforms.learning import (
     finetune,
@@ -23,7 +23,7 @@ from nodejax.transforms.policy import (
     tree_detach,
     tree_freeze,
 )
-from nodejax.transforms.structure import externalize, tie
+from nodejax.transforms.structure import cyclic, externalize, tie
 from nodejax.transforms.wiring import at, parallel, residual, sum_junction
 
 __all__ = [
@@ -33,6 +33,7 @@ __all__ = [
     'reduce',
     'stack',
     'repeat',
+    'repeated',
     'scan',
     'scanned',
     'carried',
@@ -53,6 +54,7 @@ __all__ = [
     'taps',
     'drop_aux',
     'tie',
+    'cyclic',
     'externalize',
     'at',
     'residual',
