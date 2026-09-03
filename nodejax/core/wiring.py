@@ -115,29 +115,6 @@ class _Member:
             self._def.contract, self._param, self._state_fn,
             _bind_call(self._def, args, fields))
 
-    def apply(self, *args, **fields):
-        return self(*args, **fields)
-
-    @property
-    def name(self) -> str:
-        return self._def.name
-
-    @property
-    def cyclic(self) -> bool:
-        return self._def.cyclic
-
-    @property
-    def parametric(self) -> bool:
-        return self._def.parametric
-
-    def describe(self) -> str:
-        """The member's listing with its parameter values, as a bound view's."""
-        from nodejax.core.pnode import PNode
-        from nodejax.core.psnode import PSNode
-        if self._def.cyclic:
-            return PSNode(self._def, self._param, self._state_fn()).describe()
-        return PNode(self._def, self._param).describe()
-
     @property
     def param(self):
         """The member's parameters in their public form."""
@@ -302,25 +279,6 @@ class _BuildingMember:
         from nodejax.core.binding import _bind_call
         return self._wired._call(
             self._name, _bind_call(self._def, args, fields))
-
-    def apply(self, *args, **fields):
-        return self(*args, **fields)
-
-    @property
-    def name(self) -> str:
-        return self._def.name
-
-    @property
-    def cyclic(self) -> bool:
-        return self._def.cyclic
-
-    @property
-    def parametric(self) -> bool:
-        return self._def.parametric
-
-    def describe(self) -> str:
-        from nodejax.core.node import Node
-        return Node(self._wired._resolved_node(self._name)).describe()
 
     @property
     def param(self):
