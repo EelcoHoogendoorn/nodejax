@@ -73,6 +73,22 @@ class BaseNode:
     def cyclic(self) -> bool:
         return self._def.cyclic
 
+    @property
+    def param_spec(self):
+        """The parameter tree as shapes, from the resolved input spec."""
+        return self.contract.param_spec
+
+    @property
+    def state_spec(self):
+        """The state tree as shapes, from the resolved input spec and the
+        parameter shapes."""
+        return self.contract.state_spec
+
+    @property
+    def output_spec(self):
+        """The apply output as shapes, from the resolved input spec."""
+        return self.contract.output_spec
+
     def _binding_items(self) -> tuple[tuple[str, Any], ...]:
         """Runtime bindings carried by this view, in ladder order."""
         return ()

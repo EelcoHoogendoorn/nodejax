@@ -35,7 +35,6 @@ from nodejax import (
     Wrapper,
     batch,
     externalize,
-    materialize,
     node,
     scan,
     scanned,
@@ -308,15 +307,11 @@ def sac_iteration(
         observation=transition.observation,
         command=transition.command,
     ))
-    memory = materialize(jax.eval_shape(
-        lambda: policy.parameterize(rng=jax.random.PRNGKey(0)).init(
-            input=transition.observation),
-    ))
     element = Struct(
         observation=tile(transition.observation, n_steps_per_chunk + 1),
         command=tile(transition.command, n_steps_per_chunk),
         cost=tile(transition.cost, n_steps_per_chunk),
-        initial=memory,
+        initial=policy.state_spec,
     )
     sampler = externalize(
         batch(

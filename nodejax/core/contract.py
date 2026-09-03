@@ -508,6 +508,15 @@ def _lower_apply(fn: Callable, source: ApplyCall) -> ApplyCall:
         impl=impl, reads_def='contract' in signature.parameters)
 
 
+def _required_field(field) -> bool:
+    """Whether a call field must be supplied: a complete field without a
+    default, or a nested form with such a field inside."""
+    from nodejax.core.binding import REQUIRED
+    if field.is_nested:
+        return any(_required_field(inner) for inner in field.content.fields)
+    return field.content is REQUIRED
+
+
 class Contract:
     """T3 contract operations projected from one complete definition."""
 
@@ -676,6 +685,90 @@ class Contract:
     def init_requires_input(self) -> bool:
         call = self._def.calls.init
         return False if call is None else call.requires_input
+
+    @property
+    def state_input_fields(self) -> tuple[str, ...]:
+        """The init's state-input fields a caller must supply."""
+        call = self._def.calls.init
+        if call is None:
+            return ()
+        return tuple(name for name, field in call.form.fields.__items__
+                     if _required_field(field))
+
+    def _resolved_input_spec(self, role: str):
+        from nodejax.core.spec import spec_of
+        spec = self.input_spec
+        if spec is None:
+            raise TypeError(
+                f'{self.name}: {role} needs a resolved input spec; bind one '
+                'with with_input')
+        return spec_of(spec)
+
+    def _probe_rng(self, takes_rng: bool, role: str) -> MaybeKeyStream:
+        """A key for a shape derivation; its values never reach anything."""
+        import jax
+        from nodejax.core.binding import _UNSET, _bind_rng
+        return _bind_rng(
+            takes_rng, jax.random.PRNGKey(0) if takes_rng else _UNSET,
+            f'{self.name}: {role}')
+
+    @property
+    def param_spec(self):
+        """The parameter tree as shapes, in its public form, derived from
+        the resolved input spec; the empty tree for a node without
+        parameters."""
+        import jax
+        if not self.parametric:
+            return ()
+        rng = self._probe_rng(self.param_takes_rng, 'param_spec')
+        return self._sparse_param(
+            jax.eval_shape(lambda: self.param(Struct(), rng)))
+
+    @property
+    def state_spec(self):
+        """The state tree as shapes, in its public form, derived from the
+        resolved input spec and the parameter shapes; the empty tree for an
+        acyclic node. An init that takes state inputs is not sized by the
+        input spec alone: initialize with them and read the state."""
+        return self.state_spec_from(self.param_spec)
+
+    def state_spec_from(self, param_spec):
+        """``state_spec`` from given parameter shapes, a bound view's own."""
+        import jax
+        if not self.cyclic:
+            return ()
+        fields = self.state_input_fields
+        if fields:
+            raise TypeError(
+                f'{self.name}: state_spec needs the state inputs {fields}; '
+                'initialize with them and read the state')
+        rng = self._probe_rng(self.init_takes_rng, 'state_spec')
+        if self.init_requires_input:
+            input_spec = self._resolved_input_spec('state_spec')
+            state = jax.eval_shape(
+                lambda param, input: self.prime(
+                    param, Struct(), self.intake(input), rng),
+                param_spec, input_spec)
+        else:
+            state = jax.eval_shape(
+                lambda param: self.init(param, Struct(), rng), param_spec)
+        return self._sparse_state(state)
+
+    @property
+    def output_spec(self):
+        """The apply output as shapes, derived from the resolved input spec
+        and the parameter and state shapes."""
+        return self.output_spec_from(self.param_spec, self.state_spec)
+
+    def output_spec_from(self, param_spec, state_spec):
+        """``output_spec`` from given parameter and state shapes, a bound
+        view's own."""
+        import jax
+        input_spec = self._resolved_input_spec('output_spec')
+        rng = self._probe_rng(self.apply_takes_rng, 'output_spec')
+        return jax.eval_shape(
+            lambda param, state, input: self.apply(param, state, input, rng)[1],
+            param_spec, state_spec, input_spec)
 
     def _resolve_def(self, input_spec, *, replace_evidence: bool = False,
                      bundled: bool = False):

@@ -51,6 +51,20 @@ class PNode(BaseNode):
     def pnode(self) -> 'PNode':
         return self
 
+    @property
+    def param_spec(self):
+        """The shapes of the parameters this view holds."""
+        from nodejax.core.spec import spec_of
+        return spec_of(self.param)
+
+    @property
+    def state_spec(self):
+        return self.contract.state_spec_from(self.param_spec)
+
+    @property
+    def output_spec(self):
+        return self.contract.output_spec_from(self.param_spec, self.state_spec)
+
     def init(self, state_input: Any = _UNSET, /, *,
              input=_UNSET, **fields):
         key = fields.pop('rng', _UNSET)

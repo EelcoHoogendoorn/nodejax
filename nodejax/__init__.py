@@ -39,7 +39,7 @@ from nodejax.core.ambient import ambient, node
 from nodejax.core.compose import serial
 from nodejax import control
 from nodejax.control import closed_loop, observed_loop
-from nodejax.core.spec import spec, spec_of, materialize, meta
+from nodejax.core.spec import spec, spec_of, materialize
 
 __all__ = [
     'Struct',
@@ -64,5 +64,5 @@ __all__ = [
     # composition
     'serial',
     # spec layer
-    'spec', 'spec_of', 'materialize', 'meta',
+    'spec', 'spec_of', 'materialize',
 ]

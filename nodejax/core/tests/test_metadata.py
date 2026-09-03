@@ -138,8 +138,8 @@ def test_param_entropy_composes_separately_from_input_specs():
     assert not det.contract.param_takes_rng
 
 
-def test_meta_is_the_complete_six_spec_surface():
-    from nodejax import meta, spec
+def test_the_six_spec_surface():
+    from nodejax import spec
     # a shaped linear leaf: IN specs are rigid; OUT specs derive by eval_shape
     def lin():
         def param(weight, bias):
@@ -148,15 +148,16 @@ def test_meta_is_the_complete_six_spec_surface():
             return input @ param.weight + param.bias
         return Leaf(apply, param=param, name='lin', apply_input_spec=spec(4))
     node = lin().parameterize(weight=jnp.ones((4, 3)), bias=jnp.zeros(3))
-    m = meta(node)
+    contract = node.contract
     # IN (what a caller supplies)
-    assert m.param_input_spec.weight is REQUIRED and m.param_input_spec.bias is REQUIRED
-    assert m.state_input_spec is None
-    assert m.apply_input_spec.input.shape == (4,)
+    assert contract.param_input_spec.weight is REQUIRED
+    assert contract.param_input_spec.bias is REQUIRED
+    assert contract.state_input_spec is None
+    assert contract.input_spec.input.shape == (4,)
     # OUT (what the node produces)
-    assert m.param_spec.weight.shape == (4, 3)
-    assert m.state_spec == ()
-    assert m.output_spec.shape == (3,)
+    assert node.param_spec.weight.shape == (4, 3)
+    assert node.state_spec == ()
+    assert node.output_spec.shape == (3,)
 
 
 def test_tree_binding_discards_captured_member_parameters():

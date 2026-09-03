@@ -9,8 +9,7 @@ import jax.numpy as jnp
 
 from nodejax.struct import Struct
 from nodejax.core.types import PyTree
-from nodejax.core.binding import AxisSpec, _UNSET, _bind_rng, _spec_resolved
-from nodejax.core.pnode import (PNode)
+from nodejax.core.binding import AxisSpec, _spec_resolved
 
 
 def spec(shape: int | tuple = (), dtype: Any = jnp.float32) -> jax.ShapeDtypeStruct:
@@ -118,56 +117,3 @@ def element_spec(spec: PyTree) -> PyTree:
             spec, is_leaf=lambda x: type(x) is AxisSpec)
     return jax.tree.map(
         lambda leaf: jax.ShapeDtypeStruct(leaf.shape[1:], leaf.dtype), spec_of(spec))
-
-
-def meta(pnode: PNode, input_spec: PyTree | None = None,
-         rng = None) -> Struct:
-    """Derive parameter, state, input, and output specs with ``eval_shape``."""
-    node = pnode.node
-    bundled = input_spec is None
-    if input_spec is None:
-        input_spec = node.contract.input_spec
-    ispec = spec_of(input_spec) if input_spec is not None else None
-    key = _UNSET if rng is None else rng
-    init_rng = _bind_rng(
-        node.contract.init_takes_rng,
-        key if node.contract.init_takes_rng else _UNSET,
-        f'{node.name}: meta init')
-    apply_rng = _bind_rng(
-        node.contract.apply_takes_rng,
-        key if node.contract.apply_takes_rng else _UNSET,
-        f'{node.name}: meta apply')
-    state_input = Struct()
-
-    if ispec is None:
-        state = jax.eval_shape(
-            lambda p: node.contract.init(p, state_input, init_rng),
-            pnode.param)
-        output = None
-    else:
-        definition = node.contract._resolve_def(
-            ispec, replace_evidence=True, bundled=bundled)
-        node = node._with_definition(definition)
-        prime_spec = (node.contract.intake(ispec)
-                      if bundled else ispec)
-
-        def initialize(param, input):
-            return node.contract.prime(param, state_input, input, init_rng)
-
-        state = jax.eval_shape(initialize, pnode.param, prime_spec)
-
-        def full(param, input, bundle):
-            initialized = initialize(param, input)
-            _, output = node.contract.apply(
-                param, initialized, bundle, apply_rng)
-            return output
-
-        output = jax.eval_shape(
-            full, pnode.param, prime_spec, node.contract.input_spec)
-
-    return Struct(name=node.name, parametric=node.parametric, cyclic=node.cyclic,
-                  param_input_spec=node.contract.param_input_spec,      # IN: what a caller supplies
-                  state_input_spec=node.contract.state_input_spec,
-                  apply_input_spec=ispec,
-                  param_spec=spec_of(pnode.param),            # OUT: what the node produces
-                  state_spec=state, output_spec=output)      # (derived by eval_shape)

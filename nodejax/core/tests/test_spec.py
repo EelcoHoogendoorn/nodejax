@@ -1,7 +1,7 @@
 """Layer 2: declare the input, derive the rest.
 
-- meta() derives param/state/output specs by eval_shape — exact through
-  matmuls, computed from the functions that actually run
+- param_spec, state_spec, and output_spec derive by eval_shape from the
+  functions that actually run, exact through matmuls, with no values
 - the input slot: init receives input=<example> and rng=<key> from
   services (initialize, composite init, scan, batch), takes what it declares
 - composite init threads the value member-to-member: input-shaped state and
@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import pytest
 
 from nodejax import (Node, Leaf, Composite, batch, scan, scanned,
-                           spec, spec_of, materialize, meta)
+                           spec, spec_of, materialize)
 from nodejax.struct import Struct
 from nodejax.control import Integrator, PD, Walker
 
@@ -48,9 +48,9 @@ def TreeEMA() -> Node:
     return Leaf(apply, param=param, init=init, name='tema')
 
 
-def test_declared_input_spec_derives_meta():
-    """Declare only the input; param/state/output derive by eval_shape —
-    including through shape-dependent ops (matmul)."""
+def test_declared_input_spec_derives_the_specs():
+    """Declare only the input; the param, state, and output specs derive by
+    eval_shape, through shape-dependent ops like a matmul."""
     def param(weight, bias):
         return Struct(weight=jnp.asarray(weight), bias=jnp.asarray(bias))
     def apply(param, input):
@@ -59,19 +59,55 @@ def test_declared_input_spec_derives_meta():
     lin = Leaf(apply, param=param, name='lin', apply_input_spec=spec(4))
     node = lin.parameterize(weight=jnp.ones((4, 3)), bias=jnp.zeros(3))
 
-    m = meta(node)
-    assert m.apply_input_spec.input.shape == (4,)
-    assert m.param_spec.weight.shape == (4, 3)
-    assert m.state_spec == ()
-    assert m.output_spec.shape == (3,)
+    assert node.param_spec.weight.shape == (4, 3)
+    assert node.state_spec == ()
+    assert node.output_spec.shape == (3,)
 
 
-def test_meta_of_cyclic_node():
-    node = Integrator().parameterize()
-    m = meta(node, input_spec=spec(()))
-    assert m.cyclic
-    assert m.state_spec.shape == ()
-    assert m.output_spec.shape == ()
+def test_specs_of_a_cyclic_node():
+    node = Integrator().with_input(spec(()))
+    assert node.state_spec.shape == ()
+    assert node.output_spec.shape == ()
+
+
+def test_state_spec_follows_the_parameter_shapes():
+    """A GRU sizes its zeros by the hidden width and its bias's dtype: the
+    state spec comes from the parameter spec, never from values."""
+    from nodejax import nn
+
+    features, hidden = 3, 4
+    gru = nn.GRU(hidden).with_input(jnp.zeros(features))
+    assert gru.state_spec.shape == (hidden,)
+    assert gru.state_spec.dtype == gru.param_spec.update_bias.dtype
+    assert gru.output_spec.shape == (hidden,)
+
+    started = gru.parameterize(rng=jax.random.PRNGKey(0)).initialize(
+        input=jnp.zeros(features))
+    assert started.state_spec.shape == (hidden,)
+    assert started.param_spec.update_weight.shape == (features + hidden, hidden)
+
+
+def test_state_spec_of_a_priming_node_comes_from_the_input_spec():
+    """A node whose init adopts its first input is sized by the input spec."""
+    from nodejax.control import Delay
+
+    delay = Delay().with_input(spec((2, 3)))
+    assert delay.state_spec.shape == (2, 3)
+    assert delay.output_spec.shape == (2, 3)
+
+
+def test_state_spec_refuses_a_declared_state_input():
+    """State inputs are not in the input spec, so their node is sized by
+    initializing with them and reading the state."""
+    counter = Leaf(
+        lambda state, input: (state + input, state),
+        init=lambda initial: initial,
+        name='counter',
+    ).with_input(spec(()))
+    with pytest.raises(TypeError, match="state inputs \\('initial',\\)"):
+        counter.state_spec
+    started = counter.parameterize().initialize(initial=jnp.ones(2))
+    assert started.state_spec.shape == (2,)
 
 
 def test_state_structure_from_input():

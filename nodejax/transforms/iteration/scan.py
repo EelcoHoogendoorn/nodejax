@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nodejax.core.binding import REQUIRED, _has_rng_deep, split_aux
+from nodejax.core.binding import _has_rng_deep, split_aux
 from nodejax.core.contract import Contract
 from nodejax.core.definition import Captures
 from nodejax.core.node import Node
@@ -29,22 +29,6 @@ def _sequence_spec(inner: Contract, n: int | None = None):
         key: add_axis(value, n, fixed=n is not None)
         for key, value in step.__items__
     })
-
-
-def _required(field) -> bool:
-    """Whether a call field must be supplied: a complete field without a
-    default, or a nested form with such a field inside."""
-    if field.is_nested:
-        return any(_required(inner) for inner in field.content.fields)
-    return field.content is REQUIRED
-
-
-def _state_fields(inner: Contract) -> tuple[str, ...]:
-    """The step's state-input fields that a caller must supply."""
-    call = inner._def.calls.init
-    if call is None:
-        return ()
-    return tuple(name for name, field in call.form.fields.__items__ if _required(field))
 
 
 def _split_state_fields(input: Struct, fields: tuple[str, ...]) -> tuple[Struct, Struct]:
@@ -252,7 +236,7 @@ def scanned(step: Node, record: bool = False, *, state=None) -> Node | PNode:
     output without changing the ordinary output. An acyclic step has unit
     state, so this is its ordinary sequence map.
     """
-    fields = () if state is not None else _state_fields(step.contract)
+    fields = () if state is not None else step.contract.state_input_fields
 
     def apply_fn(contract, param, input, rng):
         current = contract.members.step
@@ -287,7 +271,7 @@ def carried(step: Node, *, state=None) -> Node | PNode:
     """
     if not step.cyclic:
         raise TypeError(f'carried requires a cyclic node, got {step!r}')
-    fields = () if state is not None else _state_fields(step.contract)
+    fields = () if state is not None else step.contract.state_input_fields
 
     def apply_fn(contract, param, input, rng):
         current = contract.members.step

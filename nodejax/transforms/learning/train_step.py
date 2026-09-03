@@ -21,7 +21,7 @@ from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
 from nodejax.transforms.iteration.scan import (
     _fresh_step_state, _internalized_form, _sequence_parameterize,
-    _split_state_fields, _state_fields,
+    _split_state_fields,
 )
 from nodejax.transforms.transform import (
     bind, scan_steps, transform,
@@ -531,7 +531,7 @@ def trained(step: BaseNode) -> Node | PNode:
         done = bind(current, param, state=final).trained()
         return done if aux is None else (done, aux)
 
-    fields = () if starts_bound else _state_fields(step_node.contract)
+    fields = () if starts_bound else step_node.contract.state_input_fields
 
     def apply_fn(contract, param, input, rng):
         current = contract.members.step
