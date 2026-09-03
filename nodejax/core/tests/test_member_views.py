@@ -158,3 +158,17 @@ def test_binds_and_scans_survive_the_construction_walks():
     reference = nn.GRU(hidden).with_input(jnp.zeros(features)).bind(
         program.param.memory, state=start).scan(jnp.zeros((steps, features)))[1]
     assert jnp.allclose(out, reference)
+
+
+def test_a_member_view_reads_like_a_bound_view():
+    def apply(self, input):
+        view = self.count
+        listing = view.describe()
+        out = view.apply(input)
+        return Struct(name=view.name, cyclic=view.cyclic, parametric=view.parametric,
+                      listing=listing, out=out)
+
+    program, out = held(apply).apply(jnp.asarray(1.0))
+    assert out.name == 'counter' and out.cyclic and not out.parametric
+    assert out.listing.splitlines()[0].startswith('counter [state]')
+    assert out.out == 0.0
