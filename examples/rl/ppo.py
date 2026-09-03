@@ -58,14 +58,8 @@ from examples.rl.losses import discounted_backward_sum
 
 
 @node
-def ReplayStep(policy: Node) -> Node:
-    """Re-evaluate one stored transition under the current parameters.
-
-    A recurrent chunk's starting state is a state input, ``initial``: init
-    adopts it verbatim, so replay resumes from the memory observed during
-    collection, and a run internalized by ``scanned`` takes it once beside
-    the sequence.
-    """
+def CommandLikelihood(policy: Node) -> Node:
+    """Log-probability and entropy of a stored command under the current policy."""
     def apply(self, observation, command):
         proposal = self.policy(observation)
         return Struct(
@@ -73,10 +67,22 @@ def ReplayStep(policy: Node) -> Node:
             entropy=self.policy.entropy(proposal),
         )
 
-    def init(param, initial):
-        return initial
+    return Wrapper(policy=policy)(apply)
 
-    return Wrapper(policy=policy)(apply, init=init)
+
+@node
+def ChunkReplay(run: Node) -> Node:
+    """Run one stored chunk from the policy state recorded at its start.
+
+    ``run`` is the per-transition Node under ``scan``, so its state is the
+    policy's. Binding that state to ``initial`` at the call is what starts
+    every optimizer step from the recorded memory under the current
+    parameters; nothing survives from the previous minibatch or epoch.
+    """
+    def apply(self, observation, command, initial):
+        return self.run.bind(state=initial)(observation=observation, command=command)
+
+    return Wrapper(run=run)(apply)
 
 
 @node
@@ -305,9 +311,7 @@ def ppo_iteration(
         ),
         'policy',
     )
-    # Every optimizer call starts each selected chunk from recorded state. No
-    # replay memory survives into the next minibatch or epoch.
-    replay = batch(scanned(ReplayStep(policy)), n=n_rows_per_minibatch)
+    replay = batch(ChunkReplay(scan(CommandLikelihood(policy))), n=n_rows_per_minibatch)
     trajectory_value = batch(
         batch(batch(value, n=n_steps_per_chunk), n=n_chunks_per_epoch),
         n=n_worlds,

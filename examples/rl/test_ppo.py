@@ -18,7 +18,12 @@ from nodejax import (
 from nodejax import nn
 from examples.rl.control import SamplingStep
 from examples.rl.pendulum import Pendulum, PendulumTrainingData
-from examples.rl.ppo import ReplayStep, StandardizedAdvantageEstimates, advantage_estimates
+from examples.rl.ppo import (
+    ChunkReplay,
+    CommandLikelihood,
+    StandardizedAdvantageEstimates,
+    advantage_estimates,
+)
 from examples.rl.ppo_pendulum import (
     MEMORY,
     N_CHUNKS_PER_EPOCH,
@@ -103,9 +108,11 @@ def test_replay_reproduces_the_rollout() -> None:
     starts = tree_first(rows.policy_state, axis=1)
     ends = tree_last(rows.policy_state, axis=1)
     replay = batch(
-        scanned(ReplayStep(policy)),
+        ChunkReplay(scan(CommandLikelihood(policy))),
         n=N_WORLDS * N_CHUNKS_PER_EPOCH,
-    ).bind(policy_param)
+    ).with_input(bundle=Struct(
+        observation=rows.observation, command=rows.command, initial=starts,
+    )).bind(policy_param).initialize()
 
     def replayed_logprob(policy_state: PyTree) -> jax.Array:
         bundle = Struct(
@@ -113,7 +120,7 @@ def test_replay_reproduces_the_rollout() -> None:
             command=rows.command,
             initial=policy_state,
         )
-        return drop_aux(replay.apply(bundle=bundle)).logprob
+        return drop_aux(replay.apply(bundle=bundle)[1]).logprob
 
     reproduced = replayed_logprob(starts)
     shifted = replayed_logprob(ends)

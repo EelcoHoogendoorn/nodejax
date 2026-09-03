@@ -5,12 +5,33 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+import jax
+
 from nodejax.core.definition import Def
 from nodejax.core.node import Node
+from nodejax.core.rng import MaybeKeyStream
 from nodejax.core.wrapper import Wrapper
 from nodejax.struct import Struct
 from nodejax.transforms.transform import transform
 from nodejax.paths import set_by_path
+
+
+def _member_at(definition: Def, path: str) -> Def:
+    """The member definition at ``path``, transparent levels passed through."""
+    transparent = definition.layout.transparent_member
+    if transparent is not None:
+        return _member_at(getattr(definition.members, transparent), path)
+    head, _, rest = path.partition('.')
+    below = getattr(definition.members, head)
+    return _member_at(below, rest) if rest else below
+
+
+def _stand_in(contract) -> Any:
+    """Values for an empty slot while state is built: the node's own
+    parameterization from a fixed key. State shapes do not depend on them
+    and nothing keeps them, so any values serve."""
+    probe = MaybeKeyStream(jax.random.PRNGKey(0))
+    return contract.param(Struct(), probe.child(contract.param_takes_rng))
 
 
 def _marked(definition: Def, path: str) -> Def:
@@ -67,14 +88,11 @@ def externalize(inner: Node, member: str | None = None,
 
     tie's sibling in the reparameterization family: where tie shares a
     subtree within the tree, externalize hands one to the caller as
-    data. The member's params are bound at apply; init runs against
-    `at_init` when supplied — a composite init that spec-propagates by
-    running its members (a persisted scan makes the outer init real)
-    needs values in the slot, and since state shapes are independent
-    of them, the member param operation's input defaults are the natural
-    stand-in. With at_init omitted the slot stays empty at init,
-    sufficient for inits that read shapes alone. param-rewriting:
-    nodes only."""
+    data. The member's params are bound at apply. Init and prime run
+    against ``at_init`` when supplied and otherwise against the member's
+    own parameterization from a fixed key: a composite init that builds
+    state by running its members needs values in the slot, and state
+    shapes do not depend on which. param-rewriting: nodes only."""
     if not inner.parametric:
         raise TypeError('externalize requires a parametric node')
 
@@ -100,20 +118,21 @@ def externalize(inner: Node, member: str | None = None,
         full = set_by_path(param, {member: input[field]})
         return current.apply(full, state, _inner_bundle(input, fields), rng)
 
-    def init_param(param):
-        return (set_by_path(param, {member: at_init})
-                if at_init is not None else param)
+    def init_param(param, current):
+        stand_in = (at_init if at_init is not None
+                    else _stand_in(_member_at(current._def, member).contract))
+        return set_by_path(param, {member: stand_in})
 
     def init_fn(contract, param, state_input, rng):
         """Bind the inner from its own input evidence only."""
         current = contract.members.inner.for_input(_inner_wire(contract, fields))
-        return current.init(init_param(param), state_input, rng)
+        return current.init(init_param(param, current), state_input, rng)
 
     def prime_fn(contract, param, state_input, input, rng):
         """Prime the inner state from its real input value."""
-        current = contract.members.inner
+        current = contract.members.inner.for_input(_inner_wire(contract, fields))
         return current.prime(
-            init_param(param), state_input,
+            init_param(param, current), state_input,
             current.intake(_inner_bundle(input, fields)), rng)
 
     # The inner's definition accepts the empty slot, so a bound view may
@@ -156,10 +175,12 @@ def _inner_wire(contract, fields: tuple[str, ...]):
 def _externalize_root(inner: Node, field: str, at_init: Any | None) -> Node:
     """The whole parameter tree arrives in ``field``; the node has no params.
 
-    Init and prime hand the inner ``at_init`` when given and the empty tree
-    otherwise, which serves any inner whose init reads shapes alone."""
-    stand_in = () if at_init is None else at_init
+    Init and prime hand the inner ``at_init`` when given and its own
+    parameterization from a fixed key otherwise."""
     fields = _call_fields(inner, field)
+
+    def stand_in(current):
+        return at_init if at_init is not None else _stand_in(current)
 
     def apply_fn(contract, param, state, input, rng):
         current = contract.members.inner
@@ -167,12 +188,13 @@ def _externalize_root(inner: Node, field: str, at_init: Any | None) -> Node:
 
     def init_fn(contract, param, state_input, rng):
         current = contract.members.inner.for_input(_inner_wire(contract, fields))
-        return current.init(stand_in, state_input, rng)
+        return current.init(stand_in(current), state_input, rng)
 
     def prime_fn(contract, param, state_input, input, rng):
-        current = contract.members.inner
+        current = contract.members.inner.for_input(_inner_wire(contract, fields))
         return current.prime(
-            stand_in, state_input, current.intake(_inner_bundle(input, fields)), rng)
+            stand_in(current), state_input,
+            current.intake(_inner_bundle(input, fields)), rng)
 
     return Wrapper(inner=inner).roles(
         name=f'externalize({inner.name})',

@@ -52,13 +52,7 @@ from examples.rl.replay import Buffer
 
 @node
 def SampledCommand(policy: Node) -> Node:
-    """Replay stored observations, drawing a fresh command at every step.
-
-    A recurrent chunk's starting state is a state input, ``initial``: init
-    adopts it verbatim, so replay resumes the memory observed during
-    collection, and a run internalized by ``scanned`` takes it once beside
-    the sequence; over a stateless policy it is the empty slot.
-    """
+    """Replay one stored observation, drawing a fresh command."""
     def apply(self, observation, rng):
         proposal = self.policy(observation)
         drawn = self.policy.sample(proposal, rng=rng.next())
@@ -68,10 +62,7 @@ def SampledCommand(policy: Node) -> Node:
             logprob=drawn.logprob,
         )
 
-    def init(param, initial):
-        return initial
-
-    return Wrapper(policy=policy)(apply, init=init)
+    return Wrapper(policy=policy)(apply)
 
 
 @node
@@ -122,16 +113,19 @@ def ValuedReplay(replay: Node, critic: Node) -> Node:
     """Replay stored observations with fresh commands and cost each one.
 
     Observation leaves begin (chunk, time + 1, ...), and ``initial`` is one
-    policy-state pytree per chunk whose leaves begin (chunk, ...). ``replay`` produces
-    fresh commands and log-probabilities on the observation axes; ``critic``
-    maps observation and command on those same axes to a cost. Externalizing
-    ``critic`` lets a caller supply the online critic's parameters on every
-    call and keeps them out of this Node's own parameter tree.
+    policy-state pytree per chunk whose leaves begin (chunk, ...). ``replay``
+    is the sampling step under ``scan``, batched over chunks, so its state is
+    the policy's per chunk; bound to ``initial`` at the call, it resumes the
+    memory observed during collection and produces fresh commands and
+    log-probabilities on the observation axes. ``critic`` maps observation
+    and command on those same axes to a cost. Externalizing ``critic`` lets
+    a caller supply the online critic's parameters on every call and keeps
+    them out of this Node's own parameter tree.
     """
     members = Composite(replay=replay, critic=critic)
 
     def apply(self, observation, initial):
-        replayed = self.replay(observation=observation, initial=initial)
+        replayed = self.replay.bind(state=initial)(observation=observation)
         cost = self.critic(Struct(
             observation=replayed.observation,
             command=replayed.command,
@@ -331,7 +325,7 @@ def sac_iteration(
         ),
         'policy',
     )
-    replay = batch(scanned(SampledCommand(policy)), n=n_chunks_per_minibatch)
+    replay = batch(scan(SampledCommand(policy)), n=n_chunks_per_minibatch)
     minibatch_critic = batch(
         batch(critic, n=n_steps_per_chunk),
         n=n_chunks_per_minibatch,

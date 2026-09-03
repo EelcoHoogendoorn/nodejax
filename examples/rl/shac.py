@@ -72,12 +72,7 @@ def TerminalCritic(rollout: Node, critic: Node) -> Node:
         terminal = self.critic(tree_last(trajectories.next_state, axis=1))
         return trajectories.replace(terminal=terminal)
 
-    def init(param, input):
-        """The rollout's state, primed from the chunk input. Declared so
-        that priming never applies the critic, whose slot may be external."""
-        return Struct(rollout=rollout.bind(param.rollout).init(input=input))
-
-    return members(apply, init=init)
+    return members(apply)
 
 
 @node
