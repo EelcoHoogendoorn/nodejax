@@ -24,7 +24,7 @@ from nodejax import (
 def ControlledStep(policy: Node, plant: PNode) -> Node:
     """Observe, choose a command, and advance one controlled plant step.
 
-    ``initial_state`` rides the apply input rather than the state bundle
+    ``initial_plant_state`` rides the apply input rather than the state bundle
     because a boundary re-prime rebuilds the state from the stream's first
     element, so the value has to be in the stream; the step reads it at
     prime and ignores it afterwards. ``SamplingStep``, run fresh per call
@@ -32,8 +32,8 @@ def ControlledStep(policy: Node, plant: PNode) -> Node:
     """
     members = Composite(policy=policy, plant=plant)
 
-    def apply(self, disturbance, initial_state):
-        """Advance carried state; ``initial_state`` is consumed by prime."""
+    def apply(self, disturbance, initial_plant_state):
+        """Advance carried state; ``initial_plant_state`` is consumed by prime."""
         state = self.state.plant
         command = self.policy(self.plant.observe())
         output = self.plant(
@@ -48,16 +48,16 @@ def ControlledStep(policy: Node, plant: PNode) -> Node:
         )
 
     def init(param, input):
-        """Adopt caller state and initialize policy state from observation.
+        """Adopt caller plant state and initialize policy state for its observation form.
 
-        ``initial_state`` shares the apply call because a scan primes from its
-        first real element. It is ignored by later transitions. A stateless
+        ``initial_plant_state`` shares the apply call because a scan primes from
+        its first real element. It is ignored by later transitions. A stateless
         policy contributes the empty slot: no fork on its lifecycle.
         """
-        observation = plant.observe(state=input.initial_state)
+        observation = plant.observe(state=input.initial_plant_state)
         return Struct(
             policy=policy.bind(param.policy).init(input=observation),
-            plant=input.initial_state,
+            plant=input.initial_plant_state,
         )
 
     return members(apply, init=init)
@@ -91,7 +91,7 @@ def mean_rollout(
     steps = disturbance.shape[1]
     input = Struct(
         disturbance=disturbance,
-        initial_state=tree_broadcast_axis(starts, steps, axis=1),
+        initial_plant_state=tree_broadcast_axis(starts, steps, axis=1),
     )
     rollout = mean_rollout_program(policy, plant, n_worlds)
     trajectory = drop_aux(rollout.apply(bundle=input))
@@ -105,18 +105,18 @@ def mean_rollout(
 def policy_trajectory(
     policy: PNode,
     plant: BaseNode,
-    initial_state: Struct,
+    initial_plant_state: Struct,
     steps: int,
     rng: jax.Array,
 ) -> Struct:
-    """Evaluate from fresh state while preserving recurrent carry.
+    """Evaluate from fresh plant state while preserving recurrent policy carry.
 
     The trajectory is shaped (world, time), its ``state`` holding the final
     state as one extra step."""
-    n_worlds = tree_len(initial_state)
+    n_worlds = tree_len(initial_plant_state)
     input = Struct(
         disturbance=jnp.zeros((n_worlds, steps)),
-        initial_state=tree_broadcast_axis(initial_state, steps, axis=1),
+        initial_plant_state=tree_broadcast_axis(initial_plant_state, steps, axis=1),
     )
     rollout = batch(scanned(ControlledStep(policy, plant)), n=n_worlds).parameterize()
     if rollout.contract.apply_takes_rng:
@@ -163,10 +163,11 @@ def OpenLoopStep(plant: PNode) -> Node:
 def SamplingStep(policy: Node, plant: Node) -> Node:
     """One on-policy transition: sample, act, record what replay needs.
 
-    The plant state a rollout starts from is a state input, ``initial_state``,
-    so a run internalized by ``scanned`` takes it once beside the sequence.
-    ``policy_state`` is the policy's state as this step saw it, so a replay
-    can resume a recurrent policy from any recorded step.
+    ``initial_plant_state`` starts one sampled run. An enclosing internalized
+    scan consumes it once to initialize the plant and a fresh policy lifecycle,
+    then carries both states through the run. ``policy_state`` is the policy's
+    state as this step saw it, so replay can resume a recurrent policy from any
+    recorded step.
     """
     members = Composite(policy=policy, plant=plant)
 
@@ -185,13 +186,12 @@ def SamplingStep(policy: Node, plant: Node) -> Node:
             next_observation=self.plant.observe(),
         )
 
-    def init(param, initial_state):
-        """Start from the given plant state; a stateless policy contributes
-        the empty slot."""
-        observation = plant.observe(state=initial_state)
+    def init(param, initial_plant_state):
+        """Start the plant as given and initialize policy state for its observation form."""
+        observation = plant.observe(state=initial_plant_state)
         return Struct(
             policy=policy.bind(param.policy).init(input=observation),
-            plant=initial_state,
+            plant=initial_plant_state,
         )
 
     return members(apply, init=init)

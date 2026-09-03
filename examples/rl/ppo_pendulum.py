@@ -30,7 +30,7 @@ from examples.rl.pendulum import (
     phase_portrait,
     phase_starts,
 )
-from examples.rl.ppo import ppo_learner, ppo_training
+from examples.rl.ppo import ppo_iteration, ppo_training
 
 
 HIDDEN = 64
@@ -94,13 +94,14 @@ def pendulum_training_program(
 ) -> Node:
     """Build a complete executable Pendulum PPO training program.
 
-    The returned Node has no ordinary inputs and requires ``rng``. It generates
-    ``iterations`` batches of initial states and disturbances, runs one PPO
-    learner iteration for each batch, and carries the actor and critic training
-    state between iterations. Its ordinary output is the PPO learner bound to
-    its final state; per-iteration metrics are retained under ``aux.training``.
+    The returned Node has no ordinary inputs and requires ``rng``. It draws new
+    plant starts and initializes fresh policy state for every PPO iteration.
+    Plant and policy state then carry across every chunk in that iteration;
+    only actor and critic training state carries between iterations. The
+    ordinary output is the final bound PPO iteration, and per-iteration metrics
+    are retained under ``aux.training``.
     """
-    learner_iteration = ppo_learner(
+    iteration = ppo_iteration(
         policy,
         value,
         Pendulum(),
@@ -124,7 +125,7 @@ def pendulum_training_program(
         n_chunks=N_CHUNKS_PER_EPOCH,
         n_steps_per_chunk=N_STEPS_PER_CHUNK,
     )
-    return serial(data=training_data, training=carried(learner_iteration))
+    return serial(data=training_data, training=carried(iteration))
 
 
 def save_figure(figure, filename: str) -> str:

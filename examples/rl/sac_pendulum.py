@@ -37,7 +37,7 @@ from examples.rl.pendulum import (
     phase_portrait,
     phase_starts,
 )
-from examples.rl.sac import sac_learner, sac_training
+from examples.rl.sac import sac_iteration, sac_training
 
 
 HIDDEN = 64
@@ -132,7 +132,7 @@ def pendulum_training_program(
     n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
 ) -> Node:
     """Assemble the complete Pendulum SAC training Node tree."""
-    iteration = sac_learner(
+    iteration = sac_iteration(
         policy,
         critic,
         Pendulum(),

@@ -81,14 +81,14 @@ def energy_shaping_program(worlds: int) -> PNode:
 
 
 def energy_trajectory(
-    initial_state: Struct,
+    initial_plant_state: Struct,
     steps: int = STEPS,
 ) -> Struct:
     """Run deterministic closed-loop trajectories from supplied states."""
-    worlds = initial_state.angle.shape[0]
+    worlds = initial_plant_state.angle.shape[0]
     input = Struct(
         disturbance=jnp.zeros((worlds, steps)),
-        initial_state=tree_broadcast_axis(initial_state, steps, axis=1),
+        initial_plant_state=tree_broadcast_axis(initial_plant_state, steps, axis=1),
     )
     return jax.jit(energy_shaping_program(worlds).apply)(bundle=input)
 

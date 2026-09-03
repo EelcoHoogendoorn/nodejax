@@ -18,7 +18,7 @@ from nodejax import (
 from nodejax import nn
 from examples.rl.control import SamplingStep
 from examples.rl.pendulum import Pendulum, PendulumTrainingData
-from examples.rl.ppo import ReplayStep, advantage_estimates
+from examples.rl.ppo import ReplayStep, StandardizedAdvantageEstimates, advantage_estimates
 from examples.rl.ppo_pendulum import (
     MEMORY,
     N_CHUNKS_PER_EPOCH,
@@ -39,6 +39,31 @@ def test_advantage_estimates_one_trajectory() -> None:
     expected = jnp.array([[3.25, 4.5], [5.0, 4.0]])
     assert jnp.allclose(estimates.advantage, expected)
     assert jnp.allclose(estimates.returns, expected)
+
+
+def test_advantage_standardization_preserves_returns() -> None:
+    raw_estimator = batch(advantage_estimates(discount=0.5, trace=1.0), n=2)
+    estimator = StandardizedAdvantageEstimates(raw_estimator).parameterize()
+    reward = jnp.array([
+        [[1.0, 2.0], [3.0, 4.0]],
+        [[2.0, 4.0], [6.0, 8.0]],
+    ])
+    estimates = drop_aux(estimator.apply(
+        reward=reward,
+        value=jnp.zeros_like(reward),
+        next_value=jnp.zeros_like(reward),
+    ))
+    raw_advantage = jnp.array([
+        [[3.25, 4.5], [5.0, 4.0]],
+        [[6.5, 9.0], [10.0, 8.0]],
+    ])
+    expected = (
+        (raw_advantage - jnp.mean(raw_advantage))
+        / (jnp.std(raw_advantage) + 1e-8)
+    )
+
+    assert jnp.allclose(estimates.advantage, expected)
+    assert jnp.allclose(estimates.returns, raw_advantage)
 
 
 def test_replay_reproduces_the_rollout() -> None:
@@ -67,11 +92,11 @@ def test_replay_reproduces_the_rollout() -> None:
         n_chunks=N_CHUNKS_PER_EPOCH,
         n_steps_per_chunk=N_STEPS_PER_CHUNK,
     ).apply(rng=jax.random.PRNGKey(3))
-    initial_state = tree_first(data.initial_state)
+    initial_plant_state = tree_first(data.initial_plant_state)
     disturbance = tree_first(data.disturbance)
     record = drop_aux(sampler.bind(Struct(policy=policy_param)).apply(
         disturbance=disturbance,
-        initial_state=initial_state,
+        initial_plant_state=initial_plant_state,
         rng=jax.random.PRNGKey(1),
     ))
     rows = tree_reshape(record, (-1,), axes=2)

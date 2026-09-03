@@ -141,6 +141,24 @@ def advantage_estimates(
     return Leaf(apply)
 
 
+@node
+def StandardizedAdvantageEstimates(estimator: Node) -> Node:
+    """Standardize the advantage field across the estimator's complete batch.
+
+    ``estimator`` returns ``Struct(advantage, returns)``. Only ``advantage`` is
+    standardized; ``returns`` remains the unscaled critic target.
+    """
+    def apply(self, reward, value, next_value):
+        estimates = self.estimator(reward=reward, value=value, next_value=next_value)
+        advantage = (
+            (estimates.advantage - jnp.mean(estimates.advantage))
+            / (jnp.std(estimates.advantage) + 1e-8)
+        )
+        return estimates.replace(advantage=advantage)
+
+    return Wrapper(estimator=estimator)(apply)
+
+
 def shuffled_minibatches(
     key: jax.Array,
     record: Struct,
@@ -179,7 +197,7 @@ def shuffled_minibatches(
 
 
 @node
-def PPO(
+def PPOIteration(
     sampler: Node,
     trajectory_value: Node,
     trajectory_advantage: Node,
@@ -191,9 +209,11 @@ def PPO(
 ) -> Node:
     """One fixed-horizon continuing-control PPO iteration.
 
-    Initial-state leaves begin (world, ...). ``disturbance`` and returned-record
-    leaves begin (world, chunk, time, ...). ``trajectory_advantage`` maps one
-    (chunk, time) trajectory per world to estimates on those same axes.
+    Every call starts a fresh sampled rollout from ``initial_plant_state``
+    leaves shaped (world, ...). Plant and policy state carry across its chunk
+    and time axes, while ``disturbance`` and returned-record leaves are shaped
+    (world, chunk, time, ...). ``trajectory_advantage`` maps one (chunk, time)
+    trajectory per world to estimates on those same axes.
 
     ``sampler`` rolls the policy out over chunks and worlds, its policy
     parameters arriving in its ``policy`` field, and records the
@@ -214,10 +234,10 @@ def PPO(
         critic_trainer=critic_trainer,
     )
 
-    def apply(self, initial_state, disturbance, rng):
+    def apply(self, initial_plant_state, disturbance, rng):
         record = self.sampler(
             disturbance=disturbance,
-            initial_state=initial_state,
+            initial_plant_state=initial_plant_state,
             policy=self.actor_trainer.params(),
         )
 
@@ -229,15 +249,11 @@ def PPO(
             value=values,
             next_value=next_values,
         )
-        advantages = (
-            (estimates.advantage - jnp.mean(estimates.advantage))
-            / (jnp.std(estimates.advantage) + 1e-8)
-        )
 
         self.actor_trainer(bundle=shuffled_minibatches(
             rng.next(),
             record,
-            advantages,
+            estimates.advantage,
             n_epochs=n_epochs,
             n_minibatches_per_epoch=n_minibatches_per_epoch,
         ))
@@ -247,7 +263,7 @@ def PPO(
     return members(apply)
 
 
-def ppo_learner(
+def ppo_iteration(
     policy: Node,
     value: Node,
     plant: BaseNode,
@@ -280,6 +296,8 @@ def ppo_learner(
     policy = policy.with_input(observation)
     value = value.with_input(observation)
 
+    # The inner scan carries plant and policy state through a chunk. The outer
+    # scanned run carries them between chunks but starts fresh on every iteration.
     sampler = externalize(
         batch(
             scanned(scan(SamplingStep(policy, plant), n=n_steps_per_chunk)),
@@ -294,8 +312,10 @@ def ppo_learner(
         batch(batch(value, n=n_steps_per_chunk), n=n_chunks_per_epoch),
         n=n_worlds,
     )
-    trajectory_advantage = batch(
-        advantage_estimates(discount=discount, trace=trace), n=n_worlds)
+    trajectory_advantage = StandardizedAdvantageEstimates(batch(
+        advantage_estimates(discount=discount, trace=trace),
+        n=n_worlds,
+    ))
     actor_trainer = scan(
         scan(
             train_step(
@@ -311,7 +331,7 @@ def ppo_learner(
         train_step(trajectory_value, value_loss, critic_optimizer),
         n=n_critic_passes,
     )
-    return PPO(
+    return PPOIteration(
         sampler=sampler,
         trajectory_value=externalize(trajectory_value, field='value'),
         trajectory_advantage=trajectory_advantage,
@@ -328,22 +348,22 @@ def ppo_training(
     parameter_key: jax.Array,
     training_key: jax.Array,
 ) -> Struct:
-    """Execute a complete data-to-learner PPO training composition.
+    """Execute a complete PPO training composition.
 
-    ``training_program`` is not one ``ppo_learner`` iteration. It must supply a
-    sequence of training inputs to ``carried(ppo_learner(...))``, returning the
-    learner bound to its final state and emitting per-iteration values under
+    ``training_program`` is not one ``ppo_iteration``. It must supply a sequence
+    of training inputs to ``carried(ppo_iteration(...))``, returning the
+    iteration bound to its final state and emitting per-iteration values under
     ``aux.training``. This function parameterizes and executes that whole Node,
-    then returns its trained policy, final learner, and named training history.
+    then returns its trained policy, final iteration, and named training history.
     """
-    learner, aux = split_aux(
+    iteration, aux = split_aux(
         jax.jit(
             training_program.parameterize(rng=parameter_key).apply,
         )(rng=training_key),
     )
     return Struct(
-        policy=learner.actor_trainer.trained().pnode.policy,
-        learner=learner,
+        policy=iteration.actor_trainer.trained().pnode.policy,
+        iteration=iteration,
         history=Struct(
             actor_loss=aux.training.actor_trainer.loss.reshape(-1),
             critic_loss=aux.training.critic_trainer.loss.reshape(-1),

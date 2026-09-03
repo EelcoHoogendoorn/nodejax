@@ -17,7 +17,7 @@ from examples.rl.pendulum import (
     Pendulum,
     PendulumCritic,
 )
-from examples.rl.shac import shac_learner, shac_training
+from examples.rl.shac import shac_iteration, shac_training
 from examples.rl.shac_pendulum import (
     ACTOR_RATE,
     CRITIC_RATE,
@@ -91,16 +91,20 @@ def test_policy_ensembles_compile_for_both_policy_lifecycles() -> None:
     assert all(value.shape[0] == N_POLICY_MEMBERS for value in recurrent_state)
 
 
-def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
+def test_one_shac_iteration_accepts_both_policy_lifecycles() -> None:
     n_worlds = 2
     n_steps_per_chunk = 4
-    initial = Struct(
+    initial_plant_state = Struct(
         angle=jnp.asarray((0.4, -0.7)),
         velocity=jnp.asarray((-0.2, 0.3)),
     )
     input = Struct(
         disturbance=jnp.zeros((n_worlds, n_steps_per_chunk)),
-        initial_state=tree_broadcast_axis(initial, n_steps_per_chunk, axis=1),
+        initial_plant_state=tree_broadcast_axis(
+            initial_plant_state,
+            n_steps_per_chunk,
+            axis=1,
+        ),
     )
 
     policies = (
@@ -108,7 +112,7 @@ def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
         pendulum_policy(nn.GRU(MEMORY)),
     )
     for policy in policies:
-        learner = shac_learner(
+        iteration = shac_iteration(
             policy_committee(policy),
             pendulum_critic(),
             Pendulum(),
@@ -121,7 +125,7 @@ def test_one_shac_update_accepts_both_policy_lifecycles() -> None:
             n_steps_per_chunk=n_steps_per_chunk,
             n_critic_updates=1,
         )
-        control = learner.with_input(input).parameterize(
+        control = iteration.with_input(input).parameterize(
             rng=jax.random.PRNGKey(2),
         ).initialize(input=input)
         output = jax.jit(control.apply)(bundle=input)[1]

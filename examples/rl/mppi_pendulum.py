@@ -22,7 +22,7 @@ from nodejax import (
 )
 from nodejax import nn
 from examples.rl.control import policy_trajectory
-from examples.rl.mppi import mppi_controller, mppi_learner, mppi_training
+from examples.rl.mppi import mppi_controller, mppi_iteration, mppi_training
 from examples.rl.pendulum import (
     PHASE_VELOCITY_LIMIT,
     Pendulum,
@@ -104,7 +104,7 @@ def PlanningStarts(
             random_starts,
         )
         return Struct(
-            initial_state=tree_broadcast_axis(
+            initial_plant_state=tree_broadcast_axis(
                 starts,
                 n_steps_per_iteration,
                 axis=2,
@@ -150,7 +150,7 @@ def pendulum_training_program(
         n_refinements=n_refinements,
         n_steps_per_plan=n_steps_per_plan,
     )
-    learner = mppi_learner(
+    iteration = mppi_iteration(
         controller,
         critic,
         plant,
@@ -163,7 +163,7 @@ def pendulum_training_program(
         n_critic_updates=n_critic_updates,
     )
     data = PlanningStarts(n_iterations, n_worlds, n_steps_per_iteration)
-    return serial(data=data, training=carried(learner))
+    return serial(data=data, training=carried(iteration))
 
 
 def pendulum_controller(
@@ -282,7 +282,7 @@ def critic_swing_up() -> None:
         parameter_key=jax.random.PRNGKey(1),
         training_key=jax.random.PRNGKey(11),
     )
-    learned_critic = critic.bind(trained.learner.ema_critic.state)
+    learned_critic = critic.bind(trained.iteration.ema_critic.state)
     starts = phase_starts(
         jax.random.PRNGKey(29),
         velocity_limit=3.0,

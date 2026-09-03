@@ -81,7 +81,7 @@ def TerminalCritic(rollout: Node, critic: Node) -> Node:
 
 
 @node
-def SHACUpdate(
+def SHACIteration(
     policy_trainer: Node,
     target_critic: Node,
     critic_trainer: Node,
@@ -92,11 +92,11 @@ def SHACUpdate(
 ) -> Node:
     """One short-horizon policy update and fitted-value update.
 
-    ``disturbance`` is shaped (world, time), and initial-state leaves begin
-    (world, time, ...). Trajectories, target-critic values, and TD-lambda targets
-    retain that axis order.
+    ``disturbance`` is shaped (world, time), and ``initial_plant_state`` leaves
+    begin (world, time, ...). Trajectories, target-critic values, and TD-lambda
+    targets retain that axis order.
 
-    ``MPPIUpdate`` has this same apply with a plain sampler in the policy
+    ``MPPIIteration`` has this same apply with a plain sampler in the policy
     trainer's place; the two stay separate so each example reads on its own.
     ``policy_trainer`` differentiates a rollout that carries its terminal
     values under an externalized ``critic`` and returns the trajectories it
@@ -116,12 +116,12 @@ def SHACUpdate(
         ema_critic=ema_critic,
     )
 
-    def apply(self, disturbance, initial_state):
+    def apply(self, disturbance, initial_plant_state):
         # The policy rollout and both critic uses share this lagged snapshot.
         ema_critic_param = self.ema_critic(self.critic_trainer.params())
         rollout_input = Struct(
             disturbance=disturbance,  # per-step external plant forcing
-            initial_state=initial_state,
+            initial_plant_state=initial_plant_state,
         )
         trajectories = self.policy_trainer(
             input=rollout_input,
@@ -143,7 +143,7 @@ def SHACUpdate(
     return members(apply)
 
 
-def shac_learner(
+def shac_iteration(
     policy: Node,
     critic: Node,
     plant: BaseNode,
@@ -157,13 +157,13 @@ def shac_learner(
     n_steps_per_chunk: int,  # differentiated horizon in plant steps
     n_critic_updates: int,  # critic fits per policy update
 ) -> Node:
-    """Assemble one SHAC update from a policy, a critic, and a plant.
+    """Assemble one SHAC iteration from a policy, a critic, and a plant.
 
-    Physical and policy state carry across chunks and reset when an
-    enclosing scan claims the episode. The critic is batched to the
-    rollout's world axis for terminal values and to both its axes for
-    targets; both uses receive the EMA target parameters as data, and the
-    same trajectory critic is what the critic trainer fits.
+    Plant and policy state carry across chunks and reinitialize from
+    ``initial_plant_state`` when an enclosing scan claims the episode. The
+    critic is batched to the rollout's world axis for terminal values and to
+    both its axes for targets; both uses receive the EMA target parameters as
+    data, and the same trajectory critic is what the critic trainer fits.
     """
     transition = state_reinit(ControlledStep(policy, plant), boundary='episode')
     rollout = batch(scan(transition, n=n_steps_per_chunk), n=n_worlds)
@@ -178,7 +178,7 @@ def shac_learner(
         train_step(trajectory_critic, mse, critic_optimizer),
         n=n_critic_updates,
     )
-    return SHACUpdate(
+    return SHACIteration(
         policy_trainer=policy_trainer,
         target_critic=externalize(trajectory_critic, field='critic'),
         critic_trainer=critic_trainer,
@@ -196,9 +196,9 @@ def shac_training(
 ) -> Struct:
     """Run a SHAC program and return what it trained.
 
-    ``program`` carries a SHAC update over its data. The result holds the
+    ``program`` carries a SHAC iteration over its data. The result holds the
     trained policy, read out of the policy trainer's trained model, the
-    learner bound to its final state, from which a caller binds a critic
+    iteration bound to its final state, from which a caller binds a critic
     to the EMA state, and the loss history.
     """
     final, aux = split_aux(
@@ -206,7 +206,7 @@ def shac_training(
     )
     return Struct(
         policy=final.policy_trainer.trained().pnode.rollout.policy,
-        learner=final,
+        iteration=final,
         history=Struct(
             policy_loss=aux.training.policy_trainer.loss.reshape(-1),
             critic_loss=aux.training.critic_trainer.loss[..., -1].reshape(-1),

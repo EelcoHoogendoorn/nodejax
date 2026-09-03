@@ -188,13 +188,14 @@ def PendulumTrainingData(
 ) -> PNode:
     """Independent starts and disturbances for one collection-driven run.
 
-    Initial-state leaves are shaped (iteration, world, ...), and ``disturbance``
-    is shaped (iteration, world, chunk, time).
+    A fresh plant start is drawn independently for every (iteration, world).
+    ``initial_plant_state`` leaves are shaped (iteration, world, ...), and
+    ``disturbance`` is shaped (iteration, world, chunk, time).
     """
     def apply(rng):
         sample = jax.random.uniform(rng.next(), (2, iterations, n_worlds))
         return Struct(
-            initial_state=Struct(
+            initial_plant_state=Struct(
                 angle=2.0 * jnp.pi * sample[0] - jnp.pi,
                 velocity=VELOCITY_SCALE * (2.0 * sample[1] - 1.0),
             ),

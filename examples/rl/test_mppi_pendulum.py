@@ -127,6 +127,6 @@ def test_one_planning_update_trains_the_critic() -> None:
     )
     state = Struct(angle=jnp.asarray(-1.2), velocity=jnp.asarray(2.0))
 
-    assert jnp.isfinite(critic.bind(trained.learner.ema_critic.state).apply(state))
+    assert jnp.isfinite(critic.bind(trained.iteration.ema_critic.state).apply(state))
     assert jnp.isfinite(trained.history.critic_loss).all()
     assert jnp.isfinite(trained.history.mean_cost).all()

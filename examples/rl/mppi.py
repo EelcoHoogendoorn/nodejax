@@ -5,7 +5,7 @@ assembled: proposal batches, plant rollouts, critic batches, repeated
 refinements, and training transforms, so the tree shows the candidate,
 planning, control, and training axes where they are chosen. The canonical
 assembly is here too: ``mppi_controller`` builds the receding planner from a
-critic and a plant, ``mppi_learner`` builds one critic-fitting iteration
+critic and a plant, ``mppi_iteration`` builds one critic-fitting iteration
 around it, and ``mppi_training`` runs a program and returns what it trained.
 A plant-specific file supplies the plant, the critic, the command range, the
 data, and the numbers.
@@ -154,7 +154,7 @@ def RecedingMPPI(plan: Node, refinements: Node) -> Node:
 
 
 @node
-def MPPIUpdate(
+def MPPIIteration(
     sampler: Node,
     target_critic: Node,
     critic_trainer: Node,
@@ -165,14 +165,14 @@ def MPPIUpdate(
 ) -> Node:
     """Sample one control chunk, fit its critic, and update the EMA target.
 
-    ``SHACUpdate`` has this same apply with a policy trainer in the sampler's
+    ``SHACIteration`` has this same apply with a policy trainer in the sampler's
     place; the two stay separate so each example reads on its own.
-    ``sampler`` accepts ``initial_state`` leaves shaped (world, time, ...) and
-    ``disturbance`` shaped (world, time). It also accepts the target critic's
-    parameter pytree through its externalized ``critics`` field and returns a
-    trajectory whose state leaves begin (world, time, ...) and whose ``cost``
-    is shaped (world, time). ``target_critic`` values that trajectory's next
-    states, its whole parameter tree arriving in its ``critic`` field.
+    ``sampler`` accepts ``initial_plant_state`` leaves shaped (world, time, ...)
+    and ``disturbance`` shaped (world, time). It also accepts the target
+    critic's parameter pytree through its externalized ``critics`` field and
+    returns a trajectory whose state leaves begin (world, time, ...) and whose
+    ``cost`` is shaped (world, time). ``target_critic`` values that trajectory's
+    next states, its whole parameter tree arriving in its ``critic`` field.
     ``critic_trainer`` is cyclic, exposes the fitted parameters as
     ``params()``, and accepts trajectory state as ``input`` plus the
     TD-lambda target array as ``target``. ``ema_critic`` smooths those
@@ -188,11 +188,11 @@ def MPPIUpdate(
         ema_critic=ema_critic,
     )
 
-    def apply(self, initial_state, disturbance):
+    def apply(self, initial_plant_state, disturbance):
         critic_param = self.critic_trainer.params()
         ema_critic_param = self.ema_critic(critic_param)
         trajectory = drop_aux(self.sampler(
-            initial_state=initial_state,
+            initial_plant_state=initial_plant_state,
             disturbance=disturbance,
             critics=ema_critic_param,
         ))
@@ -277,7 +277,7 @@ def mppi_controller(
     ).with_input(plant.initialize().state)
 
 
-def mppi_learner(
+def mppi_iteration(
     controller: Node,
     critic: Node,
     plant: BaseNode,
@@ -292,7 +292,7 @@ def mppi_learner(
 ) -> Node:
     """Assemble one critic-fitting iteration around a receding controller.
 
-    The returned iteration accepts ``initial_state`` leaves shaped
+    The returned iteration accepts ``initial_plant_state`` leaves shaped
     (world, time, ...) and ``disturbance`` shaped (world, time).
 
     The controller plans under the EMA target critic, whose parameters reach
@@ -309,7 +309,7 @@ def mppi_learner(
         train_step(trajectory_critic, mse, critic_optimizer),
         n=n_critic_updates,
     )
-    return MPPIUpdate(
+    return MPPIIteration(
         sampler=sampler,
         target_critic=externalize(trajectory_critic, field='critic'),
         critic_trainer=critic_trainer,
@@ -335,7 +335,7 @@ def mppi_training(
         jax.jit(program.parameterize(rng=parameter_key).apply)(rng=training_key),
     )
     return Struct(
-        learner=final,
+        iteration=final,
         history=Struct(
             critic_loss=aux.training.critic_trainer.loss[..., -1].reshape(-1),
             mean_cost=aux.training.mean_cost.reshape(-1),

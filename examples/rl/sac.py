@@ -221,7 +221,7 @@ def SACUpdate(
 
 
 @node
-def SAC(
+def SACIteration(
     sampler: Node,
     buffer: Node,
     update: Node,
@@ -231,10 +231,11 @@ def SAC(
 ) -> Node:
     """One off-policy SAC iteration: collect, store, and update from replay.
 
-    Initial-state leaves begin (world, ...), and ``disturbance`` is shaped
-    (world, chunk, time). Sampled-record leaves begin (world, chunk, time, ...).
-    The (world, chunk) axes are flattened into the replay buffer's row axis while
-    time remains within each row.
+    Every call starts a fresh sampled rollout from ``initial_plant_state``
+    leaves shaped (world, ...). ``disturbance`` is shaped (world, chunk, time),
+    and sampled-record leaves begin (world, chunk, time, ...). The (world,
+    chunk) axes are flattened into the replay buffer's row axis while time
+    remains within each row.
 
     ``sampler`` rolls the policy out over chunks and worlds, its policy
     parameters arriving in its ``policy`` field, and records the
@@ -247,10 +248,10 @@ def SAC(
     """
     members = Composite(sampler=sampler, buffer=buffer, update=update)
 
-    def apply(self, initial_state, disturbance, rng):
+    def apply(self, initial_plant_state, disturbance, rng):
         record = self.sampler(
             disturbance=disturbance,
-            initial_state=initial_state,
+            initial_plant_state=initial_plant_state,
             policy=self.update.actor_trainer.params().replay,
         )
 
@@ -281,7 +282,7 @@ def SAC(
     return members(apply)
 
 
-def sac_learner(
+def sac_iteration(
     policy: Node,
     critic: Node,
     plant: Node,
@@ -355,7 +356,7 @@ def sac_learner(
         ema_critic=nn.EMA(tau=ema_critic_decay, warm=True),
         discount=discount,
     )
-    return SAC(
+    return SACIteration(
         sampler=sampler,
         buffer=Buffer(capacity, element),
         update=scan(update, n=n_updates),
@@ -382,7 +383,7 @@ def sac_training(
     )
     return Struct(
         policy=final.update.actor_trainer.trained().pnode.replay.policy,
-        learner=final,
+        iteration=final,
         history=Struct(
             actor_loss=aux.training.update.actor_trainer.loss.reshape(-1),
             critic_loss=aux.training.update.critic_trainer.loss.reshape(-1),

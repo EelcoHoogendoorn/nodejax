@@ -36,7 +36,7 @@ from examples.rl.pendulum import (
     phase_starts,
     phase_surface,
 )
-from examples.rl.shac import shac_learner, shac_training
+from examples.rl.shac import shac_iteration, shac_training
 
 
 DISCOUNT = 0.97
@@ -78,13 +78,13 @@ def PendulumTrainingData(
     n_worlds: int,
     disturbance_scale: float,
 ) -> PNode:
-    """Independent episodes split into short gradient chunks."""
+    """Independent plant starts and disturbances for chunked SHAC episodes."""
     def apply(rng):
         disturbance = disturbance_scale * jax.random.normal(
             rng.next(),
             (n_episodes, n_chunks_per_episode, n_worlds, n_steps_per_chunk),
         )
-        initial = Struct(
+        plant_starts = Struct(
             angle=jax.random.uniform(
                 rng.next(),
                 (n_episodes, n_worlds),
@@ -99,18 +99,18 @@ def PendulumTrainingData(
             ),
         )
         # Nested scans map every input field. Only episode priming consumes the
-        # duplicated initial state.
-        initial_state = jax.tree.map(
+        # duplicated initial plant state.
+        initial_plant_state = jax.tree.map(
             lambda value: jnp.broadcast_to(
                 value[:, None, :, None],
                 (n_episodes, n_chunks_per_episode, n_worlds, n_steps_per_chunk)
                 + value.shape[2:],
             ),
-            initial,
+            plant_starts,
         )
         return Struct(
             disturbance=disturbance,
-            initial_state=initial_state,
+            initial_plant_state=initial_plant_state,
         )
 
     return Leaf(apply)
@@ -143,7 +143,7 @@ def pendulum_training_program(
     n_episodes: int,
 ) -> Node:
     """Assemble the complete Pendulum SHAC Node tree."""
-    learner = shac_learner(
+    iteration = shac_iteration(
         policy,
         critic,
         Pendulum(),
@@ -157,7 +157,7 @@ def pendulum_training_program(
         n_critic_updates=N_CRITIC_UPDATES,
     )
     episode = scan(
-        learner,
+        iteration,
         boundary='episode',
         n=N_CHUNKS_PER_EPISODE,
     )
@@ -187,7 +187,7 @@ def train_pendulum_shac(n_episodes: int = N_EPISODES) -> Struct:
     )
     return Struct(
         policy=outcome.policy,
-        critic=critic.bind(outcome.learner.ema_critic.state),
+        critic=critic.bind(outcome.iteration.ema_critic.state),
         history=outcome.history,
     )
 
