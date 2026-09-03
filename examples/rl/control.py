@@ -34,7 +34,7 @@ def ControlledStep(policy: Node, plant: PNode) -> Node:
 
     def apply(self, disturbance, initial_plant_state):
         """Advance carried state; ``initial_plant_state`` is consumed by prime."""
-        state = self.state.plant
+        state = self.plant.state
         command = self.policy(self.plant.observe())
         output = self.plant(
             command=command,
@@ -148,7 +148,7 @@ def OpenLoopStep(plant: PNode) -> Node:
     members = Composite(plant=plant)
 
     def apply(self, command, disturbance):
-        state = self.state.plant
+        state = self.plant.state
         output = self.plant(command=command, disturbance=disturbance)
         return Struct(state=state, cost=output.cost, next_state=output.state)
 

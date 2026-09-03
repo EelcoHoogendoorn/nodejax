@@ -146,8 +146,7 @@ class _Member:
     @property
     def state(self):
         """The member's state in its public form, as a bound view shows
-        it; ``self.state.<member>`` is the same value as the composite
-        stores it."""
+        it: the same value the composite stores for the member."""
         return self._def.contract._sparse_state(self._state_fn())
 
     def bind(self, param=_UNSET, *, state=_UNSET) -> '_Member':
@@ -244,17 +243,6 @@ class _Wired:
             rng if rng_from is True else
             rng._require())
 
-    @property
-    def param(self):
-        """The composite's param Struct: member slots and data reads."""
-        return self._obj
-
-    @property
-    def state(self):
-        """The INCOMING state Struct, for direct reads (a delay
-        member's stored value); member calls advance the live slots."""
-        return self._state
-
     def sow(self, **kwargs: Any) -> None:
         """Sow auxiliary values (taps, losses, activity) into the step's aux stream."""
         for k, v in kwargs.items():
@@ -290,45 +278,6 @@ class _Wired:
         merged = {name: self._new.get(name, self._state[name])
                   for name in (self._state.__keys__ if self._state != () else ())}
         return Struct(**merged) if merged else ()
-
-
-class _LazyInitState:
-    """`self.state` during an init-time apply run: reading .member (or
-    ['member']) yields that member's INITIAL state, built on demand from
-    its own bundle alone — a read is not a feed, so no call-site input is
-    supplied. Mirrors _Wired.state's incoming-state semantics: the value
-    seen is the member's state at step entry, never an advance."""
-
-    def __init__(self, wired):
-        self._wired = wired
-
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(name)
-        return self._wired._ensure(name)
-
-    def __getitem__(self, name):
-        return self._wired._ensure(name)
-
-
-class _LazyBuildingParam:
-    """``self.param`` during the parameter-shape walk.
-
-    A wiring may use one member's parameters to form another member's input.
-    Construct the requested member slot on demand. A constructor that truly
-    needs its call-site shape still has to be called before it can be read.
-    """
-
-    def __init__(self, wired):
-        self._wired = wired
-
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(name)
-        return self._wired._ensure_param(name)
-
-    def __getitem__(self, name):
-        return self._wired._ensure_param(name)
 
 
 class _BuildingMember:
@@ -430,9 +379,9 @@ class _InitWired:
     wiring's own call order, so any topology — and any init that
     requires an input — is served. The recorded state is the initial one
     (first touch wins); repeated calls advance a working copy to keep the
-    wiring flowing while the recorded initial state stands. self.param
-    reads the param Struct, self.state reads member initial states
-    (built on demand). Members neither called nor read are init'd from
+    wiring flowing while the recorded initial state stands. A member view's
+    ``param`` reads its param slot and its ``state`` the member's initial
+    state, built on demand. Members neither called nor read are init'd from
     their own bundles alone when the state is finalized.
 
     `real` records whether the TOP-level input was data or the zeros of a
@@ -473,14 +422,6 @@ class _InitWired:
         self._boundary = (self._walk_rng._require()
                           if author_rng or not real else None)
 
-    @property
-    def param(self):
-        return self._param
-
-    @property
-    def state(self):
-        return _LazyInitState(self)
-
     def _build(self, name, x):
         """Init member `name` from its own bundle, plus a call-site input `x`
         when feeding — recording the initial state and starting the
@@ -509,8 +450,9 @@ class _InitWired:
         self._work[name] = self._init[name]
 
     def _ensure(self, name):
-        """The member's initial state for a READ (self.state, a method's
-        live slice), built from its own bundle with no call-site input. For a
+        """The member's initial state for a READ (a member view's state, a
+        method's live slice), built from its own bundle with no call-site
+        input. For a
         member whose init ignores input (a self-defined start, like a
         battery's charge) this IS its initial state. For a recurrent
         member read before it is fed (a delay in a feedback loop) it is
@@ -640,8 +582,8 @@ class _BuildingWired:
     with (pass input=x), probes it (init + apply) to get the output to
     pass on, and records the param. The param-side twin of init discovery
     — shapes propagate through the wiring in the wiring's own call order,
-    so any topology works. Member methods and direct ``self.param`` /
-    ``self.state`` reads use the same lazily built throwaway slices as member
+    so any topology works. Member methods and a member view's ``param`` and
+    ``state`` reads use the same lazily built throwaway slices as member
     calls, preserving the authored runtime surface during discovery."""
 
     def __init__(self, definitions, given, rng: MaybeKeyStream, kwargs):
@@ -654,14 +596,6 @@ class _BuildingWired:
         self._built = {}
         self._states = {}
         self._specs = {}      # the shape each member was fed, for rebuilding outside
-
-    @property
-    def param(self):
-        return _LazyBuildingParam(self)
-
-    @property
-    def state(self):
-        return _LazyInitState(self)
 
     def _resolved_node(self, name):
         """The member definition at the shape known so far in this walk."""
@@ -818,17 +752,13 @@ class _RawApply:
 class _WiredApply:
     """An apply authored against `self`: the wiring builds the transient step
     object, and the same call drives the param- and init-time discovery runs.
-
-    ``scope`` is the author's view of each walk object; None hands the walk
-    object over as it is. Subclasses differ only in how the input slot
-    reaches the author."""
-    __slots__ = ('_apply', '_scope')
+    Subclasses differ only in how the input slot reaches the author."""
+    __slots__ = ('_apply',)
     fields: tuple[str, ...] = ()
     wired = True
 
-    def __init__(self, apply: Callable, scope: Callable | None = None):
+    def __init__(self, apply: Callable):
         self._apply = apply
-        self._scope = scope
 
     @property
     def author_rng(self) -> bool:
@@ -873,9 +803,8 @@ class _FieldApply(_WiredApply):
     member calls share the invocation's ordered RNG cursor."""
     __slots__ = ('fields',)
 
-    def __init__(self, apply: Callable, fields: tuple[str, ...],
-                 scope: Callable | None = None):
-        super().__init__(apply, scope)
+    def __init__(self, apply: Callable, fields: tuple[str, ...]):
+        super().__init__(apply)
         self.fields = fields
 
     def run(self, wired, input):
@@ -891,21 +820,18 @@ class _FieldApply(_WiredApply):
                 kw[f] = wired._boundary
             else:
                 kw[f] = input[f]
-        view = wired if self._scope is None else self._scope(wired)
-        return self._apply(view, **kw)
+        return self._apply(wired, **kw)
 
 
-def _authored(apply: Callable, *,
-              scope: Callable | None = None) -> _RawApply | _WiredApply:
+def _authored(apply: Callable) -> _RawApply | _WiredApply:
     """Which of the three authored apply forms this is, as an object that
     answers for itself: how to run the wiring, what fields it declares, and
-    how to lift it into the contract impl. ``scope`` is the author's view of
-    each walk object, when the plain walk object is not it."""
+    how to lift it into the contract impl."""
     sig = tuple(inspect.signature(apply).parameters)
     if sig == ('param', 'state', 'input'):
         return _RawApply(apply)          # the contract form: the bundle whole
     if sig[:1] == ('self',) and len(sig) > 1:
         # trailing names are the input fields, `input` one like any other
-        return _FieldApply(apply, sig[1:], scope)
+        return _FieldApply(apply, sig[1:])
     raise TypeError('composite apply is (self, <fields...>) or the raw '
                     f'(param, state, input) -> (state, output); got {sig}')

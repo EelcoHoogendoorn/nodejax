@@ -139,7 +139,7 @@ def Loop(dt: float, ctrl: Node) -> Node:
     members = Composite(ctrl=ctrl, plant=Servo(dt), delay=Delay())
 
     def apply(self, input):
-        v = self.ctrl(ref=input, theta=self.state.delay)
+        v = self.ctrl(ref=input, theta=self.delay.state)
         theta = self.plant(v)
         self.delay(theta)                     # advance the one-tick memory
         return theta
@@ -484,7 +484,7 @@ def test_param_shape_walk_preserves_method_only_members_and_live_slices():
 
     def apply(self, trigger):
         through_method = self.source.value()
-        through_slices = self.param.source.scale * self.state.source
+        through_slices = self.source.param.scale * self.source.state
         return self.sink(through_method + through_slices + trigger * 0.0)
 
     bound = members(apply, name='method_shape_walk').with_input(
@@ -501,7 +501,7 @@ def test_pure_state_composite_binds_itself():
     members = Composite(plant=Servo(DT), delay=Delay())
 
     def apply(self, input):
-        theta = self.plant(input - self.state.delay)  # unit feedback via the memory
+        theta = self.plant(input - self.delay.state)  # unit feedback via the memory
         self.delay(theta)
         return theta
 
@@ -592,7 +592,7 @@ def test_composite_recurrent_read_before_feed_is_allowed():
 
     def loop():
         def apply(self, input):
-            prev = self.state.mem                     # read last step's value
+            prev = self.mem.state                     # read last step's value
             y = input + prev
             self.mem(y)                               # then store this step's
             return y
@@ -611,7 +611,7 @@ def test_composite_init_shape_instability_raises_at_init():
 
     def grow():
         def apply(self, input):
-            p = self.state.mem
+            p = self.mem.state
             y = jnp.concatenate([jnp.atleast_1d(p), jnp.atleast_1d(input)])
             self.mem(y)
             return y

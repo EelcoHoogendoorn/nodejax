@@ -158,9 +158,9 @@ def SummaryRegisters(block: Node, levels: int, hidden: int,
     )
 
     def apply(self, input):
-        active = active_levels(self.state.counter, levels)
-        held = self.state.held
-        readout = self.state.readout
+        active = active_levels(self.counter.state, levels)
+        held = self.held.state
+        readout = self.readout.state
         for level in active:
             neighbor = jnp.where(level == 0,
                                  jnp.zeros(hidden), held[level - 1])

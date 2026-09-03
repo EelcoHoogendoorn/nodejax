@@ -143,7 +143,7 @@ def RecedingMPPI(plan: Node, refinements: Node) -> Node:
     def apply(self, input):
         refined = self.refinements(
             initial_state=input,
-            controls=self.state.plan,
+            controls=self.plan.state,
         )
         controls = refined.controls
         shifted = jnp.concatenate((controls[1:], jnp.zeros_like(controls[:1])))

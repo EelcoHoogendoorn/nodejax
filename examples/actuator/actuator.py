@@ -30,14 +30,14 @@ def ActuatorStack(battery: Node, mechanical_est: Node, command_ctrl: Node,
         target_i = self.command_ctrl(bundle=Struct(
             command=command,
             est_mechanical=est_mech,
-            motor=self.param.current_ctrl.motor))
+            motor=self.current_ctrl.param.motor))
         target_i = self.motor_thermal.derate(target_i)
-        pwm = self.current_ctrl(true_i=self.state.motor,           # true electrical state
+        pwm = self.current_ctrl(true_i=self.motor.state,           # true electrical state
                                 est_velocity=est_mech.velocity,
                                 true_v=true_v, target_i=target_i)
         out = self.motor(mechanical=mechanical, voltage=pwm * true_v)
 
-        p_diss = out.current.norm2() * self.param.motor.resistance
+        p_diss = out.current.norm2() * self.motor.param.resistance
         self.motor_thermal(p_diss)                                 # heat the windings
         self.battery(mechanical.velocity * out.torque + p_diss)
         return out.torque

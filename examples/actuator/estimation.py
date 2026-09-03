@@ -30,7 +30,7 @@ def ModelEstimator(dt: float, filter, model_fn: Callable=lambda filtered, previo
 
     def apply(self, value, model):
         filtered = self.filter(value)
-        predicted = model_fn(filtered, self.state.prev, model)
+        predicted = model_fn(filtered, self.prev.state, model)
         blended = self.mix(fast=filtered, slow=predicted)
         self.prev(blended)
         return blended

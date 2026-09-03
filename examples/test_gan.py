@@ -90,12 +90,12 @@ def GAN(discriminator_opt, generator_opt) -> Node:
     def apply(self, tick, rng):
         # D round: real against the previous round's generator's fakes
         real = MU + SIGMA * jax.random.normal(rng.next(), (BATCH, 1))
-        fake = generator.apply(self.state.generator.opt.params.model,
+        fake = generator.apply(self.generator.state.opt.params.model,
                                rng=rng.next())
         self.discriminator(input=jnp.concatenate([real, fake]),
                            target=real_labels)
         # G round: the previous round's critic rides the input bundle
-        self.generator(critic=self.state.discriminator.opt.params.model,
+        self.generator(critic=self.discriminator.state.opt.params.model,
                        target=jnp.ones((BATCH, 1)))
 
     return members(apply, name='gan')

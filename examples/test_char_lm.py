@@ -83,7 +83,7 @@ def Sampler(lm: Node, temperature: float = 0.8) -> Node:
     the boundary key arrives per STEP — scan splits it across time exactly
     as a composite splits it across members."""
     def apply(self, tick: jax.Array, rng) -> jax.Array:
-        logits = self.lm(self.state.last)
+        logits = self.lm(self.last.state)
         char = jax.random.categorical(rng.next(), logits / temperature, axis=-1)
         self.last(char)                        # store it for the next step
         return char

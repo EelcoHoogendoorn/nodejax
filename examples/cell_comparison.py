@@ -82,8 +82,7 @@ def task_with_cell(cell: Node, layers: int) -> Node:
         >> mc.identified(mc.Motor(mc.DT), mc.ORDER)
     rollout = scan(observed_loop(pipe, belief_spec=jnp.zeros(mc.ORDER + 1)),
                    boundary='episode')
-    return externalize(
-        rollout, 'motor', at_init=mc.Motor(mc.DT).parameterize().param)
+    return externalize(rollout, 'motor')
 
 
 def run(name: str, cell: Node, layers: int) -> None:

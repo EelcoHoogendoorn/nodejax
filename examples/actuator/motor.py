@@ -179,7 +179,7 @@ def BenchMotor(dt: float) -> Node:
     members = Composite(electrical=Electrical(dt), mechanical=Mechanical(dt))
 
     def apply(self, voltage, load):
-        out = self.electrical(mechanical=self.state.mechanical, voltage=voltage)
+        out = self.electrical(mechanical=self.mechanical.state, voltage=voltage)
         return self.mechanical(torque=out.torque, load=load)
 
     return members(apply)

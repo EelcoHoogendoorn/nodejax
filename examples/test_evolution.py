@@ -208,7 +208,7 @@ def evolve(model: PSNode, fitness: Callable, optimizer: Node | PNode,
         children = self.opt.propose()
         best = self.opt(
             children=children,
-            member_scores=jax.vmap(score)(self.state.opt.members),
+            member_scores=jax.vmap(score)(self.opt.state.members),
             child_scores=jax.vmap(score)(children),
         )
         return None, Aux(loss=best)

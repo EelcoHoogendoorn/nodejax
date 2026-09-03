@@ -39,7 +39,7 @@ def feedback(pipe: Node, output_spec: Any = 0.0) -> Node:
     taking its members with it: a normalizer inside the loop would then be
     handed per-sample statistics under batch(), silently."""
     def apply(self, input):
-        error = jax.tree.map(jnp.subtract, input, self.state.last)
+        error = jax.tree.map(jnp.subtract, input, self.last.state)
         out = self.pipe(error)
         self.last(out)                        # carry it round for the next step
         return out
@@ -54,7 +54,7 @@ def closed_loop(pipe: Node, output_spec: Any = 0.0) -> Node:
     out, with the pipe mapping tracking error to actuation to measurement.
     feedback under another name, kept for the control vocabulary."""
     def apply(self, input):
-        error = jax.tree.map(jnp.subtract, input, self.state.last)
+        error = jax.tree.map(jnp.subtract, input, self.last.state)
         out = self.pipe(error)
         self.last(out)
         return out
@@ -72,8 +72,8 @@ def observed_loop(pipe: Node, belief_spec: Any, output_spec: Any = 0.0) -> Node:
     one nothing else could supply: a belief is the pipe's second output and
     has nothing to do with the loop's signal."""
     def apply(self, input):
-        error = jax.tree.map(jnp.subtract, input, self.state.last)
-        out = self.pipe(error=error, belief=self.state.belief)
+        error = jax.tree.map(jnp.subtract, input, self.last.state)
+        out = self.pipe(error=error, belief=self.belief.state)
         self.last(out.output)
         self.belief(out.belief)
         return out.output

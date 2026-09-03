@@ -307,8 +307,7 @@ def Task() -> Node:
 	               boundary='episode')
 	# the loop holds the controlled pipe and its registers, so the plant's
 	# params sit under the inner member
-	return externalize(
-		rollout, 'pipe.motor', at_init=Motor(DT).parameterize().param)
+	return externalize(rollout, 'pipe.motor')
 
 
 def mse(pred: jax.Array, target: jax.Array) -> jax.Array:

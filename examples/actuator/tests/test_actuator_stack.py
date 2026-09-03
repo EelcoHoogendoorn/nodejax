@@ -33,7 +33,7 @@ def Environment(actuator: Node, mechanical: Node) -> Node:
     members = Composite(actuator=actuator, mechanical=mechanical)
 
     def apply(self, command, load):
-        torque = self.actuator(mechanical=self.state.mechanical, command=command)
+        torque = self.actuator(mechanical=self.mechanical.state, command=command)
         self.mechanical(torque=torque, load=load)
         return torque
 

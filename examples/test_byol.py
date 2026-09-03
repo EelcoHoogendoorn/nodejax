@@ -153,9 +153,9 @@ def BYOL(enc: Node, pred: Node, augment: Callable,
 
     def apply(self, input: jax.Array):
         pair = self.views(input)
-        targets = enc.apply(self.state.ema, pair.v2)
+        targets = enc.apply(self.ema.state, pair.v2)
         step_loss = self.train(input=pair.v1, target=targets)
-        self.ema(self.state.train.opt.params.model.enc)
+        self.ema(self.train.state.opt.params.model.enc)
         return step_loss
 
     return members(apply, param=param, init=init)

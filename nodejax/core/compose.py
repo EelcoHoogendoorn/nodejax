@@ -533,15 +533,15 @@ def _checked_init(call: InitCall, members, name):
 def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
               init=None, apply_input_spec=None, name=None,
               methods: Mapping = _EMPTY_MAPPING,
-              rng_from: bool | None = None, scope: Callable | None = None):
-    """``rng_from`` is the authored rng policy (see ``_Wired``) and ``scope``
-    the author's view of each walk object; both serve the one-member
-    wrapper, which is this composite without a nesting level."""
+              rng_from: bool | None = None):
+    """``rng_from`` is the authored rng policy (see ``_Wired``); it serves
+    the one-member wrapper, which is this composite without a nesting
+    level."""
     definitions, captures = _promote_members(members)
     reserved = {'param', 'state'} & set(definitions.__keys__)
     if reserved:
-        raise TypeError(f'member names shadow self fields: {sorted(reserved)}')
-    authored = _authored(apply, scope=scope)
+        raise TypeError(f'member names are reserved names: {sorted(reserved)}')
+    authored = _authored(apply)
     marker = (_bundle_spec_from_sig(apply, drop=('self',))
               if authored.fields else None)
     author_rng = marker is not None and 'rng' in marker
@@ -657,8 +657,7 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
             apply, members={field: Node(child)
                             for field, child in replacements.__items__},
             param=param, init=init, apply_input_spec=apply_input_spec,
-            name=name, methods=checked_methods, rng_from=rng_from,
-            scope=scope)
+            name=name, methods=checked_methods, rng_from=rng_from)
         return rebuilt._def
 
     return _view(definition.copy(tree=bind))
@@ -705,7 +704,7 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
     inner = composite(
         apply, members={member: operand}, init=declared_init,
         apply_input_spec=input_spec, name=name or f'wrapper({child.name})',
-        rng_from=rng_from, scope=lambda wired: _TransparentScope(wired, member),
+        rng_from=rng_from,
     )._def
 
     def keyed(value):
@@ -780,26 +779,6 @@ def _transparent_init(init: Callable, member: str) -> Callable:
 
     keyed.__signature__ = inspect.signature(init)
     return keyed
-
-
-class _TransparentScope:
-    """The wrapper's ``self``: a one-member walk object whose ``param`` and
-    ``state`` are the member's own slot rather than a keyed Struct."""
-
-    def __init__(self, wired, member: str):
-        self._wired = wired
-        self._member = member
-
-    @property
-    def param(self):
-        return getattr(self._wired.param, self._member)
-
-    @property
-    def state(self):
-        return getattr(self._wired.state, self._member)
-
-    def __getattr__(self, name):
-        return getattr(self._wired, name)
 
 
 def _ident(name):

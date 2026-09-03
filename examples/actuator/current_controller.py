@@ -90,8 +90,8 @@ def CurrentController(dt: float, motor: Node, estimator: Node, controller: Node,
         # times its bus estimate — the true bus is not its to know)
         est_i = self.estimator(
             value=true_i,
-            model=Struct(motor=self.param.motor,
-                         mod_v=self.state.pwm_prev * est_v,
+            model=Struct(motor=self.motor.param,
+                         mod_v=self.pwm_prev.state * est_v,
                          est_velocity=est_velocity))
 
         fb_v = self.controller(target_i - est_i)
