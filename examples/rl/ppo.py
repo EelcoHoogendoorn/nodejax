@@ -306,7 +306,10 @@ def ppo_iteration(
     # scanned run carries them between chunks but starts fresh on every iteration.
     sampler = externalize(
         batch(
-            scanned(scan(SamplingStep(policy, plant), n=n_steps_per_chunk)),
+            scanned(
+                scan(SamplingStep(policy, plant), n=n_steps_per_chunk),
+                n=n_chunks_per_epoch,
+            ),
             n=n_worlds,
         ),
         'policy',

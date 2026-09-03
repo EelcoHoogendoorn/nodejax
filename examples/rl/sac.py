@@ -39,7 +39,6 @@ from nodejax import (
     scan,
     scanned,
     split_aux,
-    tile,
     tree_reshape,
     tree_tail,
     train_step,
@@ -299,23 +298,17 @@ def sac_iteration(
     """Assemble one SAC iteration from a policy, a critic, and a plant.
 
     ``critic_loss`` fits the state-command cost Node to a target and may
-    declare ``aux``. The transition resolves the policy and critic contracts
-    and shapes the buffer's rows together with the policy's own state.
+    declare ``aux``. The transition resolves the policy and critic contracts;
+    the buffer takes its row shape from what the iteration inserts.
     """
     policy = policy.with_input(transition.observation)
     critic = critic.with_input(Struct(
         observation=transition.observation,
         command=transition.command,
     ))
-    element = Struct(
-        observation=tile(transition.observation, n_steps_per_chunk + 1),
-        command=tile(transition.command, n_steps_per_chunk),
-        cost=tile(transition.cost, n_steps_per_chunk),
-        initial=policy.state_spec,
-    )
     sampler = externalize(
         batch(
-            scanned(scan(SamplingStep(policy, plant), n=n_steps_per_chunk)),
+            scanned(scan(SamplingStep(policy, plant), n=n_steps_per_chunk), n=n_chunks),
             n=n_worlds,
         ),
         'policy',
@@ -347,7 +340,7 @@ def sac_iteration(
     )
     return SACIteration(
         sampler=sampler,
-        buffer=Buffer(capacity, element),
+        buffer=Buffer(capacity),
         update=scan(update, n=n_updates),
         n_updates=n_updates,
         n_chunks_per_minibatch=n_chunks_per_minibatch,

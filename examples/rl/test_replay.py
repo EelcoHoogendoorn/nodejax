@@ -9,12 +9,11 @@ from examples.rl.replay import Buffer
 
 def test_buffer_wraps_and_samples_only_filled_rows() -> None:
     capacity = 8
-    element = Struct(observation=jnp.zeros(2), cost=jnp.zeros(()))
-    buffer = Buffer(capacity, element).parameterize().initialize()
     segment = Struct(
         observation=jnp.arange(10.0).reshape(5, 2),
         cost=jnp.arange(1.0, 6.0),
     )
+    buffer = Buffer(capacity).with_input(segment).parameterize().initialize()
     buffer, fill = buffer.apply(segment)
     drawn = buffer.sample(64, rng=jax.random.PRNGKey(0))
 
@@ -43,12 +42,11 @@ def InsertThenSample(buffer: Node, count: int) -> Node:
 
 
 def test_buffer_insert_is_visible_to_a_sample_in_the_same_apply() -> None:
-    element = Struct(cost=jnp.zeros(()))
-    trip = InsertThenSample(
-        Buffer(8, element),
-        count=16,
-    ).parameterize().initialize()
     segment = Struct(cost=jnp.arange(1.0, 6.0))
+    trip = InsertThenSample(
+        Buffer(8),
+        count=16,
+    ).with_input(segment).parameterize().initialize()
     trip, output = jax.jit(trip.apply)(segment, rng=jax.random.PRNGKey(1))
 
     assert output.fill == 5

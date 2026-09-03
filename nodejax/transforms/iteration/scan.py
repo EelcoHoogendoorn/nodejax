@@ -38,12 +38,18 @@ def _split_state_fields(input: Struct, fields: tuple[str, ...]) -> tuple[Struct,
     return state_input, sequence
 
 
-def _internalized_form(inner: Contract, fields: tuple[str, ...]) -> dict:
+def _internalized_form(inner: Contract, fields: tuple[str, ...],
+                       n: int | None = None) -> dict:
     """The call form of an internalized run: the step's sequence fields, and its
     required state-input fields beside them, once and unbatched over time."""
     if not fields:
-        return {'input_spec': _sequence_spec(inner)}
+        return {'input_spec': _sequence_spec(inner, n)}
     return {'apply_fields': tuple(inner.apply_fields) + fields, 'input_spec': None}
+
+
+def _check_length(name: str, n: int | None) -> None:
+    if n is not None and (type(n) is not int or n < 1):
+        raise TypeError(f'{name} n must be a positive int, got {n!r}')
 
 
 def _state_at_first_step(inner: Contract, param, state_input, data, rng, *,
@@ -153,8 +159,7 @@ def scan(step: Node, record: bool = False,
     output. ``n`` declares and enforces a fixed sequence length; without it,
     the sequence length may change between calls.
     """
-    if n is not None and (type(n) is not int or n < 1):
-        raise TypeError(f'scan n must be a positive int, got {n!r}')
+    _check_length('scan', n)
     _check_claim(step.contract, boundary)
 
     if not step.cyclic:
@@ -224,7 +229,8 @@ def scan(step: Node, record: bool = False,
 
 
 @transform(preserves='param', internalizes='state')
-def scanned(step: Node, record: bool = False, *, state=None) -> Node | PNode:
+def scanned(step: Node, record: bool = False, n: int | None = None, *,
+            state=None) -> Node | PNode:
     """Run ``step`` over a sequence with fresh state on every call.
 
     A state-bound step runs from its bound state, which ``state`` gives
@@ -233,17 +239,21 @@ def scanned(step: Node, record: bool = False, *, state=None) -> Node | PNode:
     fields, once and unbatched over time, and from the first sequence
     element. The per-step outputs are returned and the final state is
     discarded. ``record=True`` adds the state trajectory to the auxiliary
-    output without changing the ordinary output. An acyclic step has unit
-    state, so this is its ordinary sequence map.
+    output without changing the ordinary output. ``n`` declares and
+    enforces a fixed sequence length; without it, the sequence length may
+    change between calls. An acyclic step has unit state, so this is its
+    ordinary sequence map.
     """
+    _check_length('scanned', n)
     fields = () if state is not None else step.contract.state_input_fields
 
     def apply_fn(contract, param, input, rng):
         current = contract.members.step
         state_input, sequence = _split_state_fields(input, fields)
+        sequence = scan_inputs(current, sequence, n)
         initial = _run_start(contract, param, state_input, sequence, rng)
         _, outputs = scan_steps(
-            current, param, initial, sequence, rng, record=record)
+            current, param, initial, sequence, rng, record=record, length=n)
         return outputs
 
     run = Wrapper(step=step).roles(
@@ -251,14 +261,14 @@ def scanned(step: Node, record: bool = False, *, state=None) -> Node | PNode:
         param=_sequence_parameterize('step', fields),
         init=False,
         apply=apply_fn,
-        **_internalized_form(step.contract, fields),
+        **_internalized_form(step.contract, fields, n),
         apply_takes_rng=_run_takes_rng(step.contract, state),
     )
     return _from_state(run, state)
 
 
 @transform(preserves='param', internalizes='state')
-def carried(step: Node, *, state=None) -> Node | PNode:
+def carried(step: Node, n: int | None = None, *, state=None) -> Node | PNode:
     """Run ``step`` from fresh state and return it bound to its final state.
 
     A state-bound step runs from its bound state, which ``state`` gives
@@ -267,18 +277,20 @@ def carried(step: Node, *, state=None) -> Node | PNode:
     fields, and from the first sequence element. Per-step outputs are
     discarded. Any auxiliary values emitted by the step remain available
     alongside the bound step, whose members and methods read the final
-    state.
+    state. ``n`` declares and enforces a fixed sequence length.
     """
     if not step.cyclic:
         raise TypeError(f'carried requires a cyclic node, got {step!r}')
+    _check_length('carried', n)
     fields = () if state is not None else step.contract.state_input_fields
 
     def apply_fn(contract, param, input, rng):
         current = contract.members.step
         state_input, sequence = _split_state_fields(input, fields)
+        sequence = scan_inputs(current, sequence, n)
         initial = _run_start(contract, param, state_input, sequence, rng)
         final, outputs = scan_steps(
-            current, param, initial, sequence, rng)
+            current, param, initial, sequence, rng, length=n)
         _, aux = split_aux(outputs)
         done = bind(current, param, state=final)
         return done if aux is None else (done, aux)
@@ -288,7 +300,7 @@ def carried(step: Node, *, state=None) -> Node | PNode:
         param=_sequence_parameterize('step', fields),
         init=False,
         apply=apply_fn,
-        **_internalized_form(step.contract, fields),
+        **_internalized_form(step.contract, fields, n),
         apply_takes_rng=_run_takes_rng(step.contract, state),
     )
     return _from_state(run, state)

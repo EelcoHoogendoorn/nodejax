@@ -387,3 +387,13 @@ def test_an_internalized_run_takes_the_step_state_inputs_beside_the_sequence():
     outputs = run.apply(input=jnp.ones(3), initial=jnp.asarray(10.0))
 
     assert jnp.allclose(outputs, jnp.asarray([10.0, 11.0, 12.0]))
+
+
+def test_internalized_runs_declare_and_enforce_their_length():
+    run = scanned(Integrator(), n=3).parameterize()
+    assert jnp.allclose(run.apply(jnp.ones(3)), jnp.asarray([1.0, 2.0, 3.0]))
+    with pytest.raises(TypeError, match='expected n=3'):
+        run.apply(jnp.ones(4))
+    from nodejax import carried
+    done = carried(Integrator(), n=3).parameterize().apply(jnp.ones(3))
+    assert done.state == 3.0

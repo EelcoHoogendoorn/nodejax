@@ -55,22 +55,6 @@ class PSNode(BaseNode):
     def pnode(self) -> PNode:
         return PNode(self._def, self.param)
 
-    @property
-    def param_spec(self):
-        """The shapes of the parameters this view holds."""
-        from nodejax.core.spec import spec_of
-        return spec_of(self.param)
-
-    @property
-    def state_spec(self):
-        """The shapes of the state this view holds."""
-        from nodejax.core.spec import spec_of
-        return spec_of(self.state)
-
-    @property
-    def output_spec(self):
-        return self.contract.output_spec_from(self.param_spec, self.state_spec)
-
     def reset(self, *args, **fields) -> 'PSNode':
         return self.pnode.initialize(*args, **fields)
 

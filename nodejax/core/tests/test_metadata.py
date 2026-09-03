@@ -138,28 +138,6 @@ def test_param_entropy_composes_separately_from_input_specs():
     assert not det.contract.param_takes_rng
 
 
-def test_the_six_spec_surface():
-    from nodejax import spec
-    # a shaped linear leaf: IN specs are rigid; OUT specs derive by eval_shape
-    def lin():
-        def param(weight, bias):
-            return Struct(weight=jnp.asarray(weight), bias=jnp.asarray(bias))
-        def apply(param, input):
-            return input @ param.weight + param.bias
-        return Leaf(apply, param=param, name='lin', apply_input_spec=spec(4))
-    node = lin().parameterize(weight=jnp.ones((4, 3)), bias=jnp.zeros(3))
-    contract = node.contract
-    # IN (what a caller supplies)
-    assert contract.param_input_spec.weight is REQUIRED
-    assert contract.param_input_spec.bias is REQUIRED
-    assert contract.state_input_spec is None
-    assert contract.input_spec.input.shape == (4,)
-    # OUT (what the node produces)
-    assert node.param_spec.weight.shape == (4, 3)
-    assert node.state_spec == ()
-    assert node.output_spec.shape == (3,)
-
-
 def test_tree_binding_discards_captured_member_parameters():
     """Captures belong after tree binding and disappear when it is rerun."""
     from nodejax import map_members
