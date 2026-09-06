@@ -38,7 +38,7 @@ from nodejax import (
     tree_last,
 )
 from nodejax import nn
-from examples.rl.control import ControlledStep, OpenLoopStep
+from examples.rl.control import OpenLoopStep, PlannedStep, initial_state
 from examples.rl.losses import bootstrapped_costs, mse, td_lambda
 
 
@@ -92,14 +92,15 @@ def MPPIStep(
 ) -> Node:
     """Refine one explicit plan from one fixed initial plant state.
 
-    ``proposal`` maps controls shaped ``[time]`` to candidates shaped
-    ``[candidate, time]``. ``rollouts`` accepts that candidate array and one
-    initial plant state; it returns ``cost`` shaped ``[candidate, time]`` and
-    a matching ``next_state`` pytree. The rollout Node owns any environment
-    inputs and axis preparation. ``critics`` maps the candidate-axis terminal
-    state pytree to values shaped ``[candidate]``. The current plan is included
-    as an additional candidate. The output is ``Struct(initial_state,
-    controls)`` with controls shaped ``[time]``.
+    ``proposal`` maps controls shaped ``[time, *command]`` to candidates
+    shaped ``[candidate, time, *command]``, the command scalar or a vector.
+    ``rollouts`` accepts that candidate array and one initial plant state; it
+    returns ``cost`` shaped ``[candidate, time]`` and a matching
+    ``next_state`` pytree. The rollout Node owns any environment inputs and
+    axis preparation. ``critics`` maps the candidate-axis terminal state
+    pytree to values shaped ``[candidate]``. The current plan is included as
+    an additional candidate. The output is ``Struct(initial_state,
+    controls)`` with controls shaped like the input.
     """
     members = Composite(
         proposal=proposal,
@@ -122,7 +123,8 @@ def MPPIStep(
             discount=discount,
         )
         weights = mppi_weights(costs, temperature)
-        refined = jnp.sum(weights[:, None] * candidates, axis=0)
+        weights = weights.reshape((-1,) + (1,) * (candidates.ndim - 1))
+        refined = jnp.sum(weights * candidates, axis=0)
         return Struct(initial_state=initial_state, controls=refined)
 
     return members(apply)
@@ -132,11 +134,11 @@ def MPPIStep(
 def RecedingMPPI(plan: Node, refinements: Node) -> Node:
     """Refine a stored plan, execute its first command, then shift it.
 
-    ``plan`` is a cyclic Node whose state is the current ``[time]`` plan and
-    whose input replaces that state. ``refinements`` accepts ``initial_state``
-    and ``controls`` shaped ``[time]`` and returns
+    ``plan`` is a cyclic Node whose state is the current ``[time, *command]``
+    plan and whose input replaces that state. ``refinements`` accepts
+    ``initial_state`` and ``controls`` shaped like the plan and returns
     ``Struct(initial_state, controls)`` with the same shapes. This Node accepts
-    one plant-state pytree and returns one scalar command.
+    one plant-state pytree and returns one command, the plan's first.
     """
     members = Composite(plan=plan, refinements=refinements)
 
@@ -209,7 +211,7 @@ def MPPIIteration(
         self.critic_trainer(input=trajectory.state, target=targets)
 
         mean_cost = jnp.mean(trajectory.cost)
-        return mean_cost, Aux(mean_cost=mean_cost)
+        return mean_cost, Aux(mean_cost=mean_cost, target_variance=jnp.var(targets))
 
     return members(apply)
 
@@ -218,9 +220,10 @@ def MPPIIteration(
 def CandidateRollouts(rollouts: Node) -> Node:
     """Roll one start out open loop under every candidate plan.
 
-    ``candidates`` is shaped (candidate, time), while ``initial_state`` is one
-    unbatched plant-state pytree. Returned state leaves begin
-    (candidate, time, ...), and ``cost`` is shaped (candidate, time).
+    ``candidates`` is shaped (candidate, time, *command), while
+    ``initial_state`` is one unbatched plant-state pytree. Returned state
+    leaves begin (candidate, time, ...), and ``cost`` is shaped
+    (candidate, time).
 
     The wrapped Node is ``batch(scanned(OpenLoopStep))``: batch consumes
     candidates and scan consumes time, the order the plans arrive in. The
@@ -230,7 +233,7 @@ def CandidateRollouts(rollouts: Node) -> Node:
     def apply(self, initial_state, candidates):
         return self.rollouts(
             command=candidates,
-            disturbance=jnp.zeros_like(candidates),
+            disturbance=jnp.zeros(candidates.shape[:2]),
             initial_state=tile(initial_state, candidates.shape[0]),
         )
 
@@ -248,7 +251,8 @@ def mppi_controller(
     discount: float,  # per-step discount on rollout cost and on the critic's terminal value
     n_candidates: int,
     n_refinements: int,  # MPPI refinements of the warm plan per control step
-    n_steps_per_plan: int,  # horizon in control steps; one scalar command per step
+    n_steps_per_plan: int,  # horizon in control steps; one command per step
+    command_shape: tuple = (),  # the shape of one command: () for a scalar
 ) -> Node:
     """Assemble the receding MPPI controller from a critic and a plant.
 
@@ -270,11 +274,11 @@ def mppi_controller(
         discount=discount,
         temperature=temperature,
     )
-    plan = control.Delay().with_input(jnp.zeros((n_steps_per_plan,)))
+    plan = control.Delay().with_input(jnp.zeros((n_steps_per_plan,) + tuple(command_shape)))
     return RecedingMPPI(
         plan=plan,
         refinements=repeat(refinement, n=n_refinements),
-    ).with_input(plant.initialize().state)
+    ).with_input(initial_state(plant))
 
 
 def mppi_iteration(
@@ -301,7 +305,7 @@ def mppi_iteration(
     target critic.
     """
     sampler = externalize(
-        batch(scanned(ControlledStep(controller, plant)), n=n_worlds),
+        batch(scanned(PlannedStep(controller, plant)), n=n_worlds),
         'policy.refinements.critics',
     )
     trajectory_critic = batch(batch(critic, n=n_steps_per_iteration), n=n_worlds)
@@ -329,15 +333,21 @@ def mppi_training(
 
     ``program`` carries an MPPI iteration over its data. The result holds the
     iteration bound to its final state, from which a caller binds a critic
-    to the EMA state, and the history.
+    to the EMA state, and the history: per iteration the mean cost, the
+    critic's last fitting loss, and ``critic_explained``, the share of the
+    targets' variance that loss leaves explained, one for a perfect fit,
+    zero for a constant, which is what says whether the critic learns.
     """
     final, aux = split_aux(
         jax.jit(program.parameterize(rng=parameter_key).apply)(rng=training_key),
     )
+    critic_loss = aux.training.critic_trainer.loss[..., -1].reshape(-1)
+    target_variance = aux.training.target_variance.reshape(-1)
     return Struct(
         iteration=final,
         history=Struct(
-            critic_loss=aux.training.critic_trainer.loss[..., -1].reshape(-1),
+            critic_loss=critic_loss,
+            critic_explained=1.0 - critic_loss / target_variance,
             mean_cost=aux.training.mean_cost.reshape(-1),
         ),
     )

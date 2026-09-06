@@ -13,7 +13,7 @@ import jax.numpy as jnp
 
 from nodejax.core.ambient import node
 from nodejax.core.binding import (
-    Aux, _bundle_spec_from_sig, _has_rng_deep, _spec_resolved,
+    Aux, _bundle_spec, _bundle_spec_from_sig, _has_rng_deep, _spec_resolved,
     split_aux,
 )
 from nodejax.core.composite import (
@@ -26,7 +26,7 @@ from nodejax.core.definition import Captures, Construction, Def, Layout
 from nodejax.frozendict import frozendict
 from nodejax.core.generic import Generic, is_generic
 from nodejax.core.lifting import (
-    _check_methods, _compile_init, _compile_param,
+    _check_methods, _compile_init, _compile_param, _signature,
 )
 from nodejax.core.node import BaseNode, Node, _is_node, _view
 from nodejax.core.rng import MaybeKeyStream
@@ -494,6 +494,71 @@ def _member_init(members, authored, param, evidence, rng, inputs, *,
     return Struct(**states) if states else ()
 
 
+def _takes_self(fn: Callable) -> bool:
+    """Whether an authored init is written against ``self``: member views
+    over the init-time slots, as an authored apply has over the step's."""
+    return next(iter(inspect.signature(fn).parameters), None) == 'self'
+
+
+def _compile_wired_init(fn: Callable, definitions: Struct, captures: Captures,
+                        owner: str) -> InitCall:
+    """An init written against ``self``. Its member views bind, reset, and
+    read the members through the init-time slots, each member's parameters
+    bound and its key split off by the view, and the composite's state is
+    what the slots hold when the function returns; so it returns nothing.
+    The init takes a key exactly when a member's init does, or when the
+    author declares ``rng``. ``input`` is the priming input, as for any
+    init; every other name is a state input."""
+    signature = _signature(fn, 'initializer')
+    claimed = {'param', 'state', 'node'} & set(signature)
+    if claimed:
+        raise TypeError(
+            f'{owner}: an init written against self reaches its members '
+            f'through it; {sorted(claimed)} are not arguments')
+    if ('input' in signature and
+            signature['input'].default is not inspect.Parameter.empty):
+        raise TypeError('init input is a required priming value or is omitted')
+    primes = 'input' in signature
+    declaration = _bundle_spec(signature, drop=('self', 'input'))
+    author_rng = 'rng' in declaration
+    if author_rng:
+        declaration = declaration.without('rng')
+
+    def run(definition, param, formed_input, rng, priming):
+        wired = _InitWired(
+            definition.members, param, rng, Struct(),
+            dict(definition.captures.state), author_rng=author_rng)
+        arguments = {}
+        for name in signature:
+            if name == 'self':
+                continue
+            if name == 'rng':
+                arguments[name] = wired._boundary
+            elif name == 'input':
+                arguments[name] = priming
+            elif name in formed_input:
+                arguments[name] = formed_input[name]
+        if fn(wired, **arguments) is not None:
+            raise TypeError(
+                f'{definition.name}.init: an init written against self '
+                'stores state through its member views and returns nothing')
+        return wired._collect()
+
+    if primes:
+        def impl(definition, param, formed_input, input, rng):
+            return run(definition, param, formed_input, rng, input)
+    else:
+        def impl(definition, param, formed_input, rng):
+            return run(definition, param, formed_input, rng, None)
+
+    return InitCall(
+        impl=impl,
+        form=CallForm.from_values(declaration),
+        takes_rng=author_rng or _init_takes_rng(definitions, captures),
+        requires_input=primes,
+    )
+
+
 def _checked_init(call: InitCall, members, name):
     def validate(state):
         from nodejax.core.contract import _empty
@@ -561,7 +626,8 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
                 member.parametric and member.calls.param.reads_def
                 for member in current)):
             wired = _BuildingWired(
-                current, dict(captures.param), rng, slots)
+                current, dict(captures.param), rng, slots,
+                states=dict(captures.state))
             jax.eval_shape(lambda value: authored.run(wired, value), shape)
             values = wired.parameters()
             return values
@@ -598,7 +664,10 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
     if param is not None and not any_param:
         raise TypeError('a composite has no parameters outside its members')
     custom_param = _compile_param(param) if param is not None else None
-    custom_init = _compile_init(init) if init is not None else None
+    custom_init = (
+        None if init is None else
+        _compile_wired_init(init, definitions, captures, name or 'composite')
+        if _takes_self(init) else _compile_init(init))
     cyclic = any(member.cyclic for member in definitions) or init is not None
     requires_input = (custom_init.requires_input if custom_init else any(
         member.contract.init_requires_input and field not in captures.state
@@ -699,8 +768,11 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
     child = operand._def
     # A declared init stays over a stateless member: its state is the empty
     # slot either way, but its state-input fields are part of the wrapper's
-    # call form, so callers need not fork on the member's lifecycle.
-    declared_init = None if init is None else _transparent_init(init, member)
+    # call form, so callers need not fork on the member's lifecycle. An init
+    # written against self already stores under the member's name.
+    declared_init = (
+        None if init is None else
+        init if _takes_self(init) else _transparent_init(init, member))
     inner = composite(
         apply, members={member: operand}, init=declared_init,
         apply_input_spec=input_spec, name=name or f'wrapper({child.name})',
@@ -719,10 +791,23 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
         inner_param = calls.param
 
         def param_impl(definition, formed_input, rng):
+            # Re-entering parameterization replaces a bound member's capture,
+            # just as it does for any other bound Node. Remove that construction
+            # default before delegating the wrapper's flat member-form input to
+            # the ordinary composite parameter builder.
+            captures = definition.captures
+            if member in captures.param:
+                definition = definition.copy(captures=Captures(
+                    state=captures.state,
+                ))
             return getattr(
                 inner_param.impl(definition, keyed(formed_input), rng), member)
 
-        calls = calls.with_param(impl=param_impl, form=child.calls.param.form)
+        calls = calls.with_param(
+            impl=param_impl,
+            form=child.calls.param.form,
+            takes_rng=child.calls.param.takes_rng,
+        )
     if calls.init is not None:
         inner_init = calls.init
         # A generated init takes the member's bundle under its name; a

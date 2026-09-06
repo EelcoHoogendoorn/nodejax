@@ -7,13 +7,14 @@ surface instead of importing framework-private helpers.
 
 from __future__ import annotations
 
+import inspect
 from functools import wraps
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
 
-from nodejax.core.ambient import node
+from nodejax.core.ambient import _NO_REPLAY_ARGUMENT, node
 from nodejax.core.binding import Aux, AxisSpec, REQUIRED, split_aux
 from nodejax.core.contract import Contract
 from nodejax.core.node import Node, _is_node
@@ -21,6 +22,7 @@ from nodejax.core.pnode import PNode
 from nodejax.core.psnode import PSNode
 from nodejax.core.rng import MaybeKeyStream
 from nodejax.core.spec import add_axis, axis_count, element_spec
+from nodejax.frozendict import frozendict
 from nodejax.struct import Struct
 from nodejax.tree import tree_first
 
@@ -158,12 +160,17 @@ def scan_inputs(
     input: Struct,
     length: int | None = None,
 ) -> Struct:
-    """Validate that every input field carries one common sequence axis."""
+    """Validate that every input field carries one common sequence axis.
+
+    A step with no input fields scans for a declared ``length``: a system
+    ticking on its own."""
     leaves = jax.tree.leaves(input)
     if not leaves:
-        raise TypeError(
-            f'scan({step.name}) needs at least one input field with a '
-            'leading sequence axis')
+        if length is None:
+            raise TypeError(
+                f'scan({step.name}) needs at least one input field with a '
+                'leading sequence axis, or a declared n')
+        return input
     if any(not jnp.shape(leaf) for leaf in leaves):
         raise TypeError(
             f'scan({step.name}) received a scalar where a sequence axis '
@@ -184,11 +191,7 @@ def scan_steps(step: Contract, param, state, inputs, rng: MaybeKeyStream, *,
     """Run one stateful node over a sequence with per-step RNG streams."""
     inputs = scan_inputs(step, inputs, length)
     leaves = jax.tree.leaves(inputs)
-    if step.apply_takes_rng and not leaves:
-        raise TypeError(
-            f'scan({step.name}): a stochastic step needs a non-empty input '
-            'pytree to determine the sequence length')
-    count = leaves[0].shape[0] if leaves else None
+    count = leaves[0].shape[0] if leaves else length
     rngs, _ = rng.axis(step.apply_takes_rng, count)
 
     def body(carry, item):
@@ -222,33 +225,87 @@ def transform(builder: Callable | None = None, *, preserves=(),
     transform changes parameter or state layout. ``'param'`` also accepts a
     :class:`PNode` and reattaches its parameters. ``'param,state'`` does the
     same for a :class:`PSNode` and its state. ``internalizes='state'`` also
-    accepts a :class:`PSNode` whose state the builder consumes instead of
-    the result carrying it: the state reaches the builder as its ``state``
-    keyword and only the parameters are reattached. The decorated builder
-    itself always receives an unbound Node.
+    accepts a :class:`PSNode` whose state the builder consumes as the start
+    of the run it owns: the builder receives the bound view itself and only
+    the parameters are reattached to the result. Otherwise the decorated
+    builder receives an unbound Node.
     """
     roles = _preserved_roles(preserves)
     if internalizes not in (None, 'state'):
         raise TypeError("internalizes must be None or 'state'")
 
     def decorate(fn: Callable) -> Callable:
+        public_signature = inspect.signature(fn)
+
         @wraps(fn)
         def lifted(inner, *args, **kwargs):
             if not _is_node(inner):
                 raise TypeError('a transform expects a Node, PNode, or PSNode')
-            if internalizes == 'state':
-                inner, state = inner._internalized_state()
-                if state is not None:
-                    # The same construction as spelling the state directly.
-                    return registered(inner, *args, state=state, **kwargs)
-            product = fn(inner.node, *args, **kwargs)
+            internalized_state = kwargs.pop(
+                '_internalized_state', _NO_REPLAY_ARGUMENT)
+            state_recorded = internalized_state is not _NO_REPLAY_ARGUMENT
+            if state_recorded:
+                inner = PSNode(
+                    inner._def,
+                    internalized_state['param'],
+                    internalized_state['state'],
+                )
+            if (internalizes == 'state' and inner.state_bound
+                    and not state_recorded):
+                product = registered(
+                    inner.node,
+                    *args,
+                    _internalized_state=frozendict(
+                        param=inner.param, state=inner.state),
+                    **kwargs,
+                )
+                construction = product._def.construction
+                replay_values = dict(
+                    construction.replay_arguments.__items__)
+                replay_values['_internalized_state'] = (
+                    construction.arguments['_internalized_state'])
+                arguments = Struct(**{
+                    name: value
+                    for name, value in construction.arguments.__items__
+                    if name != '_internalized_state'
+                })
+                definition = product._def.copy(construction=construction.copy(
+                    arguments=arguments,
+                    replay_arguments=Struct(**replay_values),
+                ))
+                return product._with_definition(definition)
+            source = inner
+            if internalizes == 'state' and inner.state_bound:
+                product = fn(inner, *args, **kwargs)
+                source = inner.pnode
+            else:
+                product = fn(inner.node, *args, **kwargs)
             if not _is_node(product):
                 raise TypeError(
                     f"transform '{fn.__name__}' did not return a Node")
-            return inner._transfer_bindings(
+            return source._transfer_bindings(
                 product, roles, strict=True, operation='this transform')
 
+        if internalizes == 'state':
+            if '_internalized_state' in public_signature.parameters:
+                raise TypeError(
+                    "an internalizing transform reserves '_internalized_state'")
+            parameters = list(public_signature.parameters.values())
+            insertion = next(
+                (index for index, parameter in enumerate(parameters)
+                 if parameter.kind is inspect.Parameter.VAR_KEYWORD),
+                len(parameters),
+            )
+            parameters.insert(insertion, inspect.Parameter(
+                '_internalized_state',
+                kind=inspect.Parameter.KEYWORD_ONLY,
+                default=_NO_REPLAY_ARGUMENT,
+            ))
+            lifted.__signature__ = public_signature.replace(
+                parameters=parameters)
+
         registered = node(lifted)
+        registered.__signature__ = public_signature
         return registered
 
     return decorate if builder is None else decorate(builder)

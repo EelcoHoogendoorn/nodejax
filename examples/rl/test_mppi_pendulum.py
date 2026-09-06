@@ -129,4 +129,5 @@ def test_one_planning_update_trains_the_critic() -> None:
 
     assert jnp.isfinite(critic.bind(trained.iteration.ema_critic.state).apply(state))
     assert jnp.isfinite(trained.history.critic_loss).all()
+    assert jnp.isfinite(trained.history.critic_explained).all()
     assert jnp.isfinite(trained.history.mean_cost).all()

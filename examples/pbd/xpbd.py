@@ -2,15 +2,14 @@
 
 Provides the ``body`` record with linear and rotational degrees of freedom,
 unconstrained rigid motion (``FreeRigidMotion``), velocity recovery
-(``RigidVelocityUpdate``), the anchor-to-anchor constraint kernel (``AnchorConstraint``),
-and the composed rigid timestep ``xpbd_step``.
+(``RigidVelocityUpdate``), the anchor-to-anchor constraint kernel
+(``AnchorDistance``), and the composed rigid timestep ``xpbd_step``.
 """
 
 import jax
 import jax.numpy as jnp
 
 from nodejax import (
-    Aux,
     Leaf,
     Node,
     PNode,
@@ -20,7 +19,21 @@ from nodejax import (
     node,
     repeat,
 )
-from examples.pbd.core import PBDStep
+from nodejax.struct import register_struct_subtype
+from examples.pbd.core import PBDStep, safe_norm
+
+
+@register_struct_subtype
+class Body(Struct):
+    """A 2D rigid body record of poses, velocities, and inverse inertias."""
+
+    @property
+    def coords(self) -> Struct:
+        return Struct(position=self.position, angle=self.angle)
+
+    @property
+    def inv_inertia(self) -> Struct:
+        return Struct(position=self.inverse_mass[:, None], angle=self.inverse_inertia)
 
 
 def body(
@@ -30,18 +43,17 @@ def body(
     angular_velocity: jax.Array,
     inverse_mass: jax.Array,
     inverse_inertia: jax.Array,
-) -> Struct:
-    """Build a 2D extended rigid body record.
+) -> Body:
+    """A 2D rigid body record of poses, velocities, and inverse inertias.
 
-    ``position`` and ``velocity`` are 2D center-of-mass coordinates. ``angle``
-    and ``angular_velocity`` describe 2D rotation. ``inverse_mass`` and
-    ``inverse_inertia`` are scalars (zero fixes the corresponding degree of freedom).
+    ``position`` and ``velocity`` are center-of-mass vectors; ``angle`` and
+    ``angular_velocity`` are scalars. Zero ``inverse_mass`` or ``inverse_inertia``
+    fixes that degree of freedom. Leading batch axes describe collections.
 
-    A record, not a Node: it flows as data through every operation of a
-    timestep and is the state of nothing beneath ``PBDStep``, which alone
-    holds the collection as its state (see ``core``).
+    Individual substeps pass this record as call data; ``xpbd_step`` holds the
+    collection as state across timesteps via ``cyclic``.
     """
-    return Struct(
+    return Body(
         position=position,
         angle=angle,
         velocity=velocity,
@@ -96,13 +108,8 @@ def _rotate_2d(angle: jax.Array, vector: jax.Array) -> jax.Array:
 
 
 @node
-def AnchorConstraint() -> Node:
-    """Enforce distance between local anchor points on a pair of 2D rigid bodies.
-
-    Param is a record with ``anchors`` of shape ``(2, 2)``, ``rest_length``, and
-    ``compliance``. Solves coupled linear and rotational corrections along the
-    line of action.
-    """
+def AnchorDistance() -> Node:
+    """Compute distance error between local anchor points on a pair of 2D rigid bodies."""
     def param(
         anchors: jax.Array,
         rest_length: float = 0.0,
@@ -114,45 +121,24 @@ def AnchorConstraint() -> Node:
             compliance=compliance,
         )
 
-    def apply(param, pair):
-        rotated_anchors = _rotate_2d(pair.angle, param.anchors)
-        anchor_positions = pair.position + rotated_anchors
-        anchor_offset = anchor_positions[1] - anchor_positions[0]
-        distance = jnp.linalg.norm(anchor_offset)
-        direction = anchor_offset / jnp.maximum(distance, 1e-8)
-        error = distance - param.rest_length
-
-        moment = (
-            rotated_anchors[..., 0] * direction[1]
-            - rotated_anchors[..., 1] * direction[0]
-        )
-        effective_inverse_mass = pair.inverse_mass + pair.inverse_inertia * (moment ** 2)
-        total_effective_inverse_mass = jnp.sum(effective_inverse_mass) + param.compliance
-
-        multiplier = error / jnp.maximum(total_effective_inverse_mass, 1e-8)
-        signs = jnp.array([1.0, -1.0])
-
-        position = pair.position + (signs * pair.inverse_mass)[:, None] * direction * multiplier
-        angle = pair.angle + signs * pair.inverse_inertia * moment * multiplier
-
-        return pair.replace(position=position, angle=angle), Aux(distance_error=error)
+    def apply(param, coords):
+        rotated_anchors = _rotate_2d(coords.angle, param.anchors)
+        delta_pos = coords.position[1] - coords.position[0]
+        delta_anchor = rotated_anchors[1] - rotated_anchors[0]
+        return safe_norm(delta_pos + delta_anchor) - param.rest_length
 
     return Leaf(apply, param=param)
 
 
 def xpbd_step(
     constraints: Node | PNode,
-    forcing: Node,
     *,
-    n_bodies: int,
     n_solver_passes: int,
     dt: float,
-    velocity_damping: float,
+    velocity_damping: float = 1.0,
 ) -> Node:
-    """Assemble the rigid body world: one physical timestep, cyclic over the
-    collection it steps, so a caller binds or initializes its state and
-    scans it over time."""
-    predict = batch(FreeRigidMotion(dt), n=n_bodies)
+    """Assemble one 2D rigid body timestep, cyclic over the body collection."""
+    predict = batch(FreeRigidMotion(dt))
     solver = repeat(constraints, n=n_solver_passes)
-    finalize = batch(RigidVelocityUpdate(dt, velocity_damping), n=n_bodies)
-    return cyclic(PBDStep(forcing, predict, solver, finalize))
+    finalize = batch(RigidVelocityUpdate(dt, velocity_damping))
+    return cyclic(PBDStep(predict, solver, finalize))

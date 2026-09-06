@@ -179,8 +179,8 @@ def _compile_init(fn: Callable, *, owner: str | None = None) -> InitCall:
     signature = _signature(fn, 'initializer')
     if 'self' in signature:
         raise TypeError(
-            f'{owner}: authored init takes (param, input); '
-            'self is the wired apply view')
+            f'{owner}: leaf init does not accept self; member views belong '
+            'to a composite or wrapper init')
     if ('input' in signature and
             signature['input'].default is not inspect.Parameter.empty):
         raise TypeError('init input is a required priming value or is omitted')

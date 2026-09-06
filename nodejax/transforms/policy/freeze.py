@@ -14,7 +14,8 @@ def _state_residue(node, state):
         return ()
     transparent = node._def.layout.transparent_member
     if transparent is not None:
-        return _state_residue(getattr(node.members, transparent), state)
+        member = getattr(node.members, transparent)
+        return _state_residue(member, state) if member.cyclic else state
     if node.members:
         return Struct(**{
             name: _state_residue(child, state[name])
@@ -88,7 +89,10 @@ def _tree_freeze_def(node, frozen: Struct,
         frozen = derived
     transparent = node._def.layout.transparent_member
     if transparent is not None:
-        rebuilt = tree_freeze(getattr(node.members, transparent), frozen)
+        member = getattr(node.members, transparent)
+        if node.cyclic and not member.cyclic:
+            return freeze(node, frozen)
+        rebuilt = tree_freeze(member, frozen)
         return Node(node._def.bind_members(
             Struct(**{transparent: rebuilt._def})))
     if not node.members:
@@ -118,7 +122,10 @@ def _tagged_spec(node, state, tag: str):
     member's state. None where nothing beneath declares."""
     transparent = node._def.layout.transparent_member
     if transparent is not None:
-        return _tagged_spec(getattr(node.members, transparent), state, tag)
+        member = getattr(node.members, transparent)
+        if member.cyclic:
+            return _tagged_spec(member, state, tag)
+        return state if (node.cyclic and tag in node.tags) else None
     if not node.members:
         return state if (node.cyclic and tag in node.tags) else None
     out = {}

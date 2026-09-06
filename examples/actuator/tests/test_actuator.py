@@ -14,7 +14,7 @@ import jax.numpy as jnp
 from nodejax import Node, scan
 from nodejax.struct import Struct
 from nodejax.control import EMA, PID
-from examples.actuator import (ActuatorStack, Battery, Noisy,
+from examples.actuator import (ActuatorStack, Noisy,
                                        Encoder, Observer, torque_command,
                                        CurrentController, ModelEstimator,
                                        foc_current_model, CurrentSensor, FET,
@@ -35,8 +35,6 @@ def stock_stack() -> Node:
         cogging=0.8,
     )
     return ActuatorStack(
-        battery=Battery(DT)(
-            voltage_max=48.0, voltage_min=36.0, capacity=100.0),
         mechanical_est=Encoder() >> Observer(DT),
         command_ctrl=torque_command(),
         current_ctrl=CurrentController(
@@ -63,7 +61,7 @@ def test_stack_runs_and_tracks():
     # AT REST is a real initial condition, and supplying one is what lets the
     # warm filters prime. A resolved shape alone will not do it: zeros are a
     # spec, and a spec never enters an input slot (see test_priming)
-    at_rest = Struct(mechanical=Struct(position=0.0, velocity=0.0), command=0.0)
+    at_rest = Struct(mechanical=Struct(position=0.0, velocity=0.0), command=0.0, bus_voltage=48.0)
     state = stack.init(rng=jax.random.PRNGKey(0), input=at_rest)
     # booted at the SAMPLED bus: the walk carries that condition through, so
     # the ema primes at 48 V through its own noisy sensor
@@ -73,10 +71,11 @@ def test_stack_runs_and_tracks():
     t = jnp.arange(n) * DT
     mech = Struct(position=jnp.mod(20.0 * t, 2 * jnp.pi),   # spinning at 20 rad/s
                   velocity=jnp.full(n, 20.0))
-    final, torque = scan(stack)(state, mechanical=mech,
-                                command=jnp.full(n, 2.0))   # 2 Nm
+    final, out = scan(stack)(state, mechanical=mech,
+                             command=jnp.full(n, 2.0),         # 2 Nm
+                             bus_voltage=jnp.full(n, 48.0))    # a stiff bus
 
-    assert jnp.all(jnp.isfinite(torque))
-    assert jnp.abs(jnp.mean(torque[n // 2:]) - 2.0) < 0.5     # tracks the command
-    assert final.battery < 1.0                                # power was drawn
-    assert final.motor_thermal > 25.0                         # windings warmed
+    assert jnp.all(jnp.isfinite(out.torque))
+    assert jnp.abs(jnp.mean(out.torque[n // 2:]) - 2.0) < 0.5  # tracks the command
+    assert jnp.mean(out.power[n // 2:]) > 0.0                  # power was drawn
+    assert final.motor_thermal > 25.0                          # windings warmed

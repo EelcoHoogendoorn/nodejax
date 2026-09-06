@@ -147,5 +147,5 @@ def test_leaf_self_is_not_supported():
     def init(self):
         return self
 
-    with pytest.raises(TypeError, match='authored init takes'):
+    with pytest.raises(TypeError, match='leaf init does not accept self'):
         Leaf(lambda input: input, init=init, name='self_init')

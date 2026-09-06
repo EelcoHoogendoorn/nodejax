@@ -140,11 +140,9 @@ def Pendulum(
     if not math.isfinite(static_friction) or static_friction < 0.0:
         raise ValueError('static friction must be finite and non-negative')
 
-    def init():
-        return Struct(
-            angle=jnp.zeros(()),
-            velocity=jnp.zeros(()),
-        )
+    def init(start=Struct(angle=jnp.zeros(()), velocity=jnp.zeros(()))):
+        """The plant's state is where it starts, at rest unless told otherwise."""
+        return start
 
     def apply(state, command, disturbance):
         action = max_torque * jnp.tanh(command)
@@ -166,7 +164,6 @@ def Pendulum(
             + ACTION_COST * action**2
         )
         return next_state, Struct(
-            state=next_state,
             action=action,
             cost=cost,
         )

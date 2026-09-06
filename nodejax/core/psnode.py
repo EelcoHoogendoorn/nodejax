@@ -33,7 +33,7 @@ class PSNode(BaseNode):
             self, target: BaseNode, preserves=('param', 'state'),
             strict: bool = False, operation: str = 'operation') -> BaseNode:
         preserved = frozenset(preserves)
-        if strict and 'state' not in preserved:
+        if strict and 'state' not in preserved and self.cyclic:
             raise TypeError(
                 f"'{self.name}' is state-bound; {operation} does not "
                 'preserve state')
@@ -41,15 +41,11 @@ class PSNode(BaseNode):
             raise TypeError(
                 f"'{self.name}' is parameter-bound; {operation} does not "
                 'preserve parameters')
-        if 'state' in preserved:
+        if 'state' in preserved and self.cyclic:
             return PSNode(target._def, self.param, self.state)
         if 'param' in preserved:
             return PNode(target._def, self.param)
         return target
-
-    def _internalized_state(self) -> tuple[BaseNode, Any]:
-        """A state-bound view hands its state to a run and keeps its params."""
-        return self.pnode, self.state
 
     @property
     def pnode(self) -> PNode:
@@ -122,7 +118,7 @@ class PSNode(BaseNode):
                 f'{self.name!r} maps state over an axis; '
                 'a member has no single state slice')
         if self._def.layout.transparent_member == name:
-            param, state = self.param, self.state
+            param, state = self.param, (self.state if member.cyclic else ())
         else:
             param = getattr(self.param, name) if member.parametric else ()
             state = getattr(self.state, name) if member.cyclic else ()

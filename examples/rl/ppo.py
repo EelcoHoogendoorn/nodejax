@@ -53,7 +53,7 @@ from nodejax import (
     tree_take,
     train_step,
 )
-from examples.rl.control import SamplingStep
+from examples.rl.control import SamplingStep, initial_observation
 from examples.rl.losses import discounted_backward_sum
 
 
@@ -298,7 +298,7 @@ def ppo_iteration(
     """
     n_chunks_per_epoch = n_minibatches_per_epoch * n_chunks_per_minibatch
     n_rows_per_minibatch = n_worlds * n_chunks_per_minibatch
-    observation = plant.initialize().observe()
+    observation = initial_observation(plant)
     policy = policy.with_input(observation)
     value = value.with_input(observation)
 

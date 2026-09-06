@@ -88,3 +88,40 @@ def test_iterated_applies_one_node_to_the_same_input_n_times():
 
     assert output == 6.0                       # 0 + 2 + 2 + 2, last output
     assert threefold.state == 6.0              # state threaded through
+
+
+def test_repeated_keeps_every_point() -> None:
+    from nodejax import Leaf, repeated
+
+    doubling = Leaf(lambda input: 2.0 * input, name='doubling')
+    trajectory = repeated(doubling, n=3).parameterize().apply(jnp.asarray(1.0))
+    assert jnp.allclose(trajectory, jnp.asarray([2.0, 4.0, 8.0]))
+
+
+def test_repeated_runs_from_fresh_state_and_drops_it() -> None:
+    """The past-complete form of repeat: a cyclic step starts from fresh
+    state on every call and the result has no state slot."""
+    from nodejax import Node, repeated
+    from nodejax.control import Integrator
+
+    run = repeated(Integrator(), n=3)
+    assert type(run) is Node and not run.cyclic
+    trajectory = run.parameterize().apply(jnp.asarray(1.0))
+    assert jnp.allclose(trajectory, jnp.asarray([1.0, 2.0, 4.0]))
+    assert jnp.allclose(run.parameterize().apply(jnp.asarray(1.0)), trajectory)
+
+
+def test_repeat_and_repeated_run_a_state_bound_step_from_its_state() -> None:
+    from nodejax import repeated, repeat
+    from nodejax.control import Integrator
+
+    started = Integrator().parameterize().initialize().bind(state=jnp.asarray(10.0))
+    trajectory = repeated(started, n=3).apply(jnp.asarray(1.0))
+    assert jnp.allclose(trajectory, jnp.asarray([11.0, 22.0, 44.0]))
+    replayed = repeated(started, n=3).specialize().parameterize()
+    assert jnp.allclose(
+        replayed.apply(jnp.asarray(1.0)),
+        jnp.asarray([11.0, 22.0, 44.0]),
+    )
+    run, last = repeat(started, n=3).apply(jnp.asarray(1.0))
+    assert last == 44.0 and run.state == 44.0

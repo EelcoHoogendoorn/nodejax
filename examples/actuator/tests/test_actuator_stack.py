@@ -1,13 +1,13 @@
-"""The full actuator stack, closed-loop: battery -> voltage estimation ->
+"""The full actuator stack, closed-loop: bus voltage -> voltage estimation ->
 command controller -> current controller (model-based estimation on the
-modulated voltage, per-term feedforward) -> electrical motor, with
-mechanics integrated at the environment level.
+modulated voltage, per-term feedforward) -> electrical motor, with the
+battery and the mechanics at the environment level.
 
 The est/true voltage asymmetry is modeled: the controller normalizes by
 its ESTIMATED bus voltage (a noisy >> ema sensor pipeline), the motor is
 driven by pwm x TRUE battery voltage, and the battery both sags (charge
 state) and is read two ways (voltage METHOD before the step, discharge
-apply after).
+apply after with the power the stack reports).
 """
 
 import jax
@@ -27,15 +27,18 @@ from examples.actuator import (DQ, Electrical, Mechanical,
 DT = 1e-4
 
 
-def Environment(actuator: Node, mechanical: Node) -> Node:
-    """Environment-level closure: the actuator maps (mechanical, command)
-    -> torque; the environment integrates mechanics."""
-    members = Composite(actuator=actuator, mechanical=mechanical)
+def Environment(actuator: Node, battery: Node, mechanical: Node) -> Node:
+    """Environment-level closure: the actuator maps (mechanical, command,
+    bus voltage) -> torque and power; the environment owns the battery that
+    supplies the bus and takes the power back, and integrates mechanics."""
+    members = Composite(actuator=actuator, battery=battery, mechanical=mechanical)
 
     def apply(self, command, load):
-        torque = self.actuator(mechanical=self.mechanical.state, command=command)
-        self.mechanical(torque=torque, load=load)
-        return torque
+        out = self.actuator(mechanical=self.mechanical.state, command=command,
+                            bus_voltage=self.battery.voltage())
+        self.battery(out.power)
+        self.mechanical(torque=out.torque, load=load)
+        return out.torque
 
     return members(apply, name='env')
 
@@ -74,9 +77,9 @@ def build_env(command_ctrl = None, dt: float = DT) -> tuple[PNode, PNode]:
         )
         motor_thermal = DeratingThermal().parameterize(r_th=0.5, c_th=50.0, limit=120.0)
 
-        actuator = ActuatorStack(battery=battery, mechanical_est=mechanical_estimator, command_ctrl=command_controller, current_ctrl=current_controller, motor=motor, motor_thermal=motor_thermal).parameterize()
+        actuator = ActuatorStack(mechanical_est=mechanical_estimator, command_ctrl=command_controller, current_ctrl=current_controller, motor=motor, motor_thermal=motor_thermal).parameterize()
         mechanical = Mechanical().parameterize(inertia=0.1, friction=0.2)
-        environment = Environment(actuator=actuator, mechanical=mechanical).parameterize()
+        environment = Environment(actuator=actuator, battery=battery, mechanical=mechanical).parameterize()
 
         return environment, motor
 
@@ -106,7 +109,7 @@ def test_stack_assembly():
     act = state.actuator
     assert type(act.current_ctrl.pwm_prev) is DQ             # previous pwm
     assert type(act.current_ctrl.estimator.prev) is DQ   # model blend memory
-    assert act.battery == 1.0                                 # full charge
+    assert state.battery == 1.0                               # full charge
     assert act.current_ctrl.fets == 25.0                      # fets at ambient
     assert act.motor_thermal == 25.0
     assert act.mechanical_est.observer.velocity == 0.0
@@ -121,7 +124,7 @@ def test_stack_assembly():
     paths = {jax.tree_util.keystr(p)
              for p, _ in jax.tree_util.tree_flatten_with_path(env)[0]}
     assert '.actuator.current_ctrl.controller.kp' in paths
-    assert '.actuator.battery.capacity' in paths
+    assert '.battery.capacity' in paths
 
 
 def test_torque_command():
@@ -157,10 +160,10 @@ def test_battery_sags_and_the_stack_feels_it():
     """Finite capacity: charge drains with drawn power, the sag curve
     lowers the true bus voltage, and the voltage estimator tracks it."""
     env, _ = build_env()
-    env = replace_by_path(env, {'.actuator.battery.capacity': 10.0})
+    env = replace_by_path(env, {'.battery.capacity': 10.0})
     traj = simulate(env, 4000, command=3.0)
 
-    charge = traj.state.actuator.battery
+    charge = traj.state.battery
     assert charge[-1] < 0.95                                  # visibly drained
     # (not asserted monotone: momentary negative power is regeneration)
     est_v = traj.state.actuator.current_ctrl.bus_est.ema

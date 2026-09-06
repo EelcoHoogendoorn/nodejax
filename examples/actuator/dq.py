@@ -52,7 +52,9 @@ class DQ:
         return self.d ** 2 + self.q ** 2
 
     def norm(self):
-        return jnp.sqrt(self.norm2())
+        """The magnitude, with a finite gradient at the zero vector: a
+        controller at rest differentiates through this."""
+        return jnp.sqrt(jnp.maximum(self.norm2(), 1e-24))
 
     def clamp_norm(self, limit):
         """Scale down to the limit magnitude, direction preserved."""

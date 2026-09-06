@@ -89,6 +89,9 @@ Transforms consume a `Node` and produce a new `Node` by transforming its underly
 | **`stack(node, n)`** | Vectorizes depth layers (`scan`) | Stacked over depth | Stacked over depth |
 | **`scan(node)`** | Sequential recurrence (`lax.scan`) | Shared across time | Carried step-to-step |
 | **`scanned(node)`** | Sequence rollout (internalized carry) | Shared across time | Initialized and consumed internally |
+| **`repeat(node, n)`** | Output fed back into input, `n` times, last output kept | Shared across iterations | Carried iteration-to-iteration |
+| **`repeated(node, n)`** | The same, every output kept: a trajectory from a start | Shared across iterations | Initialized and consumed internally |
+| **`cyclic(node)`** | A step's first field promoted to its state; the output is the successor | The step's own | The first field, bound or given at init |
 | **`train_step(node, loss, opt)`** | Turns model into a trainer | Initial weights (param) | Weights & opt moments (state) |
 | **`trained(trainer)`** | Runs optimization to completion | Evaluated weights | Returns final trained model + loss aux |
 
@@ -294,6 +297,16 @@ def apply(self, observation, command, start):
 ```
 
 The one difference from a view at the harness is deliberate: there, a call returns the successor beside the output; here the successor goes into the slot, so the same line serves a cyclic and an acyclic member.
+
+An authored `init` may be written against `self` in the same way, for a composite whose start is not one member's own business: a start that arrives as data has to be placed in one member before another can be primed off it. The views are the same, over the init-time slots: `bind(state=...)` places a state, `reset(...)` primes a member from an input the init computes, and a read builds a member from its own bundle. The composite's state is what the slots hold when the init returns, so it returns nothing; a member the init never touches is built from its own bundle, as it would be without an authored init. The init takes a key exactly when a member's init does, or when it declares `rng` itself. Binding each member's parameters and splitting its key is the views' job:
+
+```python
+def init(self, start):
+    self.rope.bind(state=start.rope)
+    self.actuator.reset(input=Struct(mechanical=joint_mechanical(start.rope), command=jnp.zeros((n_links,))))
+```
+
+`param`, `state`, and `node` are not arguments of such an init; `input`, if declared, is the priming input, and every other name is a state input, with defaults allowed as for any init.
 
 ---
 

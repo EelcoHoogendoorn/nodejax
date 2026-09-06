@@ -368,12 +368,22 @@ def test_internalized_runs_start_from_a_bound_state():
 
     run = scanned(started)
     assert type(run) is PNode and not run.cyclic
+    assert dict(run.statics_by_path()) == {
+        'step.gru.hidden': 4,
+        'step.gru_2.hidden': 3,
+        'record': False,
+        'n': None,
+    }
     assert jnp.allclose(run.apply(sequence), expected)
-    assert jnp.allclose(scanned(cell, state=started.state).apply(sequence), expected)
+    replayed = run.specialize().bind(run.param)
+    assert jnp.allclose(replayed.apply(sequence), expected)
     assert not jnp.allclose(scanned(blank).apply(sequence), expected)
 
     done = carried(started).apply(sequence)
     assert jax.tree.all(jax.tree.map(jnp.allclose, done.state, ended.state))
+    replayed_done = carried(started).specialize().bind(run.param).apply(sequence)
+    assert jax.tree.all(jax.tree.map(
+        jnp.allclose, replayed_done.state, ended.state))
 
 
 def test_an_internalized_run_takes_the_step_state_inputs_beside_the_sequence():

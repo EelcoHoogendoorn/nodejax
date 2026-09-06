@@ -1,11 +1,14 @@
 """A composable FOC/PMSM actuator simulation.
 
-The actuator is a stack of stateful blocks: battery -> bus-voltage
-estimation -> command controller -> current controller (model-based
-current estimation, one DQ PID, per-term voltage feedforward, thermal
-rollback) -> electrical motor. Mechanical state is an input, integrated
-at the environment level; every quantity the controller consumes is
-estimated through sensor models while the physics runs on truth.
+The actuator is a stack of stateful blocks: bus-voltage estimation ->
+command controller -> current controller (model-based current
+estimation, one DQ PID, per-term voltage feedforward, thermal rollback)
+-> electrical motor. Mechanical state and the true bus voltage are
+inputs, integrated and supplied at the environment level, where the
+battery lives so that one pack can feed several stacks; the stack reports
+the power it draws for that pack to account. Every quantity the
+controller consumes is estimated through sensor models while the physics
+runs on truth.
 BenchMotor composes the same electrical motor with the mechanism
 for open-loop physics work: cogging and hysteresis live with the
 motor, stiction with the mechanism.

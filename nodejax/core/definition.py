@@ -47,12 +47,17 @@ class Captures:
 
 @dataclass(eq=False)
 class Construction:
-    """The canonical factory call and accumulated descendant specializations."""
+    """The canonical factory call and accumulated descendant specializations.
+
+    ``arguments`` are public statics. ``replay_arguments`` are forwarded only
+    when the factory is replayed and are not specialization addresses.
+    """
 
     factory: Callable
     arguments: Struct
     named: frozendict = field(default_factory=frozendict)
     wildcards: frozendict = field(default_factory=frozendict)
+    replay_arguments: Struct = field(default_factory=Struct)
 
     def copy(self, **changes) -> 'Construction':
         return replace(self, **changes)

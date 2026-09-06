@@ -1,7 +1,7 @@
 """Position-Based Dynamics (PBD) and Extended PBD (XPBD) using NodeJAX transforms."""
 
 from examples.pbd.core import (
-    Broadcast,
+    Constraint,
     Displaced,
     Index,
     IndexedConstraint,
@@ -10,17 +10,22 @@ from examples.pbd.core import (
     gauss_seidel,
     jacobi,
     red_black,
+    safe_norm,
+    tree_dot,
 )
 from examples.pbd.pbd import (
-    DistanceConstraint,
     FloorConstraint,
     FreeMotion,
+    Particle,
+    ParticleBend,
+    ParticleDistance,
     VelocityUpdate,
     particle,
     pbd_step,
 )
 from examples.pbd.xpbd import (
-    AnchorConstraint,
+    AnchorDistance,
+    Body,
     FreeRigidMotion,
     RigidVelocityUpdate,
     body,
@@ -29,10 +34,10 @@ from examples.pbd.xpbd import (
 
 
 __all__ = [
-    'AnchorConstraint',
-    'Broadcast',
+    'AnchorDistance',
+    'Body',
+    'Constraint',
     'Displaced',
-    'DistanceConstraint',
     'FloorConstraint',
     'FreeMotion',
     'FreeRigidMotion',
@@ -40,6 +45,9 @@ __all__ = [
     'IndexedConstraint',
     'IndexedConstraintCorrection',
     'PBDStep',
+    'Particle',
+    'ParticleBend',
+    'ParticleDistance',
     'RigidVelocityUpdate',
     'VelocityUpdate',
     'body',
@@ -48,5 +56,7 @@ __all__ = [
     'particle',
     'pbd_step',
     'red_black',
+    'safe_norm',
+    'tree_dot',
     'xpbd_step',
 ]

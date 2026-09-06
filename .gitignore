@@ -13,3 +13,5 @@ CLAUDE.md
 
 # local only, never published
 scratch/
+*.gif
+*.mp4

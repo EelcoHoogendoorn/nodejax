@@ -44,9 +44,6 @@ class PNode(BaseNode):
             return PNode(target._def, self.param)
         return target
 
-    def _internalized_state(self) -> tuple[BaseNode, Any]:
-        return self, None
-
     @property
     def pnode(self) -> 'PNode':
         return self

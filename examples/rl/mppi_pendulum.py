@@ -21,7 +21,7 @@ from nodejax import (
     tree_take,
 )
 from nodejax import nn
-from examples.rl.control import policy_trajectory
+from examples.rl.control import PlannedStep, policy_trajectory
 from examples.rl.mppi import mppi_controller, mppi_iteration, mppi_training
 from examples.rl.pendulum import (
     PHASE_VELOCITY_LIMIT,
@@ -198,7 +198,7 @@ def receding_trajectory(
     key: jax.Array,
 ) -> Struct:
     """Run real closed-loop trajectories with carried plan state."""
-    return policy_trajectory(controller, plant, starts, steps, key)
+    return policy_trajectory(controller, plant, starts, steps, key, step=PlannedStep)
 
 
 def save_figure(figure, filename: str) -> str:

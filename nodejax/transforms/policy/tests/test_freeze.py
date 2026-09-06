@@ -10,7 +10,7 @@ import jax.numpy as jnp
 
 from nodejax import (
     Node, PSNode, Leaf, nn, Composite, serial, freeze, tree_freeze, tree_filter,
-    detach, tree_detach, map_members, Node,
+    cyclic, detach, tree_detach, map_members,
 )
 from nodejax.struct import Struct
 
@@ -117,6 +117,31 @@ def test_tree_freeze_hand_built_sparse_spec():
     assert tf.cyclic                          # the RNN is still live
     after = tf.with_input(X).bind(tf.param).init()
     assert 0 < len(jax.tree.leaves(after)) < len(jax.tree.leaves(state))
+
+
+def test_tree_freeze_pins_state_owned_by_a_transparent_wrapper() -> None:
+    def param(scale: float) -> jax.Array:
+        return jnp.asarray(scale)
+
+    def advance(param, world: Struct, push: jax.Array) -> Struct:
+        return world.replace(value=world.value + param * push)
+
+    state = Struct(value=jnp.asarray(3.0))
+    world = cyclic(
+        Leaf(advance, param=param, name='advance', tags=('held',)),
+    ).parameterize(scale=2.0)
+
+    explicit = tree_freeze(world, state)
+    assert not explicit.cyclic
+    assert explicit.param == world.param
+    assert explicit(push=jnp.asarray(2.0)).value == 7.0
+
+    bound = tree_freeze(world.bind(state=state), tag='held')
+    assert type(bound) is PSNode and bound.state == ()
+    assert bound.param == world.param
+    successor, output = bound(push=jnp.asarray(2.0))
+    assert successor.state == ()
+    assert output.value == 7.0
 
 
 def test_map_members_identity_rebuilds_the_same_computation():

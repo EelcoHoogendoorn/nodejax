@@ -318,12 +318,16 @@ def _definition_slots(definition, value: Any, role: str, *,
     if value is _MISSING_SLOT:
         raise TypeError(f'{path or definition.name}: missing {role} value')
 
+    # A transparent wrapper is transparent for a role only when its member
+    # holds that role; a wrapper cyclic over an acyclic member owns its state.
     transparent = definition.layout.transparent_member
     if transparent is not None:
-        return _definition_slots(
-            getattr(definition.members, transparent), value, role,
-            project=project, path=path,
-            externalized_param_paths=externalized_param_paths)
+        member = getattr(definition.members, transparent)
+        if member.parametric if role == 'param' else member.cyclic:
+            return _definition_slots(
+                member, value, role, project=project, path=path,
+                externalized_param_paths=externalized_param_paths)
+        return value
 
     if not definition.members:
         return value
@@ -371,7 +375,8 @@ def _state_tree(definition, fn: Callable) -> Any:
         return ()
     transparent = definition.layout.transparent_member
     if transparent is not None:
-        return _state_tree(getattr(definition.members, transparent), fn)
+        member = getattr(definition.members, transparent)
+        return _state_tree(member, fn) if member.cyclic else fn(definition.contract)
     if definition.members:
         return Struct(**{
             name: _state_tree(member, fn)
@@ -386,8 +391,9 @@ def _map_state(definition, state, fn: Callable) -> Any:
         return ()
     transparent = definition.layout.transparent_member
     if transparent is not None:
-        return _map_state(
-            getattr(definition.members, transparent), state, fn)
+        member = getattr(definition.members, transparent)
+        return (_map_state(member, state, fn) if member.cyclic
+                else fn(definition.contract, state))
     if definition.members:
         return Struct(**{
             name: _map_state(member, getattr(state, name), fn)
@@ -411,7 +417,8 @@ def _merge_boundary(definition, carried, initialized,
     transparent = definition.layout.transparent_member
     if transparent is not None:
         child = getattr(definition.members, transparent)
-        decided = _merge_boundary(child, carried, initialized, tag)
+        decided = (_merge_boundary(child, carried, initialized, tag)
+                   if child.cyclic else carried)
     elif definition.members:
         decided = Struct(**{
             name: _merge_boundary(
@@ -552,7 +559,7 @@ class Contract:
         return self._def.tags
 
     def _roles(self, *, param=None, init=None, prime=None, apply=None,
-               requires_input=None,
+               requires_input=None, state_fields: tuple[str, ...] = (),
                param_takes_rng=None, init_takes_rng=None,
                apply_takes_rng=None, input_spec=_KEEP,
                apply_fields=None, open: bool = False):
@@ -566,6 +573,8 @@ class Contract:
         applies, their call forms, and their public RNG requirements.
         ``requires_input`` may explicitly switch an existing initializer
         between those forms when the corresponding replacement is supplied.
+        ``init=`` over a member without an init gives the result state of
+        its own, taking the state inputs named by ``state_fields``.
         ``init=False`` removes state from the result and ``param=False``
         removes parameters. ``apply_fields``
         declares a replacement required-field form; ``open`` also permits
@@ -588,6 +597,28 @@ class Contract:
                     'init=False cannot be combined with prime= or '
                     'requires_input=')
             calls = calls.copy(init=None)
+        elif calls.init is None and state_fields:
+            # The result owns state its member does not have: init is the
+            # only role, taking the declared state inputs.
+            if init is None or prime is not None or requires_input is not None:
+                raise TypeError(
+                    'state_fields declares an owned init: supply init= and '
+                    'neither prime= nor requires_input=')
+            from nodejax.core.binding import REQUIRED
+            signature = _role_signature(init, 'transform init')
+
+            def owned_init(definition, param, formed_input, rng):
+                return init(**_role_arguments(
+                    signature, definition=definition,
+                    formed_input=formed_input,
+                    channels={'param': param, 'rng': rng},
+                    aggregate='state_input'))
+
+            calls = calls.copy(init=InitCall(
+                owned_init,
+                CallForm.from_values(
+                    Struct(**{field: REQUIRED for field in state_fields})),
+                False, False, 'contract' in signature.parameters))
         elif calls.init is not None:
             primes = (
                 calls.init.requires_input

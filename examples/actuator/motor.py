@@ -65,6 +65,30 @@ def current_feedforward(param, v: DQ, i: DQ, velocity_mech) -> DQ:
     return (v - i * _R(param) - omega_v) / L
 
 
+def current_step(param, i: DQ, v: DQ, velocity_mech, h: float) -> DQ:
+    """The current after ``h`` seconds at voltage ``v``, by one implicit
+    Euler step of the voltage equation. The equation is linear in the
+    currents at a given speed, so the step is a two by two solve, and it
+    is stable at any ``h``: stability first, accuracy second, the standard
+    the actuator module holds its dynamics to."""
+    omega = velocity_mech * param.pole_pairs
+    R = _R(param)
+    L = _L(param)
+    # (I - h A) i_new = i + h b, with A the circuit's own matrix and b the
+    # forcing from the voltage and the permanent magnet's speed voltage.
+    diagonal_d = 1.0 + h * R / L.d
+    diagonal_q = 1.0 + h * R / L.q
+    coupling_d = -h * omega * L.q / L.d   # upper right of I - hA
+    coupling_q = h * omega * L.d / L.q    # lower left of I - hA
+    forced_d = i.d + h * v.d / L.d
+    forced_q = i.q + h * (v.q - omega * _flux_linkage(param)) / L.q
+    determinant = diagonal_d * diagonal_q - coupling_d * coupling_q
+    return DQ(
+        d=(diagonal_q * forced_d - coupling_d * forced_q) / determinant,
+        q=(diagonal_d * forced_q - coupling_q * forced_d) / determinant,
+    )
+
+
 def current_model(param, v: DQ, di_dt: DQ, velocity_mech) -> DQ:
     """I = (V - L*dI/dt - omega*flux) / R — the inverse voltage equation
     (q-axis-only back-EMF approximation), used by the model-based
@@ -100,6 +124,7 @@ def _dedent(param, angle):
 MOTOR_METHODS = dict(voltage_feedforward=voltage_feedforward,
                      voltage_terms=voltage_terms,
                      current_feedforward=current_feedforward,
+                     current_step=current_step,
                      current_model=current_model,
                      torque=torque)
 
@@ -107,7 +132,7 @@ MOTOR_METHODS = dict(voltage_feedforward=voltage_feedforward,
 # --- the electrical motor: mechanics live outside ---
 
 @node
-def Electrical(dt: float, substeps: int=4) -> Node:
+def Electrical(dt: float) -> Node:
     """The electrical motor: mechanics live outside (the mechanism's
     inertia and loads are integrated by Mechanical, at the bench or
     the environment), so position and velocity arrive as INPUT and
@@ -116,7 +141,9 @@ def Electrical(dt: float, substeps: int=4) -> Node:
     drag; what the mechanism does with it (inertia, bearing friction,
     stiction) is the mechanism's. Voltage in, torque and current out.
     Electrical and geometric constants come from the motor configuration;
-    optional loss effects default to zero."""
+    optional loss effects default to zero. The currents advance by one
+    implicit step per tick (see ``current_step``), so any ``dt`` is
+    stable and the motor never needs substeps of its own."""
     def param(resistance, inductance_d, inductance_q, kt, pole_pairs, slots,
               hysteresis=0.0, cogging=0.0, dedent_offset=0.0):
         return Struct(resistance=resistance, inductance_d=inductance_d,
@@ -128,13 +155,7 @@ def Electrical(dt: float, substeps: int=4) -> Node:
         return DQ(0.0, 0.0)
 
     def apply(param, state, mechanical, voltage: DQ):
-        h = dt / substeps
-
-        def substep(_, i):
-            di_dt = current_feedforward(param, voltage, i, mechanical.velocity)
-            return i + di_dt * h
-
-        current = jax.lax.fori_loop(0, substeps, substep, state)
+        current = current_step(param, state, voltage, mechanical.velocity, dt)
         tq = (torque(param, current) + _dedent(param, mechanical.position)
               - param.hysteresis * jnp.sign(mechanical.velocity))
         return current, Struct(torque=tq, current=current)

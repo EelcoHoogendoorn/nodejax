@@ -168,6 +168,7 @@ def shac_iteration(
         externalize(TerminalCritic(rollout, terminal_critic), 'critic'),
         bootstrapped_cost(discount=discount),
         actor_optimizer,
+        trainable='policy',  # the plant is differentiated through, never tuned
     )
     critic_trainer = iterated(
         train_step(trajectory_critic, mse, critic_optimizer),

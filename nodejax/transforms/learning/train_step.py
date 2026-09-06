@@ -90,6 +90,60 @@ def _opt_param(opt: Contract, weights: Any, rng) -> Any:
     return opt.for_input(weights).param(Struct(), rng)
 
 
+def _path_name(path) -> str:
+    """A key path as the dotted member path it spells."""
+    return '.'.join(
+        str(getattr(key, 'name', getattr(key, 'key', getattr(key, 'idx', key))))
+        for key in path)
+
+
+def _selection(trainable: str | Callable | None) -> Callable:
+    """The predicate on a parameter's dotted path that ``trainable`` names:
+    everything, the subtrees under a member key, or the predicate itself."""
+    if trainable is None:
+        return lambda path: True
+    if isinstance(trainable, str):
+        return lambda path: trainable in path.split('.')
+    return trainable
+
+
+def _is_missing(leaf) -> bool:
+    return leaf is None
+
+
+def _without_missing(tree: Any) -> Any:
+    """``tree`` with the Struct fields that hold no leaf dropped, so a
+    selection reads as the subtree it is and not as a tree of ``None``."""
+    if tree is None:
+        return None
+    if issubclass(type(tree), Struct):
+        kept = {field: _without_missing(value) for field, value in tree.__items__}
+        kept = {field: value for field, value in kept.items() if value is not None}
+        return type(tree)(**kept) if kept else None
+    return tree
+
+
+def _partition(tree: Any, select: Callable) -> tuple[Any, Any]:
+    """``tree`` split by path: the subtree of leaves ``select`` admits, and
+    the whole structure with ``None`` in their place, which ``_merge``
+    fills back in."""
+    chosen = jax.tree_util.tree_map_with_path(
+        lambda path, leaf: leaf if select(_path_name(path)) else None, tree)
+    rest = jax.tree_util.tree_map_with_path(
+        lambda path, leaf: None if select(_path_name(path)) else leaf, tree)
+    return _without_missing(chosen), rest
+
+
+def _merge(chosen: Any, rest: Any) -> Any:
+    """``rest`` with its ``None`` leaves filled from ``chosen`` by path."""
+    leaves = {
+        _path_name(path): leaf
+        for path, leaf in jax.tree_util.tree_flatten_with_path(chosen)[0]}
+    return jax.tree_util.tree_map_with_path(
+        lambda path, leaf: leaves[_path_name(path)] if leaf is None else leaf,
+        rest, is_leaf=_is_missing)
+
+
 def _require_train_step(step: Any, who: str) -> Node:
     """Return the unbound ``train_step`` node required by ``who``."""
     if not _is_node(step):
@@ -335,8 +389,13 @@ def _model_contract(step: Contract) -> Contract:
 
 
 @node
-def _build_train_step(objective: Node, opt: Node) -> Node:
-    """Build one optimizer update over a scalar objective Node."""
+def _build_train_step(objective: Node, opt: Node, trainable: str | Callable | None) -> Node:
+    """Build one optimizer update over a scalar objective Node.
+
+    The optimizer holds, and the gradient reaches, the parameters ``trainable``
+    selects; the rest stay the step's own constants, merged back in at every
+    call."""
+    select = _selection(trainable)
     model = objective.members.model
     loss = objective.members.loss
     apply_fields = _training_fields(model.contract, loss.contract)
@@ -353,9 +412,12 @@ def _build_train_step(objective: Node, opt: Node) -> Node:
         current_objective = contract.members.objective
         current_opt = contract.members.opt
 
+        _, constants = _partition(
+            current_objective._sparse_param(param.objective), select)
+
         def loss_wrapper(weights):
             objective_state, result = current_objective.apply(
-                weights,
+                _merge(weights, constants),
                 state.objective,
                 current_objective.feed(input),
                 rng.child(current_objective.apply_takes_rng),
@@ -393,7 +455,7 @@ def _build_train_step(objective: Node, opt: Node) -> Node:
             param_input.objective,
             rng.child(objective_contract.param_takes_rng),
         )
-        optimized = objective_contract._sparse_param(weights)
+        optimized, _ = _partition(objective_contract._sparse_param(weights), select)
         return Struct(
             opt=_opt_param(
                 current_opt, optimized,
@@ -407,7 +469,8 @@ def _build_train_step(objective: Node, opt: Node) -> Node:
     def initialized(contract, param, opt_input, objective_state, rng):
         current_objective = contract.members.objective
         current_opt = contract.members.opt
-        optimized = current_objective._sparse_param(param.objective)
+        optimized, _ = _partition(
+            current_objective._sparse_param(param.objective), select)
         opt_state = current_opt.prime(
             param.opt if current_opt.parametric else (),
             opt_input,
@@ -441,16 +504,24 @@ def _build_train_step(objective: Node, opt: Node) -> Node:
         return initialized(
             contract, param, opt_input, objective_state, rng)
 
-    def params(node, state):
-        """The model parameters as the optimizer currently holds them."""
+    def objective_params(node, param, state):
+        """The objective's parameters as the step holds them: the optimizer's
+        for the trainable part, the step's own constants for the rest."""
+        current_objective = node.members.objective
+        _, constants = _partition(
+            current_objective.contract._sparse_param(param.objective), select)
+        return _merge(state.opt.params, constants)
+
+    def params(node, param, state):
+        """The model parameters as the step currently holds them."""
         current_model = node.members.objective.members.model
-        return (getattr(state.opt.params, 'model')
+        return (getattr(objective_params(node, param, state), 'model')
                 if current_model.parametric else ())
 
-    def trained(node, state):
+    def trained(node, param, state):
         """The model bound to the parameters and state this step has reached."""
         current_model = node.members.objective.members.model
-        model_param = (getattr(state.opt.params, 'model')
+        model_param = (getattr(objective_params(node, param, state), 'model')
                        if current_model.parametric else ())
         model_state = (getattr(state.objective, 'model')
                        if current_model.cyclic else ())
@@ -474,7 +545,8 @@ def _build_train_step(objective: Node, opt: Node) -> Node:
 
 @node
 def train_step(model: BaseNode, loss_fn: LossFn | BaseNode,
-               tx: optax.GradientTransformation) -> BaseNode:
+               tx: optax.GradientTransformation, *,
+               trainable: str | Callable | None = None) -> BaseNode:
     """Optimize the scalar composition of ``model`` and a loss Node.
 
     A callable loss is lifted to a Node. Its first declared input receives the
@@ -484,20 +556,27 @@ def train_step(model: BaseNode, loss_fn: LossFn | BaseNode,
     model output and reports the scalar under ``aux.loss``. Aux emitted by
     either objective member is nested under ``aux.objective.model`` or
     ``aux.objective.loss``.
+
+    ``trainable`` selects the parameters the optimizer holds and the gradient
+    reaches: by default all of them, else those under a member key found
+    anywhere on the parameter's dotted path (``'policy'``), or those a
+    predicate on that path admits. The rest are constants of the step, never
+    differentiated, never decayed: a plant the policy is trained through, say.
     """
     if not _is_node(model):
         raise TypeError(
             'train_step takes a Node, PNode, or PSNode; '
             f'got {model!r}')
     objective = _objective(model, _as_loss(loss_fn))
-    step = _build_train_step(objective.node, _as_optimizer(tx))
+    step = _build_train_step(objective.node, _as_optimizer(tx), trainable)
     if not objective.bound:
         return step
 
     current_opt = step.members.opt
+    optimized, _ = _partition(objective.param, _selection(trainable))
     param = (Struct(
         opt=_opt_param(
-            current_opt.contract, objective.param,
+            current_opt.contract, optimized,
             MaybeKeyStream()),
         objective=objective.param,
     ) if current_opt.parametric else Struct(objective=objective.param))
@@ -507,7 +586,7 @@ def train_step(model: BaseNode, loss_fn: LossFn | BaseNode,
     opt_state = current_opt.contract.prime(
         param.opt if current_opt.parametric else (),
         Struct(),
-        param.objective,
+        optimized,
         MaybeKeyStream(),
     )
     return bound_step.bind(

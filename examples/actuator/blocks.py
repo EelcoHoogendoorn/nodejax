@@ -38,12 +38,16 @@ def wrap() -> Node:
 def Observer(dt: float) -> Node:
     """Predict-correct EMA observer for position and velocity, with
     angle wrapping; time constants are params (per-step alpha =
-    1/(1+tau))."""
+    1/(1+tau)). The velocity is a filtered difference of successive
+    measurements, so the position filter's lag never reaches it: differencing
+    against the filtered position instead folds that lag into the velocity
+    as a spurious spike whenever the mechanism accelerates."""
     def param(tau_pos=0.1, tau_vel=0.1):
         return Struct(tau_pos=tau_pos, tau_vel=tau_vel)
 
-    def init(param, position=0.0):
-        return Struct(position=position, velocity=0.0)
+    def init(param, input):
+        """Primed at the first measured position, at rest."""
+        return Struct(position=input, velocity=0.0, measured=input)
 
     def apply(param, state, input):
         measured = input
@@ -52,11 +56,11 @@ def Observer(dt: float) -> Node:
 
         predicted = state.position + state.velocity * dt
         position = predicted + a_pos * angle_wrap(measured - predicted)
-        velocity_raw = angle_wrap(measured - state.position) / dt
+        velocity_raw = angle_wrap(measured - state.measured) / dt
         velocity = state.velocity * (1.0 - a_vel) + a_vel * velocity_raw
 
-        new = Struct(position=position, velocity=velocity)
-        return new, new
+        return (Struct(position=position, velocity=velocity, measured=measured),
+                Struct(position=position, velocity=velocity))
 
     return Leaf(apply, init=init, param=param)
 

@@ -7,10 +7,12 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from nodejax import Struct, batch, scan, split_aux, tree_broadcast_axis
+from nodejax import Struct, batch, scan, serial, split_aux, tree_broadcast_axis
 from examples.pbd import (
-    Broadcast,
-    DistanceConstraint,
+    Constraint,
+    FloorConstraint,
+    ParticleBend,
+    ParticleDistance,
     gauss_seidel,
     jacobi,
     particle,
@@ -22,12 +24,19 @@ from examples.pbd import (
 GRAVITY = (0.0, -9.81)
 
 
-def rope_constraints(n_points: int, rest_length: float) -> Struct:
+def rope_constraints(
+    n_points: int,
+    rest_length: float,
+    compliance: float = 0.0,
+) -> Struct:
     """The distance constraints of a chain: consecutive particles joined at one rest length."""
     indices = jnp.stack((jnp.arange(n_points - 1), jnp.arange(1, n_points)), axis=-1)
     return Struct(
         index=indices,
-        constraint=jnp.full(n_points - 1, rest_length),
+        constraint=Struct(
+            rest_length=jnp.full(n_points - 1, rest_length),
+            compliance=jnp.full(n_points - 1, compliance),
+        ),
     )
 
 
@@ -58,13 +67,38 @@ def test_one_distance_constraint_restores_a_pinned_pair() -> None:
         velocity=jnp.zeros((2, 2)),
         inverse_mass=jnp.array((0.0, 1.0)),
     )
-    projection = DistanceConstraint().bind(1.0)
+    spec = Struct(rest_length=1.0, compliance=0.0)
+    projection = Constraint(ParticleDistance()).bind(spec)
 
     after, aux = split_aux(projection.apply(before))
 
     assert jnp.allclose(after.position[0], before.position[0])
     assert jnp.allclose(after.position[1], jnp.array((1.0, 0.0)))
-    assert jnp.allclose(aux.length_error, 1.0)
+    assert jnp.allclose(aux.error, 1.0)
+
+
+def test_bend_constraint_straightens_a_folded_triple() -> None:
+    folded = particle(
+        position=jnp.array(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0))),
+        velocity=jnp.zeros((3, 2)),
+        inverse_mass=jnp.ones((3,)),
+    )
+    spec = Struct(rest_angle=0.0, compliance=0.0)
+    bend = ParticleBend().bind(spec)
+    projection = Constraint(ParticleBend()).bind(spec)
+
+    assert jnp.allclose(bend.apply(folded.coords), 0.5 * jnp.pi)
+    after, aux = split_aux(projection.apply(folded))
+    assert jnp.allclose(aux.error, 0.5 * jnp.pi)
+    assert jnp.abs(bend.apply(after.coords)) < 0.5 * jnp.pi
+    assert jnp.allclose(after.velocity, 0.0)
+
+
+def test_particle_distance_evaluates_error() -> None:
+    spec = Struct(rest_length=1.0, compliance=0.0)
+    distance = ParticleDistance().bind(spec)
+    coords = Struct(position=jnp.array(((0.0, 0.0), (2.0, 0.0))))
+    assert jnp.allclose(distance.apply(coords), 1.0)
 
 
 @pytest.mark.parametrize(
@@ -80,15 +114,14 @@ def test_constraint_schedules_reduce_the_same_stretched_rope(
     target_rest_length = 0.2
     initial = initial_rope(n_points, initial_rest_length, anchor_height=1.0)
     step = pbd_step(
-        schedule(rope_constraints(n_points, target_rest_length), DistanceConstraint()),
-        Broadcast((0.0, 0.0)),
-        n_points=n_points,
+        schedule(rope_constraints(n_points, target_rest_length), Constraint(ParticleDistance())),
         n_solver_passes=8,
         dt=0.02,
-        floor_height=-1.0,
         velocity_damping=1.0,
     )
-    final = split_aux(step.parameterize().bind(state=initial).apply()[1])[0]
+    final = split_aux(
+        step.parameterize().bind(state=initial).apply(jnp.zeros_like(initial.position))[1]
+    )[0]
     initial_segment = initial.position[1:] - initial.position[:-1]
     final_segment = final.position[1:] - final.position[:-1]
     initial_squared_error = jnp.sum(
@@ -107,21 +140,18 @@ def test_force_free_rope_at_rest_remains_at_rest() -> None:
     n_steps = 8
     initial = initial_rope(n_points, rest_length=0.2, anchor_height=1.0)
     step = pbd_step(
-        gauss_seidel(rope_constraints(n_points, 0.2), DistanceConstraint()),
-        Broadcast((0.0, 0.0)),
-        n_points=n_points,
+        gauss_seidel(rope_constraints(n_points, 0.2), Constraint(ParticleDistance())),
         n_solver_passes=3,
         dt=0.02,
-        floor_height=-1.0,
         velocity_damping=1.0,
     )
     program = scan(step, n=n_steps)
     sim = jax.jit(program.parameterize().bind(state=initial).apply)
-    trajectory, diagnostics = split_aux(sim()[1])
+    trajectory, diagnostics = split_aux(sim(jnp.zeros((n_steps, n_points, 2)))[1])
 
     assert jnp.allclose(trajectory.position, initial.position)
     assert jnp.allclose(trajectory.velocity, 0.0)
-    assert diagnostics.solve.constraints.constraint.length_error.shape == (
+    assert diagnostics.solve.constraint.error.shape == (
         n_steps,
         3,
         n_points - 1,
@@ -135,21 +165,23 @@ def test_composed_rollout_keeps_the_anchor_and_floor() -> None:
     floor_height = 0.0
     initial = initial_rope(n_points, rest_length=0.15, anchor_height=0.8)
     initial = tree_broadcast_axis(initial, n_worlds, axis=0)
+    constraints = serial(
+        rope=gauss_seidel(rope_constraints(n_points, 0.15), Constraint(ParticleDistance())),
+        floor=batch(FloorConstraint(floor_height)),
+    )
     step = pbd_step(
-        gauss_seidel(rope_constraints(n_points, 0.15), DistanceConstraint()),
-        Broadcast(GRAVITY),
-        n_points=n_points,
+        constraints,
         n_solver_passes=8,
         dt=0.02,
-        floor_height=floor_height,
         velocity_damping=0.995,
     )
     program = batch(scan(step, n=n_steps), n=n_worlds)
+    forces = jnp.broadcast_to(jnp.array(GRAVITY), (n_worlds, n_steps, n_points, 2))
     sim = jax.jit(program.parameterize().bind(state=initial).apply)
-    trajectory, diagnostics = split_aux(sim()[1])
+    trajectory, diagnostics = split_aux(sim(forces)[1])
 
     assert trajectory.position.shape == (n_worlds, n_steps, n_points, 2)
-    assert diagnostics.solve.constraints.constraint.length_error.shape == (
+    assert diagnostics.solve.rope.constraint.error.shape == (
         n_worlds,
         n_steps,
         8,
@@ -228,21 +260,24 @@ def main() -> None:
     anchor_height = 1.45
     dt = 0.016
 
-    constraints = rope_constraints(n_points, rest_length)
+    constraints = serial(
+        rope=gauss_seidel(rope_constraints(n_points, rest_length), Constraint(ParticleDistance())),
+        floor=batch(FloorConstraint(floor_height)),
+    )
     step = pbd_step(
-        gauss_seidel(constraints, DistanceConstraint()),
-        Broadcast(GRAVITY),
-        n_points=n_points,
+        constraints,
         n_solver_passes=8,
         dt=dt,
-        floor_height=floor_height,
         velocity_damping=0.995,
     )
     program = batch(scan(step, n=n_steps), n=n_worlds)
     angles = jnp.linspace(-0.5, 0.5, n_worlds)
     initial = jax.vmap(
         lambda angle: initial_rope(n_points, rest_length, anchor_height, angle))(angles)
-    trajectory, aux = split_aux(jax.jit(program.parameterize().bind(state=initial).apply)()[1])
+    forces = jnp.broadcast_to(jnp.array(GRAVITY), (n_worlds, n_steps, n_points, 2))
+    trajectory, aux = split_aux(
+        jax.jit(program.parameterize().bind(state=initial).apply)(forces)[1]
+    )
     result = Struct(
         program=program,
         initial=initial,

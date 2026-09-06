@@ -9,20 +9,19 @@ once through ``ensemble`` with the corrections summed, ``red_black`` two
 Jacobi passes in turn. ``Index`` gathers the entities a constraint touches
 and scatters them back, and is the only place that knows about indices.
 
-The record is data, not state, through every repetition beneath a
-timestep: over the constraints of a pass, over the passes of a solve, over
-substeps. Each of those is a map from a record to a record. Only
-``PBDStep`` is time, one call one tick. ``pbd_step`` and ``xpbd_step``
-wrap it in ``cyclic``, which makes the record the world's state there and
-nowhere beneath. Nothing under it needs a state slot, and everything under
-it batches, stacks, and differentiates as a map.
-
+The entity collection is passed as data through individual constraint and
+substep operations. At the outer timestep boundary, ``pbd_step`` and
+``xpbd_step`` wrap ``PBDStep`` in ``cyclic``, promoting the collection
+to state.
 """
+
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 
 from nodejax import (
+    Aux,
     Composite,
     Leaf,
     Node,
@@ -41,9 +40,7 @@ from nodejax import (
 
 @node
 def Index() -> Node:
-    """Bound indices into an entity collection, used through its methods:
-    ``gather`` takes the indexed entities, ``scatter`` writes them back,
-    ``scatter_add`` adds to them. It has no apply of its own."""
+    """Indexed gather and scatter operations over entity PyTrees."""
     def param(indices):
         return indices
 
@@ -66,29 +63,19 @@ def Index() -> Node:
 
 
 @node
-def IndexedConstraint(
-    index: Node,
-    constraint: Node,
-) -> Node:
+def IndexedConstraint(index: Node, constraint: Node) -> Node:
     """Gather, project, and scatter-set one described constraint."""
-    members = Composite(index=index, constraint=constraint)
-
     def apply(self, entities):
         gathered = self.index.gather(entities)
         projected = self.constraint(gathered)
         return self.index.scatter(entities, projected)
 
-    return members(apply)
+    return Composite(index=index, constraint=constraint)(apply)
 
 
 @node
-def IndexedConstraintCorrection(
-    index: Node,
-    constraint: Node,
-) -> Node:
-    """The displacement one projected constraint asks of the whole collection:
-    zero except at its own indexed entities."""
-    members = Composite(index=index, constraint=constraint)
+def IndexedConstraintCorrection(index: Node, constraint: Node) -> Node:
+    """Compute displacement corrections from one constraint, zero elsewhere."""
 
     def apply(self, entities):
         gathered = self.index.gather(entities)
@@ -101,12 +88,12 @@ def IndexedConstraintCorrection(
         zero = jax.tree.map(jnp.zeros_like, entities)
         return self.index.scatter_add(zero, diff)
 
-    return members(apply)
+    return Composite(index=index, constraint=constraint)(apply)
 
 
 @node
 def Displaced(corrections: Node) -> Node:
-    """The collection moved by the summed corrections of every constraint."""
+    """Displace an entity collection by summed constraint corrections."""
     def apply(self, entities):
         delta = self.corrections(entities)
         return jax.tree.map(
@@ -129,6 +116,30 @@ def tree_sum(tree, axis=0):
     return jax.tree.map(lambda leaf: jnp.sum(leaf, axis=axis), tree)
 
 
+def safe_norm(v: jax.Array, eps: float = 1e-12) -> jax.Array:
+    """Safe Euclidean norm with non-zero gradient at the origin."""
+    return jnp.sqrt(jnp.maximum(jnp.sum(v ** 2), eps))
+
+
+def tree_dot(a: Any, b: Any) -> jax.Array:
+    """Inner product between two matching PyTrees of arrays."""
+    return sum(jnp.vdot(x, y) for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b)))
+
+
+@node
+def Constraint(objective: Node) -> Node:
+    """Least-action constraint projection over any entity record."""
+    def apply(self, pair):
+        error, grad = jax.value_and_grad(self.objective)(pair.coords)
+        delta = jax.tree.map(jnp.multiply, pair.inv_inertia, grad)
+        denom = tree_dot(grad, delta) + self.objective.param.compliance
+        step = error / jnp.maximum(denom, 1e-8)
+        displaced = jax.tree.map(lambda q, dq: q - step * dq, pair.coords, delta)
+        return pair.replace(**displaced.__as_dict__), Aux(error=error)
+
+    return Wrapper(objective=objective)(apply)
+
+
 def jacobi(constraints: Struct, constraint: Node) -> Node:
     """Apply ``constraint`` to every constraint from the same positions and add up
     the corrections: an ``ensemble`` of one correction per constraint, summed
@@ -149,30 +160,20 @@ def red_black(constraints: Struct, constraint: Node) -> Node:
 
 
 @node
-def Broadcast(value: tuple | jax.Array) -> Node:
-    """Broadcast one constant vector over the entities of a collection."""
-    constant = jnp.array(value)
-    return Leaf(lambda entities: jnp.broadcast_to(constant, entities.position.shape))
-
-
-@node
 def PBDStep(
-    forcing: Node,
     predict: Node,
     solve: Node,
     finalize: Node,
 ) -> Node:
-    """One timestep, a map from an entity collection to the next: force it,
-    predict free motion, project the constraints, and update velocity."""
+    """One PBD timestep: predict free motion from force, solve constraints, and update velocity."""
     members = Composite(
-        forcing=forcing,
         predict=predict,
         solve=solve,
         finalize=finalize,
     )
 
-    def apply(self, entities):
-        predicted = self.predict(entities, self.forcing(entities))
+    def apply(self, entities, force):
+        predicted = self.predict(entities, force)
         projected = self.solve(predicted)
         return self.finalize(entities, projected)
 

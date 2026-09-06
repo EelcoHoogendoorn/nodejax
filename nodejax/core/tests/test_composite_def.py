@@ -380,6 +380,56 @@ def test_wrapper_is_a():
     assert s2 != state                                # the integral advanced
 
 
+def test_wrapper_captured_param_is_replaced_by_explicit_parameterization() -> None:
+    """A bound member supplies the wrapper's current param, while entering
+    parameterization again uses the member's flat constructor form."""
+    captured = Motor().parameterize(ke=2.0)
+
+    def apply(self, input):
+        return self.motor(input)
+
+    wrapped = Wrapper(motor=captured)(apply, name='wrapped_motor')
+    replaced = wrapped.parameterize(ke=5.0)
+
+    assert wrapped.param.ke == 2.0
+    assert wrapped.apply(jnp.asarray(3.0)) == 6.0
+    assert replaced.param.ke == 5.0
+    assert replaced.apply(jnp.asarray(3.0)) == 15.0
+
+
+def test_wrapper_reparameterizes_a_captured_rng_param_like_an_unbound_member() -> None:
+    def RandomScale() -> Node:
+        def param(scale, rng):
+            return scale * jax.random.normal(rng.next(), ())
+
+        def apply(param, input):
+            return param * input
+
+        return Leaf(apply, param=param, name='random_scale')
+
+    def WrappedScale(scale: Node) -> Node:
+        def apply(self, input):
+            return self.scale(input)
+
+        return Wrapper(scale=scale)(apply, name='wrapped_scale')
+
+    replacement_key = jax.random.PRNGKey(1)
+    expected = WrappedScale(RandomScale()).parameterize(
+        scale=3.0,
+        rng=replacement_key,
+    )
+    captured = RandomScale().parameterize(
+        scale=2.0,
+        rng=jax.random.PRNGKey(0),
+    )
+    replaced = WrappedScale(captured).parameterize(
+        scale=3.0,
+        rng=replacement_key,
+    )
+
+    assert jnp.allclose(replaced.param, expected.param)
+
+
 def test_pipes_take_constructed_members():
     """Transport containers work in >> too: a bound member's params
     become stored construction values, parameterize fills what kwargs

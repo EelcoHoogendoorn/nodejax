@@ -183,7 +183,8 @@ def _member_of(definition: Def, name: str, param, state_fn, rng_fn, slot):
     if name in definition.members:
         member = getattr(definition.members, name)
         if name == transparent:
-            slice_param, slice_state = param, state_fn
+            slice_param = param
+            slice_state = state_fn if member.cyclic else (lambda: ())
         else:
             slice_param = getattr(param, name) if member.parametric else ()
             slice_state = ((lambda: getattr(state_fn(), name))
@@ -328,7 +329,9 @@ class _BuildingMember:
 
 
 class _InitWired:
-    """`self` for an INIT-time run of the composite apply: on
+    """`self` for an INIT-time run of the composite apply, and for an init
+    written against self, whose views bind and reset the members through
+    the same slots. For the apply run: on
     self.member(x) it builds that member's INITIAL state from the input
     it receives (pass input=x, rng where the init consumes it), then
     runs the member's apply on that state to produce the output the
@@ -544,7 +547,8 @@ class _BuildingWired:
     ``state`` reads use the same lazily built throwaway slices as member
     calls, preserving the authored runtime surface during discovery."""
 
-    def __init__(self, definitions, given, rng: MaybeKeyStream, kwargs):
+    def __init__(self, definitions, given, rng: MaybeKeyStream, kwargs,
+                 states=None):
         self._defs = definitions
         self._given = given
         self._rng = rng
@@ -552,7 +556,9 @@ class _BuildingWired:
         self._boundary = self._probe._require()
         self._kwargs = kwargs
         self._built = {}
-        self._states = {}
+        # A member bound to a state at construction reads as that state;
+        # every other cyclic member reads as a throwaway initial state.
+        self._states = {} if states is None else dict(states)
         self._specs = {}      # the shape each member was fed, for rebuilding outside
 
     def _resolved_node(self, name):

@@ -126,7 +126,7 @@ class Wrapped:
         self.operand = operand
 
     def roles(self, *, param=None, init=None, prime=None, apply=None,
-              name=None, requires_input=None,
+              name=None, requires_input=None, state_fields: tuple[str, ...] = (),
               param_takes_rng=None, init_takes_rng=None,
               apply_takes_rng=None, input_spec=_KEEP,
               apply_fields=None, open: bool = False,
@@ -156,7 +156,7 @@ class Wrapped:
         )
         calls = definition.contract._roles(
             param=param, init=init, prime=prime, apply=apply,
-            requires_input=requires_input,
+            requires_input=requires_input, state_fields=state_fields,
             param_takes_rng=param_takes_rng,
             init_takes_rng=init_takes_rng,
             apply_takes_rng=apply_takes_rng,
@@ -165,7 +165,7 @@ class Wrapped:
         )
         options = dict(
             param=param, init=init, prime=prime, apply=apply,
-            name=name, requires_input=requires_input,
+            name=name, requires_input=requires_input, state_fields=state_fields,
             param_takes_rng=param_takes_rng,
             init_takes_rng=init_takes_rng,
             apply_takes_rng=apply_takes_rng,

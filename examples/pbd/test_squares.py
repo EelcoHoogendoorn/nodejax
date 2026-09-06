@@ -9,8 +9,8 @@ import pytest
 
 from nodejax import Struct, batch, scan, split_aux
 from examples.pbd import (
-    AnchorConstraint,
-    Broadcast,
+    AnchorDistance,
+    Constraint,
     body,
     gauss_seidel,
     jacobi,
@@ -93,14 +93,28 @@ def test_one_anchor_constraint_restores_offset_bodies() -> None:
         rest_length=0.0,
         compliance=0.0,
     )
-    constraint = AnchorConstraint().bind(spec)
+    constraint = Constraint(AnchorDistance()).bind(spec)
 
     after, aux = split_aux(constraint.apply(initial))
 
     assert jnp.allclose(after.position[0], jnp.array([0.0, 0.0]))
     assert jnp.allclose(after.position[1], jnp.array([2.0, 0.0]))
     assert jnp.allclose(after.angle, 0.0)
-    assert jnp.allclose(aux.distance_error, 1.0)
+    assert jnp.allclose(aux.error, 1.0)
+
+
+def test_anchor_distance_evaluates_error() -> None:
+    spec = Struct(
+        anchors=jnp.array([[1.0, 0.0], [-1.0, 0.0]]),
+        rest_length=0.0,
+        compliance=0.0,
+    )
+    anchor = AnchorDistance().bind(spec)
+    coords = Struct(
+        position=jnp.array([[0.0, 0.0], [3.0, 0.0]]),
+        angle=jnp.array([0.0, 0.0]),
+    )
+    assert jnp.allclose(anchor.apply(coords), 1.0)
 
 
 @pytest.mark.parametrize(
@@ -120,15 +134,15 @@ def test_chain_schedules_reduce_the_same_stretched_chain(
     )
     constraints = square_chain_constraints(n_squares, size)
     step = xpbd_step(
-        schedule(constraints, AnchorConstraint()),
-        Broadcast((0.0, 0.0)),
-        n_bodies=n_squares,
+        schedule(constraints, Constraint(AnchorDistance())),
         n_solver_passes=8,
         dt=0.02,
         velocity_damping=1.0,
     )
 
-    final = split_aux(step.parameterize().bind(state=initial).apply()[1])[0]
+    final = split_aux(
+        step.parameterize().bind(state=initial).apply(jnp.zeros_like(initial.position))[1]
+    )[0]
 
     # Check anchor separation between first pair
     init_anchor_0 = initial.position[0] + jnp.array([size / 2.0, 0.0])
@@ -150,16 +164,15 @@ def test_square_chain_swings_under_gravity() -> None:
     initial = square_chain_bodies(n_squares, size)
     constraints = square_chain_constraints(n_squares, size)
     step = xpbd_step(
-        gauss_seidel(constraints, AnchorConstraint()),
-        Broadcast(GRAVITY),
-        n_bodies=n_squares,
+        gauss_seidel(constraints, Constraint(AnchorDistance())),
         n_solver_passes=10,
         dt=0.016,
         velocity_damping=0.995,
     )
     program = scan(step, n=n_steps)
+    forces = jnp.broadcast_to(jnp.array(GRAVITY), (n_steps, n_squares, 2))
     sim = jax.jit(program.parameterize().bind(state=initial).apply)
-    trajectory, diagnostics = split_aux(sim()[1])
+    trajectory, diagnostics = split_aux(sim(forces)[1])
 
     assert trajectory.position.shape == (n_steps, n_squares, 2)
     assert trajectory.angle.shape == (n_steps, n_squares)
@@ -182,16 +195,15 @@ def test_composed_batched_rollout_keeps_anchor() -> None:
     )(angles)
     constraints = square_chain_constraints(n_squares, size)
     step = xpbd_step(
-        gauss_seidel(constraints, AnchorConstraint()),
-        Broadcast(GRAVITY),
-        n_bodies=n_squares,
+        gauss_seidel(constraints, Constraint(AnchorDistance())),
         n_solver_passes=8,
         dt=0.016,
         velocity_damping=0.995,
     )
     program = batch(scan(step, n=n_steps), n=n_worlds)
+    forces = jnp.broadcast_to(jnp.array(GRAVITY), (n_worlds, n_steps, n_squares, 2))
     sim = jax.jit(program.parameterize().bind(state=initial).apply)
-    trajectory, diagnostics = split_aux(sim()[1])
+    trajectory, diagnostics = split_aux(sim(forces)[1])
 
     assert trajectory.position.shape == (n_worlds, n_steps, n_squares, 2)
     assert trajectory.angle.shape == (n_worlds, n_steps, n_squares)
@@ -332,7 +344,7 @@ def plot_squares(result: Struct, filename: str = 'xpbd_squares.png') -> str:
     # Bottom-right: constraint violation across time
     error_axis = figure.add_subplot(grid[1, 2])
     # Extract max distance error from aux diagnostics
-    error = np.array(result.aux.solve.constraint.distance_error)
+    error = np.array(result.aux.solve.constraint.error)
     # error shape: (n_worlds, n_frames, n_passes, n_constraints)
     max_error_per_frame = np.max(np.abs(error[world_index, :, -1, :]), axis=-1)
     error_axis.semilogy(
@@ -372,16 +384,15 @@ def main() -> None:
     constraints = square_chain_constraints(n_squares, size)
 
     step = xpbd_step(
-        gauss_seidel(constraints, AnchorConstraint()),
-        Broadcast(GRAVITY),
-        n_bodies=n_squares,
+        gauss_seidel(constraints, Constraint(AnchorDistance())),
         n_solver_passes=12,
         dt=dt,
         velocity_damping=0.995,
     )
     program = batch(scan(step, n=n_steps), n=n_worlds)
+    forces = jnp.broadcast_to(jnp.array(GRAVITY), (n_worlds, n_steps, n_squares, 2))
     sim = jax.jit(program.parameterize().bind(state=initial).apply)
-    trajectory, aux = split_aux(sim()[1])
+    trajectory, aux = split_aux(sim(forces)[1])
 
     result = Struct(
         program=program,

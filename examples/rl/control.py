@@ -1,4 +1,11 @@
-"""Shared policy-plant interaction Nodes for reinforcement-learning examples."""
+"""Shared policy-plant interaction Nodes for reinforcement-learning examples.
+
+A plant is a cyclic Node taking ``command`` and ``disturbance`` and returning
+a record of ``action`` and ``cost``; its state is its own, read through the
+member view before and after a step, and ``observe`` is a method on it.
+"""
+
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +25,21 @@ from nodejax import (
     tree_last,
     tree_len,
 )
+
+
+def initial_state(plant: PNode) -> Struct:
+    """The plant's state at its default start, for resolving an input
+    contract; a plant whose init draws a key gets a fixed probe key, since
+    only the shape is kept."""
+    if plant.contract.init_takes_rng:
+        return plant.init(rng=jax.random.PRNGKey(0))
+    return plant.init()
+
+
+def initial_observation(plant: PNode) -> Struct:
+    """What a controller sees of the plant at its default start, for
+    resolving a policy's or a value's input contract."""
+    return plant.observe(state=initial_state(plant))
 
 
 @node
@@ -42,23 +64,50 @@ def ControlledStep(policy: Node, plant: PNode) -> Node:
         )
         return Struct(
             state=state,
+            command=command,
             action=output.action,
             cost=output.cost,
-            next_state=output.state,
+            next_state=self.plant.state,
         )
 
-    def init(param, input):
-        """Adopt caller plant state and initialize policy state for its observation form.
+    def init(self, input):
+        """Start the plant from ``initial_plant_state`` and the policy from
+        what it observes there.
 
         ``initial_plant_state`` shares the apply call because a scan primes from
-        its first real element. It is ignored by later transitions. A stateless
-        policy contributes the empty slot: no fork on its lifecycle.
+        its first real element. It is ignored by later transitions. The plant's
+        own init turns the start into its state; for a plant whose start is
+        its state that is the identity.
         """
-        observation = plant.observe(state=input.initial_plant_state)
+        self.plant.reset(start=input.initial_plant_state)
+        self.policy.reset(input=self.plant.observe())
+
+    return members(apply, init=init)
+
+
+@node
+def PlannedStep(policy: Node, plant: PNode) -> Node:
+    """``ControlledStep`` for a planner: the policy is handed the plant's
+    state, not its observation, since a planner rolls the plant's own
+    model out from where the plant is. Everything else is the same, member
+    names included, so paths into the two steps agree."""
+    members = Composite(policy=policy, plant=plant)
+
+    def apply(self, disturbance, initial_plant_state):
+        state = self.plant.state
+        command = self.policy(state)
+        output = self.plant(command=command, disturbance=disturbance)
         return Struct(
-            policy=policy.bind(param.policy).init(input=observation),
-            plant=input.initial_plant_state,
+            state=state,
+            command=command,
+            action=output.action,
+            cost=output.cost,
+            next_state=self.plant.state,
         )
+
+    def init(self, input):
+        self.plant.reset(start=input.initial_plant_state)
+        self.policy.reset(input=self.plant.state)
 
     return members(apply, init=init)
 
@@ -108,17 +157,21 @@ def policy_trajectory(
     initial_plant_state: Struct,
     steps: int,
     rng: jax.Array,
+    step: Callable = ControlledStep,
 ) -> Struct:
     """Evaluate from fresh plant state while preserving recurrent policy carry.
 
     The trajectory is shaped (world, time), its ``state`` holding the final
-    state as one extra step."""
+    state as one extra step, its ``command`` what the policy asked for and
+    its ``action`` what the plant did. ``step`` builds the transition from the policy
+    and the plant: ``ControlledStep`` for a policy on observations,
+    ``PlannedStep`` for a planner on states."""
     n_worlds = tree_len(initial_plant_state)
     input = Struct(
         disturbance=jnp.zeros((n_worlds, steps)),
         initial_plant_state=tree_broadcast_axis(initial_plant_state, steps, axis=1),
     )
-    rollout = batch(scanned(ControlledStep(policy, plant)), n=n_worlds).parameterize()
+    rollout = batch(scanned(step(policy, plant)), n=n_worlds).parameterize()
     if rollout.contract.apply_takes_rng:
         trajectory = rollout.apply(bundle=input, rng=rng)
     else:
@@ -132,6 +185,7 @@ def policy_trajectory(
     )
     return Struct(
         state=state,
+        command=trajectory.command,
         action=trajectory.action,
         cost=trajectory.cost,
         final_state=final_state,
@@ -150,11 +204,11 @@ def OpenLoopStep(plant: PNode) -> Node:
     def apply(self, command, disturbance):
         state = self.plant.state
         output = self.plant(command=command, disturbance=disturbance)
-        return Struct(state=state, cost=output.cost, next_state=output.state)
+        return Struct(state=state, cost=output.cost, next_state=self.plant.state)
 
-    def init(param, initial_state):
+    def init(self, initial_state):
         """Start from the given plant state."""
-        return Struct(plant=initial_state)
+        self.plant.bind(state=initial_state)
 
     return members(apply, init=init)
 
@@ -186,12 +240,10 @@ def SamplingStep(policy: Node, plant: Node) -> Node:
             next_observation=self.plant.observe(),
         )
 
-    def init(param, initial_plant_state):
-        """Start the plant as given and initialize policy state for its observation form."""
-        observation = plant.observe(state=initial_plant_state)
-        return Struct(
-            policy=policy.bind(param.policy).init(input=observation),
-            plant=initial_plant_state,
-        )
+    def init(self, initial_plant_state):
+        """Start the plant from ``initial_plant_state`` and the policy from
+        what it observes there."""
+        self.plant.reset(start=initial_plant_state)
+        self.policy.reset(input=self.plant.observe())
 
     return members(apply, init=init)

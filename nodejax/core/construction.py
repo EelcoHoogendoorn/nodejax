@@ -121,7 +121,9 @@ def specialize(definition: Def, overrides: dict[str, Any]) -> Def:
         else:
             arguments[name] = _specialize_value(value, {}, wildcards)
 
-    built = _definition(construction.factory(**arguments))
+    replay_arguments = dict(construction.replay_arguments.__items__)
+    built = _definition(construction.factory(
+        **arguments, **replay_arguments))
     named = _merge(construction.named, descendants)
 
     if named or wildcards:
@@ -145,6 +147,7 @@ def specialize(definition: Def, overrides: dict[str, Any]) -> Def:
         arguments=Struct(**arguments),
         named=named,
         wildcards=frozendict(wildcards),
+        replay_arguments=construction.replay_arguments,
     ))
 
 

@@ -1,15 +1,14 @@
 """Particle Position-Based Dynamics (PBD) entity definitions, constraints, and step.
 
 Provides the ``particle`` record, unconstrained free motion, velocity recovery,
-local particle constraints (``DistanceConstraint``, ``FloorConstraint``), and the
-composed particle timestep ``pbd_step``.
+local particle constraints (``ParticleDistance``, ``ParticleBend``,
+``FloorConstraint``), and the composed particle timestep ``pbd_step``.
 """
 
 import jax
 import jax.numpy as jnp
 
 from nodejax import (
-    Aux,
     Leaf,
     Node,
     PNode,
@@ -18,27 +17,38 @@ from nodejax import (
     cyclic,
     node,
     repeat,
-    serial,
 )
-from examples.pbd.core import PBDStep
+from nodejax.struct import register_struct_subtype
+from examples.pbd.core import PBDStep, safe_norm
+
+
+@register_struct_subtype
+class Particle(Struct):
+    """A particle record of positions, velocities, and inverse masses."""
+
+    @property
+    def coords(self) -> Struct:
+        return Struct(position=self.position)
+
+    @property
+    def inv_inertia(self) -> Struct:
+        return Struct(position=self.inverse_mass[:, None])
 
 
 def particle(
     position: jax.Array,
     velocity: jax.Array,
     inverse_mass: jax.Array,
-) -> Struct:
-    """Build a particle record used throughout the PBD solve.
+) -> Particle:
+    """A particle record of positions, velocities, and inverse masses.
 
-    ``position`` and ``velocity`` end in a coordinate axis. ``inverse_mass``
-    is scalar for one particle, and zero fixes that particle in place. Leading
-    axes describe collections without changing the record's fields.
+    ``position`` and ``velocity`` end in a coordinate axis. Zero ``inverse_mass``
+    fixes that particle in place. Leading batch axes describe collections.
 
-    A record, not a Node: it flows as data through every operation of a
-    timestep and is the state of nothing beneath ``PBDStep``, which alone
-    holds the collection as its state (see ``core``).
+    Individual substeps pass this record as call data; ``pbd_step`` holds the
+    collection as state across timesteps via ``cyclic``.
     """
-    return Struct(
+    return Particle(
         position=position,
         velocity=velocity,
         inverse_mass=inverse_mass,
@@ -47,7 +57,7 @@ def particle(
 
 @node
 def FreeMotion(dt: float) -> Node:
-    """Predict one unconstrained ``particle`` record from its force."""
+    """Predict one unconstrained ``particle`` record from external force."""
     def apply(particle, force):
         velocity = particle.velocity + dt * particle.inverse_mass * force
         return particle.replace(
@@ -72,23 +82,31 @@ def VelocityUpdate(
 
 
 @node
-def DistanceConstraint() -> Node:
-    """Enforce rest length on a pair of particles; length error rides on aux."""
-    def param(rest_length):
-        return rest_length
+def ParticleDistance() -> Node:
+    """Compute scalar distance error between a pair of particles."""
+    def param(rest_length: float, compliance: float = 0.0):
+        return Struct(rest_length=rest_length, compliance=compliance)
 
-    def apply(param, pair):
-        offset = pair.position[1] - pair.position[0]
-        distance = jnp.linalg.norm(offset)
-        direction = offset / jnp.maximum(distance, 1e-8)
-        length_error = distance - param
-        total_inverse_mass = pair.inverse_mass[0] + pair.inverse_mass[1]
-        correction = length_error * direction / jnp.maximum(total_inverse_mass, 1e-8)
-        position = pair.position + jnp.stack((
-            pair.inverse_mass[0] * correction,
-            -pair.inverse_mass[1] * correction,
-        ))
-        return pair.replace(position=position), Aux(length_error=length_error)
+    def apply(param, coords):
+        return safe_norm(coords.position[1] - coords.position[0]) - param.rest_length
+
+    return Leaf(apply, param=param)
+
+
+@node
+def ParticleBend() -> Node:
+    """The signed bending angle at the middle of a triple of 2D particles,
+    less ``rest_angle``: the turn from the first segment to the second,
+    zero when straight, with a clean gradient there."""
+    def param(rest_angle: float = 0.0, compliance: float = 0.0):
+        return Struct(rest_angle=rest_angle, compliance=compliance)
+
+    def apply(param, coords):
+        first = coords.position[1] - coords.position[0]
+        second = coords.position[2] - coords.position[1]
+        cross = first[0] * second[1] - first[1] * second[0]
+        dot = first[0] * second[0] + first[1] * second[1]
+        return jnp.arctan2(cross, dot) - param.rest_angle
 
     return Leaf(apply, param=param)
 
@@ -105,22 +123,13 @@ def FloorConstraint(height: float) -> Node:
 
 def pbd_step(
     constraints: Node | PNode,
-    forcing: Node,
     *,
-    n_points: int,
     n_solver_passes: int,
     dt: float,
-    floor_height: float,
-    velocity_damping: float,
+    velocity_damping: float = 1.0,
 ) -> Node:
-    """Assemble the particle world: one physical timestep, cyclic over the
-    collection it steps, so a caller binds or initializes its state and
-    scans it over time."""
-    constraint_pass = serial(
-        constraints=constraints,
-        floor=batch(FloorConstraint(floor_height), n=n_points),
-    )
-    solver = repeat(constraint_pass, n=n_solver_passes)
-    predict = batch(FreeMotion(dt), n=n_points)
-    finalize = batch(VelocityUpdate(dt, velocity_damping), n=n_points)
-    return cyclic(PBDStep(forcing, predict, solver, finalize))
+    """Assemble one particle timestep, cyclic over the particle collection."""
+    predict = batch(FreeMotion(dt))
+    solver = repeat(constraints, n=n_solver_passes)
+    finalize = batch(VelocityUpdate(dt, velocity_damping))
+    return cyclic(PBDStep(predict, solver, finalize))

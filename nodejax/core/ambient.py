@@ -23,6 +23,7 @@ _FILLABLE = (
     inspect.Parameter.POSITIONAL_OR_KEYWORD,
     inspect.Parameter.KEYWORD_ONLY,
 )
+_NO_REPLAY_ARGUMENT = object()
 
 
 @contextmanager
@@ -86,6 +87,14 @@ def _construction_value(value):
     return value
 
 
+def _construction_arguments(arguments) -> dict[str, Any]:
+    return {
+        field: _construction_value(value)
+        for field, value in arguments.items()
+        if value is not _NO_REPLAY_ARGUMENT
+    }
+
+
 def node(fn: Callable | None = None, *, name: str | None = None):
     """Record a factory call, deferring execution while statics are missing."""
     if fn is None:
@@ -125,26 +134,19 @@ def node(fn: Callable | None = None, *, name: str | None = None):
                               for value in call.arguments.values()):
                 call.apply_defaults()
                 arguments = {
-                    **{field: _construction_value(value)
-                       for field, value in call.arguments.items()},
+                    **_construction_arguments(call.arguments),
                     **{field: REQUIRED for field in missing},
                 }
                 return Generic(_snake(fn.__name__), factory,
                                Struct(**arguments))
             product = fn(*call.args, **call.kwargs)
             call.apply_defaults()
-            recorded = Struct(**{
-                field: _construction_value(value)
-                for field, value in call.arguments.items()
-            })
+            recorded = Struct(**_construction_arguments(call.arguments))
         else:
             product = fn(*args, **supplied)
             if args:
                 return product
-            recorded = Struct(**{
-                field: _construction_value(value)
-                for field, value in supplied.items()
-            })
+            recorded = Struct(**_construction_arguments(supplied))
 
         if is_generic(product):
             return Generic(name or product.name, factory, recorded)
@@ -154,10 +156,12 @@ def node(fn: Callable | None = None, *, name: str | None = None):
 
         definition = product._def
         construction = definition.construction
+        replay_arguments = Struct()
         if construction is not None and construction.factory is factory:
             # An inner call of this same factory built the product and
             # recorded the arguments it was actually built with.
             recorded = construction.arguments
+            replay_arguments = construction.replay_arguments
         unnamed_wrapper = (
             definition.layout.transparent_member is not None
             and construction is not None
@@ -179,7 +183,10 @@ def node(fn: Callable | None = None, *, name: str | None = None):
         tree = definition.tree
         if len(member_arguments) == len(definition.members):
             def tree(replacements):
-                arguments = dict(recorded.__items__)
+                arguments = {
+                    **dict(recorded.__items__),
+                    **dict(replay_arguments.__items__),
+                }
                 for member, field in member_arguments.items():
                     arguments[field] = Node(replacements[member])
                 rebuilt = factory(**arguments)
@@ -189,7 +196,8 @@ def node(fn: Callable | None = None, *, name: str | None = None):
 
         definition = definition.copy(
             name=actual_name,
-            construction=Construction(factory, recorded),
+            construction=Construction(
+                factory, recorded, replay_arguments=replay_arguments),
             tree=tree,
         )
         return product._with_definition(definition)
