@@ -29,6 +29,11 @@ class Struct:
 		"""Prevent attribute deletion."""
 		raise AttributeError(f"'{self.__class__.__name__}' object attribute '{name}' is read-only")
 
+	def __reduce__(self):
+		"""Pickle as a construction: the read-only fields cannot be restored
+		onto a bare instance the way default unpickling restores them."""
+		return _rebuild, (type(self), tuple(self.__items__))
+
 	# === Attribute access interface ===
 
 	def __getattribute__(self, name: str) -> Any:
@@ -126,6 +131,11 @@ class Struct:
 			result[key] = value
 
 		return type(self)(**result)
+
+
+def _rebuild(cls: type, items: tuple) -> Struct:
+	"""A pickled Struct, as its type constructed from its (name, value) pairs."""
+	return cls(**dict(items))
 
 
 # === JAX PyTree registration ===

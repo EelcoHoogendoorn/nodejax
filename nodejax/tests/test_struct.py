@@ -1,5 +1,8 @@
 """Value behavior of NodeJAX's immutable record."""
 
+import pickle
+
+import jax.numpy as jnp
 import pytest
 
 from nodejax.struct import Struct
@@ -56,3 +59,18 @@ def test_merge_preserves_structure_at_every_depth() -> None:
         nested_struct.merge({'branch': {'leaf': 2}})
     with pytest.raises(TypeError, match='incompatible structures'):
         nested_value.merge({'branch': {'leaf': Struct(value=2)}})
+
+
+def test_a_struct_round_trips_through_pickle() -> None:
+    """Bound parameters and state are Struct trees; saved, they must load
+    as the same tree, subtypes included."""
+    original = Struct(
+        gains=SemanticStruct(kp=jnp.asarray(2.0), ki=0.5), count=3)
+
+    loaded = pickle.loads(pickle.dumps(original))
+
+    assert type(loaded) is Struct
+    assert type(loaded.gains) is SemanticStruct
+    assert loaded.__keys__ == original.__keys__
+    assert loaded.gains.kp == 2.0 and loaded.gains.ki == 0.5
+    assert loaded.count == 3
