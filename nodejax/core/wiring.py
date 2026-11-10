@@ -17,6 +17,7 @@ import inspect
 
 import jax
 import jax.numpy as jnp
+from jax.extend.core import get_opaque_trace_state
 
 from nodejax.core.author_view import AuthorNode
 from nodejax.struct import Struct
@@ -29,6 +30,21 @@ from nodejax.core.rng import MaybeKeyStream
 from nodejax.tree import tree_first, tree_len
 
 _NO_INPUT = object()   # a read, distinct from a feed of any value (None included)
+
+
+def _trace():
+    """The JAX trace building values now: the step's own, or one that a
+    transformation of part of the step (a ``lax.cond`` branch, a loop body,
+    ``vmap``) nests inside it."""
+    return get_opaque_trace_state(convention='nodejax')
+
+
+def _strands(value, trace) -> bool:
+    """Whether storing ``value`` now strands it: it holds arrays and is
+    stored under another trace than ``trace``. A transformed function hands
+    values out only as its output, and every branch of a ``lax.cond`` is
+    traced, so a store from inside one is neither scoped nor conditional."""
+    return _trace() != trace and bool(jax.tree.leaves(value))
 
 
 class _Slot:
@@ -44,7 +60,7 @@ class _Slot:
         return self._wired._rng.child(takes_rng)
 
     def write(self, state):
-        self._wired._new[self._name] = state
+        self._wired._store('state', self._name, state)
 
     def run(self, contract, param, state_fn, input, *, sequence: bool = False):
         """Run ``contract.apply`` from the view's state, store the successor,
@@ -55,7 +71,7 @@ class _Slot:
         self.write(new_state)
         out, aux = split_aux(out)
         if aux is not None:
-            self._wired._aux[self._name] = aux
+            self._wired._store('aux', self._name, aux)
         return out
 
 
@@ -211,6 +227,8 @@ class _Wired:
         self._members = members
         self._new = {}
         self._aux = {}
+        self._trace = _trace()
+        self._stranded = set()   # (store, name) last written under a nested trace
         self._rng = rng
         # rng_from decides what the authored rng argument is: None narrows
         # the invocation stream to a KeyStream, True forwards the stream
@@ -224,7 +242,35 @@ class _Wired:
     def sow(self, **kwargs: Any) -> None:
         """Sow auxiliary values (taps, losses, activity) into the step's aux stream."""
         for k, v in kwargs.items():
-            self._aux[k] = v
+            self._store('aux', k, v)
+
+    def _store(self, store: str, name: str, value) -> None:
+        """Store a member's successor state or an aux value, remembering
+        whether a transformation nested in the step built it."""
+        (self._new if store == 'state' else self._aux)[name] = value
+        if _strands(value, self._trace):
+            self._stranded.add((store, name))
+        else:
+            self._stranded.discard((store, name))
+
+    def _settle(self, where: str) -> None:
+        """Refuse a step whose result would carry a value stranded inside
+        a transformation nested in it."""
+        if not self._stranded:
+            return
+        store, name = min(self._stranded)
+        if store == 'state':
+            raise TypeError(
+                f'{where}: member {name!r} stored its state inside a JAX '
+                'transformation within the apply (a lax.cond branch, a loop '
+                'body, vmap); a value leaves that function only as its '
+                f'output. Return self.{name}.state from the function and '
+                f'store it with self.{name}.bind(state=...) after it')
+        raise TypeError(
+            f'{where}: aux {name!r} was produced inside a JAX transformation '
+            'within the apply (a lax.cond branch, a loop body, vmap); a value '
+            'leaves that function only as its output. Return it from the '
+            'function and sow it after it')
 
     @property
     def __items__(self):
@@ -363,6 +409,8 @@ class _InitWired:
         self._walk_rng = rng if real else self._probe
         self._member_inputs = member_inputs
         self._init = {}       # recorded initial states
+        self._trace = _trace()
+        self._stranded = set()  # initial states built under a nested trace
         self._work = {}       # advancing states, for wiring propagation
         self._specs = {}      # spec walk: the shape each member was fed
         self._called = set()  # members whose init came from a feed (authoritative)
@@ -409,6 +457,15 @@ class _InitWired:
             self._init[name] = resolved.contract.init(
                 member_param, member_input, child)
         self._work[name] = self._init[name]
+        self._note(name)
+
+    def _note(self, name):
+        """Remember whether a transformation nested in the walk built the
+        member's recorded initial state."""
+        if _strands(self._init[name], self._trace):
+            self._stranded.add(name)
+        else:
+            self._stranded.discard(name)
 
     def _ensure(self, name):
         """The member's initial state for a READ (a member view's state, a
@@ -450,6 +507,13 @@ class _InitWired:
             if nm not in self._init:
                 self._build(nm, _NO_INPUT)
         if self._real:
+            if self._stranded:
+                raise TypeError(
+                    f'member {min(self._stranded)!r} took its initial state '
+                    'inside a JAX transformation within the composite (a '
+                    'lax.cond branch, a loop body, vmap); a value leaves that '
+                    'function only as its output. Prime the member outside '
+                    'it, in an init written against self')
             states = {nm: self._init[nm]
                       for nm, d in self._defs.__items__ if d.cyclic}
             return Struct(**states) if states else ()
@@ -493,6 +557,7 @@ class _InitSlot:
         wired, name = self._wired, self._name
         if name not in wired._called:
             wired._init[name] = state
+            wired._note(name)
             wired._called.add(name)
         wired._work[name] = state
 
@@ -741,9 +806,9 @@ class _WiredApply:
                        definition.members)
             self = _Wired(
                 p, s, members, rng, author_rng=author_rng, rng_from=rng_from)
-            out = _keys_only(
-                run(self, input),
-                f"{definition.name if definition is not None else 'composite'}.apply")
+            where = f"{definition.name if definition is not None else 'composite'}.apply"
+            out = _keys_only(run(self, input), where)
+            self._settle(where)
             clean_out, direct_aux = split_aux(out)
             if direct_aux is not None:
                 if type(direct_aux) is Aux:
@@ -751,9 +816,7 @@ class _WiredApply:
                         self._aux[k] = direct_aux[k]
             new_state = self._collect()
             if self._aux:
-                self._aux = _keys_only(
-                    self._aux,
-                    f"{definition.name if definition is not None else 'composite'}.apply")
+                self._aux = _keys_only(self._aux, where)
                 # member aux & self.sow(...) re-emitted as the (output, collection) pair
                 return new_state, (clean_out, Aux(**self._aux))
             return new_state, clean_out

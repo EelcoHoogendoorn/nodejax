@@ -6,8 +6,9 @@ store their result in the member's slot; the view itself does not move.
 
 import jax
 import jax.numpy as jnp
+import pytest
 
-from nodejax import Composite, Leaf, Node, Wrapper, node
+from nodejax import Aux, Composite, Leaf, Node, Wrapper, node
 from nodejax.struct import Struct
 
 
@@ -158,3 +159,74 @@ def test_binds_and_scans_survive_the_construction_walks():
     reference = nn.GRU(hidden).with_input(jnp.zeros(features)).bind(
         program.param.memory, state=start).scan(jnp.zeros((steps, features)))[1]
     assert jnp.allclose(out, reference)
+
+
+def switched(apply) -> Node:
+    return Composite(a=Counter(), b=Counter())(apply).parameterize().initialize()
+
+
+def test_a_member_stepped_inside_a_jax_transformation_is_refused():
+    """Both branches of a lax.cond are traced, and each returns only its
+    output: a successor stored from inside one would be another trace's
+    value, stored whichever branch runs."""
+    def apply(self, flag, input):
+        return jax.lax.cond(flag, lambda: self.a(input), lambda: self.b(input))
+
+    with pytest.raises(TypeError, match="member 'a' stored its state inside a JAX transformation"):
+        switched(apply).apply(flag=jnp.asarray(True), input=jnp.asarray(1.0))
+
+
+def test_a_successor_returned_from_a_transformation_and_bound_is_stored():
+    def apply(self, flag, input):
+        a, b = self.a, self.b
+
+        def left():
+            out = a(input)
+            return self.a.state, b.state, out
+
+        def right():
+            out = b(input)
+            return a.state, self.b.state, out
+
+        state_a, state_b, out = jax.lax.cond(flag, left, right)
+        self.a.bind(state=state_a)
+        self.b.bind(state=state_b)
+        return out
+
+    step = jax.jit(lambda program, flag, input: program(flag=flag, input=input))
+    program, _ = step(switched(apply), jnp.asarray(True), jnp.asarray(2.0))
+    program, _ = step(program, jnp.asarray(False), jnp.asarray(3.0))
+    assert program.state.a == 2.0 and program.state.b == 3.0
+
+
+def test_a_stateless_member_may_run_inside_a_jax_transformation():
+    def apply(self, flag, input):
+        return jax.lax.cond(flag, lambda: self.double(input), lambda: input)
+
+    double = Leaf(lambda input: 2.0 * input, name='double')
+    program = Composite(double=double)(apply).parameterize()
+    assert program.apply(flag=jnp.asarray(True), input=jnp.asarray(3.0)) == 6.0
+    assert program.apply(flag=jnp.asarray(False), input=jnp.asarray(3.0)) == 3.0
+
+
+def test_aux_produced_inside_a_jax_transformation_is_refused():
+    def apply(self, flag, input):
+        return jax.lax.cond(flag, lambda: self.probe(input), lambda: input)
+
+    probe = Leaf(lambda input: (input, Aux(seen=input)), name='probe')
+    program = Composite(probe=probe)(apply).parameterize()
+    with pytest.raises(TypeError, match="aux 'probe' was produced inside a JAX transformation"):
+        program.apply(flag=jnp.asarray(False), input=jnp.asarray(1.0))
+
+
+def test_a_member_primed_inside_a_jax_transformation_is_refused():
+    """Initialization runs the apply to prime members from what they are
+    fed; a member first fed inside a branch would take a branch's value."""
+    def apply(self, flag, input):
+        return jax.lax.cond(flag, lambda: self.a(input), lambda: self.b(input))
+
+    primed = Leaf(lambda state, input: (state + input, state),
+                  init=lambda input: jnp.zeros_like(input), name='primed')
+    program = Composite(a=primed, b=primed)(apply).parameterize()
+    with pytest.raises(TypeError, match="member 'a' took its initial state inside"):
+        program.initialize(input=Struct(flag=jnp.asarray(True), input=jnp.asarray(1.0)))
