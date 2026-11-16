@@ -40,9 +40,9 @@ POPULATION = 16
 N_GENERATIONS = 40
 
 
-def stroke_commands() -> jax.Array:
-    """Builds `(time, joint)` shoulder strokes reversing every `STROKE_PERIOD` steps with half-amplitude opposing elbow setpoints."""
-    sign = jnp.where((jnp.arange(N_STEPS) // STROKE_PERIOD) % 2 == 0, 1.0, -1.0)
+def stroke_commands(n_steps: int = N_STEPS, stroke_period: int = STROKE_PERIOD) -> jax.Array:
+    """Builds `(time, joint)` shoulder strokes reversing every `stroke_period` steps with half-amplitude opposing elbow setpoints."""
+    sign = jnp.where((jnp.arange(n_steps) // stroke_period) % 2 == 0, 1.0, -1.0)
     return jnp.stack((STROKE_SETPOINT * sign, -0.5 * STROKE_SETPOINT * sign), axis=-1)
 
 
@@ -90,11 +90,13 @@ def tuned_plant(base: PNode, genome: Struct) -> PNode:
 
 def scenario_cost(plant: PNode, command: jax.Array) -> Struct:
     """Evaluates `plant` under `command` across all start angles and averages tracking, estimation, and chatter costs."""
+    n_steps = command.shape[0]
+
     def one_start(angle):
         state = plant.init(rng=jax.random.PRNGKey(0), start=plant.start(angle=angle, target=TARGET))
-        program = scan(plant, n=N_STEPS).bind(state=state)
+        program = scan(plant, n=n_steps).bind(state=state)
         _, outputs = program.apply(
-            command=command, disturbance=jnp.zeros((N_STEPS,)), rng=jax.random.PRNGKey(1))
+            command=command, disturbance=jnp.zeros((n_steps,)), rng=jax.random.PRNGKey(1))
         outputs, _ = split_aux(outputs)
         true = plant.mechanical(state=outputs.state)
         estimate = outputs.state.actuator.mechanical_est.observer.velocity
@@ -107,7 +109,14 @@ def scenario_cost(plant: PNode, command: jax.Array) -> Struct:
     return terms.replace(total=terms.tracking + terms.estimating + CHATTER_WEIGHT * terms.chatter)
 
 
-def tune(base: PNode, n_generations: int = N_GENERATIONS, population: int = POPULATION) -> Struct:
+def tune(
+    base: PNode,
+    n_generations: int = N_GENERATIONS,
+    population: int = POPULATION,
+    *,
+    n_steps: int = N_STEPS,
+    stroke_period: int = STROKE_PERIOD,
+) -> Struct:
     """Evolves the actuator genome of `base` for `n_generations` and returns tuned values, initial values, and loss history."""
     def fitness(candidate: PNode, element: Struct) -> jax.Array:
         return scenario_cost(tuned_plant(base, candidate.param), element.input).total
@@ -118,7 +127,7 @@ def tune(base: PNode, n_generations: int = N_GENERATIONS, population: int = POPU
         differential_evolution(population=population, spread=0.5, bounds=LOG_BOUNDS),
         rng=init_key,
     )
-    command = stroke_commands()
+    command = stroke_commands(n_steps=n_steps, stroke_period=stroke_period)
     advanced, (_, aux) = trainer.scan(
         input=tile(command, n_generations),
         target=tile(jnp.zeros(()), n_generations),

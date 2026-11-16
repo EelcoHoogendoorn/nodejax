@@ -98,6 +98,12 @@ def pendulum_training_program(
     *,
     value_loss: LossFn | BaseNode,
     iterations: int,
+    n_worlds: int = N_WORLDS,
+    n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
+    n_epochs: int = N_EPOCHS,
+    n_minibatches_per_epoch: int = N_MINIBATCHES_PER_EPOCH,
+    n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
+    n_critic_passes: int = N_CRITIC_PASSES,
 ) -> Node:
     """Assembles an executable pendulum PPO training Node over `iterations` rounds.
 
@@ -105,6 +111,7 @@ def pendulum_training_program(
     carries plant and policy state across chunks within each iteration, and carries
     actor and critic optimizer state across iterations.
     """
+    n_chunks = n_minibatches_per_epoch * n_chunks_per_minibatch
     iteration = ppo_iteration(
         policy,
         value,
@@ -116,18 +123,18 @@ def pendulum_training_program(
         critic_optimizer=optax.adam(CRITIC_RATE),
         discount=DISCOUNT,
         trace=TRACE,
-        n_worlds=N_WORLDS,
-        n_steps_per_chunk=N_STEPS_PER_CHUNK,
-        n_epochs=N_EPOCHS,
-        n_minibatches_per_epoch=N_MINIBATCHES_PER_EPOCH,
-        n_chunks_per_minibatch=N_CHUNKS_PER_MINIBATCH,
-        n_critic_passes=N_CRITIC_PASSES,
+        n_worlds=n_worlds,
+        n_steps_per_chunk=n_steps_per_chunk,
+        n_epochs=n_epochs,
+        n_minibatches_per_epoch=n_minibatches_per_epoch,
+        n_chunks_per_minibatch=n_chunks_per_minibatch,
+        n_critic_passes=n_critic_passes,
     )
     training_data = PendulumTrainingData(
         iterations,
-        n_worlds=N_WORLDS,
-        n_chunks=N_CHUNKS_PER_EPOCH,
-        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+        n_worlds=n_worlds,
+        n_chunks=n_chunks,
+        n_steps_per_chunk=n_steps_per_chunk,
     )
     return serial(data=training_data, training=carried(iteration))
 

@@ -96,8 +96,10 @@ def whip_ppo_program(
     *,
     n_worlds: int = N_WORLDS,
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
+    n_epochs: int = N_EPOCHS,
     n_minibatches_per_epoch: int = N_MINIBATCHES_PER_EPOCH,
     n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
+    n_critic_passes: int = N_CRITIC_PASSES,
 ) -> Node:
     """Assembles the complete whip PPO training Node."""
     iteration = ppo_iteration(
@@ -113,10 +115,10 @@ def whip_ppo_program(
         trace=TRACE,
         n_worlds=n_worlds,
         n_steps_per_chunk=n_steps_per_chunk,
-        n_epochs=N_EPOCHS,
+        n_epochs=n_epochs,
         n_minibatches_per_epoch=n_minibatches_per_epoch,
         n_chunks_per_minibatch=n_chunks_per_minibatch,
-        n_critic_passes=N_CRITIC_PASSES,
+        n_critic_passes=n_critic_passes,
     )
     data = WhipPPOTrainingData(
         plant,
@@ -137,8 +139,10 @@ def train_whip_ppo(
     initial_std: float = INITIAL_STD,
     n_worlds: int = N_WORLDS,
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
+    n_epochs: int = N_EPOCHS,
     n_minibatches_per_epoch: int = N_MINIBATCHES_PER_EPOCH,
     n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
+    n_critic_passes: int = N_CRITIC_PASSES,
 ) -> Struct:
     """Trains a policy and value network reading `features` of `plant` observations with PPO."""
     program = whip_ppo_program(
@@ -148,8 +152,10 @@ def train_whip_ppo(
         iterations,
         n_worlds=n_worlds,
         n_steps_per_chunk=n_steps_per_chunk,
+        n_epochs=n_epochs,
         n_minibatches_per_epoch=n_minibatches_per_epoch,
         n_chunks_per_minibatch=n_chunks_per_minibatch,
+        n_critic_passes=n_critic_passes,
     )
     outcome = ppo_training(
         program,

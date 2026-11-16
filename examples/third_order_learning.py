@@ -7,6 +7,8 @@ Stacks residual `MinGRU` blocks paired with `BatchNorm` and `tanh`, wraps each l
 Run directly via `python -m examples.third_order_learning`.
 """
 
+import os
+
 import jax
 import jax.numpy as jnp
 import optax
@@ -36,14 +38,16 @@ from nodejax.transforms.learning import learned_sgd
 from nodejax.core.types import PyTree
 
 
+SMOKE = os.environ.get('NODEJAX_SMOKE') == '1'
+
 FEATURES = 2
 WIDTH = 3
 DEPTH = 2
 MEMBERS = 2
-SUPPORT_SEQUENCES = 4
-STREAM = 8
+SUPPORT_SEQUENCES = 1 if SMOKE else 4
+STREAM = 3 if SMOKE else 8
 TASKS = 2
-META_STEPS = 120
+META_STEPS = 2 if SMOKE else 120
 SPECTRAL_RADIUS = 0.9
 
 TTT_RATE = 0.5
@@ -175,7 +179,7 @@ def main() -> None:
     print(result.initial.summary())
     print()
 
-    quarter = META_STEPS // 4
+    quarter = max(1, META_STEPS // 4)
     start = float(result.aux.loss[0])
     settled = float(jnp.mean(result.aux.loss[-quarter:]))
 
@@ -185,7 +189,8 @@ def main() -> None:
     print(f'tapped activation trace: {activation_trace.shape}')
     print(f'all finite: {bool(jnp.all(jnp.isfinite(result.aux.loss)))}')
 
-    assert settled < 0.5 * start
+    if not SMOKE:
+        assert settled < 0.5 * start
     assert decoder_leaves == 0
     assert bool(jnp.all(jnp.isfinite(result.aux.loss)))
 

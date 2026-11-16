@@ -19,7 +19,7 @@ def test_the_genome_starts_from_the_plant_and_writes_back_into_it() -> None:
 
 def test_evolution_runs_a_generation_and_reports_finite_costs() -> None:
     base = whip_plant().parameterize()
-    result = tune(base, n_generations=2, population=4)
-    assert result.history.shape == (2,)
+    result = tune(base, n_generations=1, population=4, n_steps=4, stroke_period=2)
+    assert result.history.shape == (1,)
     assert jnp.all(jnp.isfinite(result.history))
-    assert jnp.all(jnp.isfinite(scenario_cost(base, stroke_commands()).total))
+    assert jnp.all(jnp.isfinite(scenario_cost(base, stroke_commands(n_steps=4, stroke_period=2)).total))

@@ -26,9 +26,6 @@ from examples.rl.ppo import (
 )
 from examples.rl.ppo_pendulum import (
     MEMORY,
-    N_CHUNKS_PER_EPOCH,
-    N_STEPS_PER_CHUNK,
-    N_WORLDS,
     pendulum_policy,
 )
 
@@ -73,11 +70,14 @@ def test_advantage_standardization_preserves_returns() -> None:
 
 def test_replay_reproduces_the_rollout() -> None:
     """Verifies that `ChunkReplay` recovers rollout log-probabilities from recorded initial `GRU` states."""
+    n_worlds = 4
+    n_chunks = 2
+    n_steps_per_chunk = 4
     policy = pendulum_policy(nn.GRU(MEMORY))
     plant = Pendulum()
     sampler = batch(
-        scanned(scan(SamplingStep(policy, plant), n=N_STEPS_PER_CHUNK)),
-        n=N_WORLDS,
+        scanned(scan(SamplingStep(policy, plant), n=n_steps_per_chunk)),
+        n=n_worlds,
     )
     observation = plant.initialize().observe()
     policy_param = policy.with_input(observation).parameterize(
@@ -91,9 +91,9 @@ def test_replay_reproduces_the_rollout() -> None:
 
     data = PendulumTrainingData(
         1,
-        n_worlds=N_WORLDS,
-        n_chunks=N_CHUNKS_PER_EPOCH,
-        n_steps_per_chunk=N_STEPS_PER_CHUNK,
+        n_worlds=n_worlds,
+        n_chunks=n_chunks,
+        n_steps_per_chunk=n_steps_per_chunk,
     ).apply(rng=jax.random.PRNGKey(3))
     initial_plant_state = tree_first(data.initial_plant_state)
     disturbance = tree_first(data.disturbance)
@@ -107,7 +107,7 @@ def test_replay_reproduces_the_rollout() -> None:
     ends = tree_last(rows.policy_state, axis=1)
     replay = batch(
         ChunkReplay(scan(CommandLikelihood(policy))),
-        n=N_WORLDS * N_CHUNKS_PER_EPOCH,
+        n=n_worlds * n_chunks,
     ).with_input(bundle=Struct(
         observation=rows.observation, command=rows.command, initial=starts,
     )).bind(policy_param).initialize()

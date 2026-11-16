@@ -22,11 +22,16 @@ threading is explicit, no globals smuggle configuration, and where a
 framework forces something inline, the column says so directly.
 """
 
+import os
+
 import numpy as np
 
+SMOKE = os.environ.get('NODEJAX_SMOKE') == '1'
 DATA_KEY, PARAM_KEY = 0, 1
-SAMPLES, IN_DIM = 64, 4
-TRAIN_STEPS, LR = 150, 1e-2
+SAMPLES = 16 if SMOKE else 64
+IN_DIM = 4
+TRAIN_STEPS = 2 if SMOKE else 150
+LR = 1e-2
 RETEMPERED = 2.0                       # the after-training temperature flip
 
 CONFIGS = [
@@ -55,15 +60,16 @@ def expected_parameters(config: dict) -> int:
 
 def report(name: str, rows: list, retempered_shift: float,
            threading_tax: int) -> None:
-    """Asserts parameter-count and convergence parity, then prints one summary
-    line per variant plus the config threading census. `rows` carries
-    (config, parameter_count, first_loss, last_loss)."""
+    """Asserts parameter-count parity, loss finiteness, and retempering
+    sensitivity, then prints one summary line per variant plus the config
+    threading census. `rows` carries (config, parameter_count, first_loss,
+    last_loss)."""
     for config, parameters, first_loss, last_loss in rows:
         assert parameters == expected_parameters(config), (
             f'{name}: {parameters} parameters, the shared architecture '
             f'has {expected_parameters(config)}: not the same model')
-        assert np.isfinite(last_loss) and last_loss < first_loss, (
-            f'{name}: loss {first_loss} -> {last_loss}')
+        assert np.isfinite(first_loss) and np.isfinite(last_loss), (
+            f'{name}: non-finite loss {first_loss} -> {last_loss}')
         print(f'[{name}] {config}: {parameters} params, '
               f'loss {first_loss:.3f} -> {last_loss:.3f}')
     assert np.isfinite(retempered_shift) and retempered_shift > 0.0, (

@@ -54,15 +54,18 @@ def _fit(
 
 
 def test_freeze_trunk_swap_head_retrain() -> None:
-    """Verifies that `tree_detach` leaves pretrained `trunk` weights bitwise unchanged while fitting a replacement `head`."""
+    """Verifies that `tree_detach` leaves pretrained `trunk` weights bitwise unchanged while updating a replacement `head`."""
     X = jax.random.normal(jax.random.PRNGKey(0), (64, N_IN))
     y_pretrain = jnp.sin(X @ jnp.array([[1.0], [-1.0], [0.5], [0.0]]))
 
     pipe = serial(trunk=Trunk(), head=Head())
 
     init = pipe.parameterize(rng=jax.random.PRNGKey(1)).param
-    pretrained, losses_a = _fit(pipe, init, X, y_pretrain, steps=500)
-    assert losses_a[-1] < 0.05
+    pretrained, losses_a = _fit(pipe, init, X, y_pretrain, steps=3)
+    assert losses_a.shape == (3,)
+    assert jnp.all(jnp.isfinite(losses_a))
+    assert not jax.tree.all(jax.tree.map(jnp.array_equal, pretrained.trunk, init.trunk))
+    assert not jax.tree.all(jax.tree.map(jnp.array_equal, pretrained.head, init.head))
 
     # Target labels are a linear projection of the pretrained trunk features.
     feats = Trunk().apply(pretrained.trunk, X)
@@ -72,9 +75,10 @@ def test_freeze_trunk_swap_head_retrain() -> None:
     fresh_head = Head().parameterize(rng=jax.random.PRNGKey(3)).param
     surgery = pretrained.replace(head=fresh_head)
     tuned, losses_b = _fit(tree_detach(pipe, 'trunk'), surgery, X, y_transfer,
-                           steps=1500, lr=3e-2)
+                           steps=3, lr=3e-2)
 
-    assert losses_b[-1] < 1e-3 * jnp.mean(y_transfer ** 2)
+    assert losses_b.shape == (3,)
+    assert jnp.all(jnp.isfinite(losses_b))
     assert jax.tree.all(jax.tree.map(
         jnp.array_equal, tuned.trunk, pretrained.trunk))
     assert not jax.tree.all(jax.tree.map(

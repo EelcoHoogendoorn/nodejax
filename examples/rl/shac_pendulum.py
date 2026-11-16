@@ -140,6 +140,11 @@ def pendulum_training_program(
     policy: Node,
     critic: Node,
     n_episodes: int,
+    *,
+    n_worlds: int = N_WORLDS,
+    n_chunks_per_episode: int = N_CHUNKS_PER_EPISODE,
+    n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
+    n_critic_updates: int = N_CRITIC_UPDATES,
 ) -> Node:
     """Assembles the complete pendulum SHAC training Node."""
     iteration = shac_iteration(
@@ -151,21 +156,21 @@ def pendulum_training_program(
         actor_optimizer=optax.adam(ACTOR_RATE),
         critic_optimizer=optax.adam(CRITIC_RATE),
         ema_critic_decay=EMA_CRITIC_DECAY,
-        n_worlds=N_WORLDS,
-        n_steps_per_chunk=N_STEPS_PER_CHUNK,
-        n_critic_updates=N_CRITIC_UPDATES,
+        n_worlds=n_worlds,
+        n_steps_per_chunk=n_steps_per_chunk,
+        n_critic_updates=n_critic_updates,
     )
     episode = scan(
         iteration,
         boundary='episode',
-        n=N_CHUNKS_PER_EPISODE,
+        n=n_chunks_per_episode,
     )
     training = carried(episode)
     data = PendulumTrainingData(
         n_episodes=n_episodes,
-        n_chunks_per_episode=N_CHUNKS_PER_EPISODE,
-        n_steps_per_chunk=N_STEPS_PER_CHUNK,
-        n_worlds=N_WORLDS,
+        n_chunks_per_episode=n_chunks_per_episode,
+        n_steps_per_chunk=n_steps_per_chunk,
+        n_worlds=n_worlds,
         disturbance_scale=DISTURBANCE_SCALE,
     )
     return serial(data=data, training=training)

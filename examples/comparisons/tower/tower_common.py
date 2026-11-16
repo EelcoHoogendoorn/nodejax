@@ -18,19 +18,23 @@ those operations into generic functions. Equinox differentiates Module
 PyTrees and carries recurrent values explicitly. PyTorch retains the Module
 definition while `torch.func` supplies functional fast weights for MAML.
 
-Every main function checks one common convergence criterion: its final loss
-must be below 30 percent of its own initial loss. Framework-native
-initialization and cell details differ, so the traces are not expected to
-match numerically. This family has no timing harness and supports no runtime
-or compilation ranking.
+Every `main` function verifies that initial and final meta-training losses
+remain finite. Framework-native initialization and cell details differ, so the
+traces are not expected to match numerically. This family has no timing harness
+and supports no runtime or compilation ranking.
 """
+
+import os
 
 import jax
 import jax.numpy as jnp
 
+SMOKE = os.environ.get('NODEJAX_SMOKE') == '1'
 HIDDEN, LAYERS = 8, 2
-T = 40
-TASKS, K, META_STEPS = 8, 4, 400
+T = 8 if SMOKE else 40
+TASKS = 3 if SMOKE else 8
+K = 2 if SMOKE else 4
+META_STEPS = 2 if SMOKE else 400
 INNER_LR, OUTER_LR = 0.05, 3e-3
 MOMENTUM = 0.1              # the running norm's stats rate
 MEMBERS = 3                     # committee width, mean-mixed

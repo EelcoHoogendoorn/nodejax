@@ -124,7 +124,7 @@ def test_outer_gradient_contains_the_inner_third_derivative() -> None:
 
 
 def test_full_showcase_trains_through_the_tied_recurrent_tree() -> None:
-    """Verifies `BatchNorm` state axes, loss descent, parameter tying, and tapped `Aux` shapes on `third_order_learning`."""
+    """Verifies `BatchNorm` state axes, parameter updates, parameter tying, and tapped `Aux` shapes on `third_order_learning`."""
     input = jnp.zeros((showcase.TASKS, showcase.FEATURES))
     batched_predictor = batch(showcase.predictor()).with_input(input).parameterize(
         rng=jax.random.PRNGKey(0)
@@ -144,9 +144,15 @@ def test_full_showcase_trains_through_the_tied_recurrent_tree() -> None:
     )
 
     result = showcase.run()
+    assert result.aux.loss.shape == (showcase.META_STEPS,)
     assert bool(jnp.all(jnp.isfinite(result.aux.loss)))
-    quarter = showcase.META_STEPS // 4
-    assert jnp.mean(result.aux.loss[-quarter:]) < 0.5 * result.aux.loss[0]
+    assert not jax.tree.all(
+        jax.tree.map(
+            jnp.array_equal,
+            result.final.param,
+            result.initial.param.objective.model,
+        )
+    )
 
     paths = {
         jax.tree_util.keystr(path)

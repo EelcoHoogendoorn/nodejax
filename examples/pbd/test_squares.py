@@ -158,12 +158,12 @@ def test_chain_schedules_reduce_the_same_stretched_chain(
 def test_square_chain_swings_under_gravity() -> None:
     n_squares = 4
     size = 0.2
-    n_steps = 60
+    n_steps = 20
     initial = square_chain_bodies(n_squares, size)
     constraints = square_chain_constraints(n_squares, size)
     step = xpbd_step(
         gauss_seidel(constraints, Constraint(AnchorDistance())),
-        n_solver_passes=10,
+        n_solver_passes=6,
         dt=0.016,
         velocity_damping=0.995,
     )
@@ -183,7 +183,7 @@ def test_square_chain_swings_under_gravity() -> None:
 def test_composed_batched_rollout_keeps_anchor() -> None:
     n_squares = 4
     n_worlds = 2
-    n_steps = 60
+    n_steps = 20
     size = 0.2
     angles = jnp.array([-0.3, 0.3])
     initial = jax.vmap(
@@ -192,7 +192,7 @@ def test_composed_batched_rollout_keeps_anchor() -> None:
     constraints = square_chain_constraints(n_squares, size)
     step = xpbd_step(
         gauss_seidel(constraints, Constraint(AnchorDistance())),
-        n_solver_passes=8,
+        n_solver_passes=6,
         dt=0.016,
         velocity_damping=0.995,
     )

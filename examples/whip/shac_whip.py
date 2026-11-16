@@ -83,6 +83,7 @@ def whip_training_program(
     n_worlds: int = N_WORLDS,
     n_chunks_per_episode: int = N_CHUNKS_PER_EPISODE,
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
+    n_critic_updates: int = N_CRITIC_UPDATES,
 ) -> Node:
     """Assembles the complete whip SHAC training Node with `actor_optimizer` updating policy parameters."""
     iteration = shac_iteration(
@@ -96,7 +97,7 @@ def whip_training_program(
         ema_critic_decay=EMA_CRITIC_DECAY,
         n_worlds=n_worlds,
         n_steps_per_chunk=n_steps_per_chunk,
-        n_critic_updates=N_CRITIC_UPDATES,
+        n_critic_updates=n_critic_updates,
     )
     episode = scan(iteration, boundary='episode', n=n_chunks_per_episode)
     data = WhipTrainingData(
@@ -120,12 +121,14 @@ def train_whip_shac(
     n_worlds: int = N_WORLDS,
     n_chunks_per_episode: int = N_CHUNKS_PER_EPISODE,
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
+    n_critic_updates: int = N_CRITIC_UPDATES,
 ) -> Struct:
     """Trains a policy reading `features` of `plant` observations with SHAC while the critic reads full rope state."""
     program = whip_training_program(
         WhipMean(features, nn.GRU(MEMORY), HIDDEN), whip_critic(plant), plant, n_episodes,
         actor_optimizer=actor_optimizer, n_worlds=n_worlds,
-        n_chunks_per_episode=n_chunks_per_episode, n_steps_per_chunk=n_steps_per_chunk)
+        n_chunks_per_episode=n_chunks_per_episode, n_steps_per_chunk=n_steps_per_chunk,
+        n_critic_updates=n_critic_updates)
     outcome = shac_training(
         program,
         parameter_key=jax.random.fold_in(jax.random.PRNGKey(1), seed),

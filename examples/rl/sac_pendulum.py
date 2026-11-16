@@ -123,7 +123,9 @@ def pendulum_training_program(
     *,
     critic_loss: LossFn | BaseNode,
     capacity: int = CAPACITY,
+    n_worlds: int = N_WORLDS,
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
+    n_updates: int = N_UPDATES,
     n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
 ) -> Node:
     """Assembles the complete pendulum SAC training Node."""
@@ -141,15 +143,15 @@ def pendulum_training_program(
         ema_critic_decay=EMA_CRITIC_DECAY,
         target_entropy=TARGET_ENTROPY,
         initial_temperature=INITIAL_TEMPERATURE,
-        n_worlds=N_WORLDS,
+        n_worlds=n_worlds,
         n_chunks=N_CHUNKS,
         n_steps_per_chunk=n_steps_per_chunk,
-        n_updates=N_UPDATES,
+        n_updates=n_updates,
         n_chunks_per_minibatch=n_chunks_per_minibatch,
     )
     data = PendulumTrainingData(
         iterations,
-        n_worlds=N_WORLDS,
+        n_worlds=n_worlds,
         n_chunks=N_CHUNKS,
         n_steps_per_chunk=n_steps_per_chunk,
     )

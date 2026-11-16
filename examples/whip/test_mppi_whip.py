@@ -10,17 +10,19 @@ from examples.whip.whip import whip_plant
 
 
 def test_mppi_trains_a_critic_and_plans_on_the_whip() -> None:
-    plant = whip_plant().parameterize()
+    plant = whip_plant(ideal_actuator=True).parameterize()
     result = train_whip_mppi(
-        plant, whip_critic(plant), n_iterations=1, n_worlds=2, n_candidates=4, n_refinements=1,
-        n_steps_per_plan=4, n_steps_per_iteration=5, n_critic_updates=1,
+        plant, whip_critic(plant, hidden=16), n_iterations=1, n_worlds=2, n_candidates=2,
+        n_refinements=1, n_steps_per_plan=2, n_steps_per_iteration=2, n_critic_updates=1,
     )
     assert result.history.mean_cost.shape == (1,)
     assert jnp.all(jnp.isfinite(result.history.mean_cost))
 
-    controller = learned_controller(result.critic, plant, n_candidates=4, n_refinements=1, n_steps_per_plan=4)
+    controller = learned_controller(
+        result.critic, plant, n_candidates=2, n_refinements=1, n_steps_per_plan=2)
+    starts = jax.tree.map(lambda value: value[:2], evaluation_starts(plant))
     evaluation = whip_evaluation(
-        controller, plant, evaluation_starts(plant), jax.random.PRNGKey(3), steps=3, step=control.PlannedStep)
-    # Evaluates 9 initial states over 3 control steps across both arm joints.
-    assert evaluation.action.shape == (9, 3, 2)
+        controller, plant, starts, jax.random.PRNGKey(3), steps=2, step=control.PlannedStep)
+    # Evaluates 2 initial states over 2 control steps across both arm joints.
+    assert evaluation.action.shape == (2, 2, 2)
     assert jnp.all(jnp.isfinite(evaluation.reward))

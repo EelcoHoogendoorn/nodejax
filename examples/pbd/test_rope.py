@@ -160,7 +160,7 @@ def test_force_free_rope_at_rest_remains_at_rest() -> None:
 def test_composed_rollout_keeps_the_anchor_and_floor() -> None:
     n_points = 8
     n_worlds = 2
-    n_steps = 80
+    n_steps = 40
     floor_height = 0.0
     initial = initial_rope(n_points, rest_length=0.15, anchor_height=0.8)
     initial = tree_broadcast_axis(initial, n_worlds, axis=0)

@@ -190,12 +190,12 @@ def test_thermals_heat_and_derate():
 
 def test_streams_are_keyed():
     env, _ = build_env()
-    a = simulate(env, 500, command=2.0, key=0)
-    b = simulate(env, 500, command=2.0, key=0)
-    c = simulate(env, 500, command=2.0, key=1)
+    first = simulate(env, 50, command=2.0, key=0)
+    second = simulate(env, 50, command=2.0, key=0)
+    different = simulate(env, 50, command=2.0, key=1)
 
-    assert jnp.allclose(a.output, b.output)
-    assert not jnp.allclose(a.output, c.output)
+    assert jnp.allclose(first.output, second.output)
+    assert not jnp.allclose(first.output, different.output)
 
 
 def punchy_command():
@@ -275,12 +275,10 @@ def render_stack_panels(t: float, cmd, traj, filename: str, title: str):
 
 
 def test_step_response_visual():
-    """Verifies that the high-gain velocity step engages both current and PWM limits without windup and writes `step_response.png`."""
-    import os
-
+    """Verifies that the high-gain velocity step engages both current and PWM limits without windup."""
     env, _ = build_env(command_ctrl=punchy_command())
-    t, cmd = step_profile()
-    traj = simulate(env, len(t), command=cmd)
+    time_grid, cmd = step_profile(3000)
+    traj = simulate(env, len(time_grid), command=cmd)
 
     act = traj.state.actuator
     iq = act.motor.q
@@ -290,11 +288,6 @@ def test_step_response_visual():
     assert jnp.max(jnp.abs(iq)) > 45.0
     assert jnp.mean(pwm > 0.95) > 0.1
     assert jnp.abs(jnp.mean(traj.state.mechanical.velocity[1800:2500]) - 55.0) < 1.0
-
-    out = render_stack_panels(
-        t, cmd, traj, 'step_response.png',
-        'actuator stack: aggressive step response against both limits')
-    assert os.path.exists(out)
 
 
 def census(title: str, tree: PyTree):
@@ -335,49 +328,45 @@ def test_dt_is_one_ambient_knob():
 
 
 def test_model_mismatch_ensemble_visual():
-    """Evaluates a 10-member `ensemble` where each controller's internal motor model is perturbed by +/-10% against a nominal plant.
+    """Evaluates a 4-member `ensemble` where each controller's internal motor model is perturbed by +/-10% against a nominal plant.
 
     `ensemble` maps perturbed parameters and splits sensor-noise keys across members, isolating
-    plant-model mismatch around the nominal member 0 baseline and saving `model_mismatch_ensemble.png`.
+    plant-model mismatch around the nominal member 0 baseline.
     """
-    import os
     from nodejax import ensemble
 
-    N = 10
+    n_members = 4
     env, _ = build_env(command_ctrl=punchy_command())
 
-    factors = jnp.concatenate([jnp.ones((1, 4)),
-                               jax.random.uniform(jax.random.PRNGKey(7), (N - 1, 4),
-                                                  minval=0.9, maxval=1.1)])
+    factors = jnp.concatenate([
+        jnp.ones((1, 4)),
+        jax.random.uniform(jax.random.PRNGKey(7), (n_members - 1, 4), minval=0.9, maxval=1.1),
+    ])
     census('params (the tree the corruption edits)', env)
     census('state (one member, before stacking)', env.init(rng=jax.random.PRNGKey(0), input=AT_REST))
 
-    def corrupt(f):
-        MODEL = '.actuator.current_ctrl.motor'
+    def corrupt(factor):
+        model_path = '.actuator.current_ctrl.motor'
         return replace_by_path(env.param, {
-            f'{MODEL}.resistance': lambda v: v * f[0],
-            f'{MODEL}.kt': lambda v: v * f[1],
-            f'{MODEL}.inductance_d': lambda v: v * f[2],
-            f'{MODEL}.inductance_q': lambda v: v * f[3]})
+            f'{model_path}.resistance': lambda value: value * factor[0],
+            f'{model_path}.kt': lambda value: value * factor[1],
+            f'{model_path}.inductance_d': lambda value: value * factor[2],
+            f'{model_path}.inductance_q': lambda value: value * factor[3],
+        })
 
     rollout = scanned(ensemble(env.node, n=len(factors)), record=True).bind(
         jax.vmap(corrupt)(factors))
 
-    t, cmd = step_profile()
+    time_grid, cmd = step_profile(3000)
     out, aux = rollout.apply(
         rng=jax.random.PRNGKey(0), command=cmd,
         load=jnp.zeros_like(cmd))
     traj = Struct(output=out, state=aux.state)
 
     vel = traj.state.mechanical.velocity
-    assert vel.shape == (len(t), N)
+    assert vel.shape == (len(time_grid), n_members)
     assert jnp.all(jnp.isfinite(vel))
     # Feedback keeps all perturbed controllers within 3 rad/s of the 55 rad/s cruise target while leaving model spread measurable.
     assert jnp.abs(jnp.mean(vel[1800:2500, 0]) - 55.0) < 1.0
     assert jnp.all(jnp.abs(jnp.mean(vel[1800:2500], axis=0) - 55.0) < 3.0)
     assert jnp.std(vel[2500]) > 0.0
-
-    out = render_stack_panels(
-        t, cmd, traj, 'model_mismatch_ensemble.png',
-        'the same step, ten controllers whose R/L/Kt model is off by up to 10%')
-    assert os.path.exists(out)

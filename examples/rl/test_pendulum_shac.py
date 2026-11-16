@@ -28,7 +28,6 @@ from examples.rl.shac_pendulum import (
     N_POLICY_MEMBERS,
     TRACE,
     ScalarMLP,
-    pendulum_critic,
     pendulum_policy,
     pendulum_training_program,
     policy_committee,
@@ -113,8 +112,8 @@ def test_one_shac_iteration_accepts_both_policy_lifecycles() -> None:
     )
     for policy in policies:
         iteration = shac_iteration(
-            policy_committee(policy),
-            pendulum_critic(),
+            policy,
+            single_pendulum_critic(),
             Pendulum(),
             discount=DISCOUNT,
             trace=TRACE,
@@ -140,14 +139,19 @@ def test_one_shac_iteration_accepts_both_policy_lifecycles() -> None:
 def test_single_critic_uses_the_same_shac_program() -> None:
     result = shac_training(
         pendulum_training_program(
-            pendulum_policy(nn.identity),
+            policy_committee(pendulum_policy(nn.identity)),
             single_pendulum_critic(),
-            n_episodes=1,
+            n_episodes=2,
+            n_worlds=4,
+            n_chunks_per_episode=2,
+            n_steps_per_chunk=6,
+            n_critic_updates=1,
         ),
         parameter_key=jax.random.PRNGKey(1),
         training_key=jax.random.PRNGKey(11),
     )
 
+    assert result.history.mean_cost.shape == (4,)
     assert jnp.isfinite(result.history.policy_loss).all()
     assert jnp.isfinite(result.history.critic_loss).all()
 

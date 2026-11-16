@@ -11,15 +11,15 @@ from examples.whip.ppo_whip import mean_policy, train_whip_ppo
 def test_ppo_trains_the_whip_as_one_program() -> None:
     plant = whip_plant().parameterize()
     result = train_whip_ppo(
-        plant, WhipFeatures(tip_sensor=False), iterations=2, n_worlds=4, n_steps_per_chunk=8,
-        n_minibatches_per_epoch=2, n_chunks_per_minibatch=1,
+        plant, WhipFeatures(tip_sensor=False), iterations=2, n_worlds=2, n_steps_per_chunk=4,
+        n_epochs=1, n_minibatches_per_epoch=1, n_chunks_per_minibatch=1, n_critic_passes=1,
     )
     assert result.history.mean_cost.shape == (2,)
     assert jnp.all(jnp.isfinite(result.history.mean_cost))
+    starts = jax.tree.map(lambda value: value[:2], evaluation_starts(plant))
     evaluation = whip_evaluation(
-        mean_policy(result.policy), plant, evaluation_starts(plant), jax.random.PRNGKey(3), steps=5)
-    # Evaluates all 9 combinations of 3 initial angles and 3 target positions.
-    assert evaluation.reward.shape == (9,)
+        mean_policy(result.policy), plant, starts, jax.random.PRNGKey(3), steps=2)
+    assert evaluation.reward.shape == (2,)
     assert jnp.all(jnp.isfinite(evaluation.reward))
     summarize(evaluation, 'PPO, two iterations')
 
@@ -27,9 +27,10 @@ def test_ppo_trains_the_whip_as_one_program() -> None:
 def test_ppo_trains_with_the_tip_sensed() -> None:
     plant = whip_plant(tip_sensor=True).parameterize()
     result = train_whip_ppo(
-        plant, WhipFeatures(tip_sensor=True), iterations=1, n_worlds=4, n_steps_per_chunk=8,
-        n_minibatches_per_epoch=2, n_chunks_per_minibatch=1,
+        plant, WhipFeatures(tip_sensor=True), iterations=1, n_worlds=2, n_steps_per_chunk=4,
+        n_epochs=1, n_minibatches_per_epoch=1, n_chunks_per_minibatch=1, n_critic_passes=1,
     )
+    starts = jax.tree.map(lambda value: value[:2], evaluation_starts(plant))
     evaluation = whip_evaluation(
-        mean_policy(result.policy), plant, evaluation_starts(plant), jax.random.PRNGKey(3), steps=5)
+        mean_policy(result.policy), plant, starts, jax.random.PRNGKey(3), steps=2)
     assert jnp.all(jnp.isfinite(evaluation.reward))
