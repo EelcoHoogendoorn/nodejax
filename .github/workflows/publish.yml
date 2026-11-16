@@ -1,0 +1,71 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build PyPI distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "setuptools>=77" build twine
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          python -c '
+          import os, tomllib
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = f"v{version}"
+          if tag != expected:
+              raise SystemExit(f"Release tag {tag!r} does not match {expected!r}")
+          '
+      - name: Build nodejax wheel and sdist
+        run: python -m build --outdir dist
+      - name: Check metadata and README rendering
+        run: python -m twine check --strict dist/*
+      - name: Smoke-test installed wheel outside the repository
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-env"
+          "$RUNNER_TEMP/wheel-env/bin/pip" install dist/*.whl
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/wheel-env/bin/python" -c '
+          import pathlib, jax, jax.numpy as jnp, optax, nodejax
+          from nodejax import batch, nn, scanned, split_aux, train_step, trained
+          assert "site-packages" in str(pathlib.Path(nodejax.__file__).resolve())
+          assert (pathlib.Path(nodejax.__file__).parent / "py.typed").is_file()
+          model = batch(scanned(nn.GRU(8) >> nn.Linear(1)))
+          xs = jnp.ones((5, 4, 6, 3))
+          ys = jnp.zeros((5, 4, 6, 1))
+          bound = model.with_input(xs[0]).parameterize(rng=jax.random.PRNGKey(0))
+          step = train_step(bound, lambda pred, target: jnp.mean((pred - target) ** 2), optax.adam(1e-2))
+          fitted, aux = split_aux(trained(step)(input=xs, target=ys))
+          assert fitted.param is not None and jnp.isfinite(aux.loss).all()
+          ')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/*
+
+  pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/nodejax
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

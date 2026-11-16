@@ -38,7 +38,10 @@ from nodejax import control, nn
 from nodejax.control import closed_loop, observed_loop
 from nodejax.core.spec import spec, spec_of, materialize
 
+__version__ = '1.0.0'
+
 __all__ = [
+    '__version__',
     'Struct',
     'Aux',
     'REQUIRED',

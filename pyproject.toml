@@ -1,24 +1,57 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "nodejax"
-version = "0.1.0"
-description = "Stateful computation composed the way JAX composes functions: models, simulators, and trainers as one kind of object."
+version = "1.0.0"
+description = "Composable stateful objects in JAX: neural layers, physical plants, controllers, caches, replay buffers, and trainers under one algebra."
 readme = "readme.md"
-authors = [{name = "Eelco Hoogendoorn"}]
+authors = [{ name = "Eelco Hoogendoorn", email = "hoogendoorn.eelco@gmail.com" }]
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["jax", "optax"]
+keywords = [
+    "jax",
+    "stateful",
+    "functional",
+    "neural-networks",
+    "control",
+    "reinforcement-learning",
+    "differentiable-programming",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "jax>=0.10.0",
+    "optax>=0.2.0",
+]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-xdist", "scikit-learn", "matplotlib"]
+test = ["pytest>=7", "pytest-xdist", "scikit-learn", "matplotlib"]
 comparisons = ["equinox", "flax", "dm-haiku", "torch", "keras"]
-
-[tool.setuptools.packages.find]
-include = ["nodejax*"]
 
 [project.urls]
 Homepage = "https://github.com/EelcoHoogendoorn/nodejax"
+Repository = "https://github.com/EelcoHoogendoorn/nodejax"
+Documentation = "https://github.com/EelcoHoogendoorn/nodejax/tree/main/docs"
+Issues = "https://github.com/EelcoHoogendoorn/nodejax/issues"
+
+[tool.setuptools.packages.find]
+include = ["nodejax*"]
+exclude = ["nodejax.tests*", "nodejax.*.tests*", "nodejax.*.*.tests*"]
+
+[tool.setuptools.package-data]
+nodejax = ["py.typed"]
