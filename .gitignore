@@ -1,17 +1,13 @@
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
 .pytest_cache/
 *.png
 *.pdf
+*.gif
+*.mp4
 dist/
 *.egg-info/
 build/
+.DS_Store
 .idea/
 .vscode/
-CLAUDE.md
-
-# local only, never published
-scratch/
-*.gif
-*.mp4

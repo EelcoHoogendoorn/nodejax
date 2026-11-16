@@ -1,21 +1,8 @@
-"""Configuring a deep composition, the flax nnx column.
+"""Deferred configuration comparison in Flax NNX.
 
-The same three classes, the same explicit threading: Committee consumes
-`members` and hands the other four values down, Tower takes
-`temperature` for no reason of its own, and `in_dim` is threaded from
-the caller because an nnx Linear must be told its fan-in.
+`Committee.__init__` consumes `members` and forwards four unused configuration arguments (`in_dim`, `width`, `depth`, `temperature`) down through `Tower.__init__` into `Block.__init__` (`THREADING_TAX = 5`), because NNX modules must execute concrete constructors eagerly before they can be composed. Retempering a trained model requires cloning the object graph and mutating `.temperature` across every `Block` instance in a nested loop.
 
-NNX graph-aware transforms accept the module and optimizer directly. The
-training loop below is an `nnx.scan`; its axis policy carries both objects,
-and `nnx.value_and_grad` selects Params without lowering the model to a
-separate state tree.
-
-After training, a static configuration value can be changed by assigning to
-the cloned object. `retempered` shows both the convenience and the cost: the
-edit is direct, but the caller still walks the model structure to find every
-block.
-
-Run directly:  python -m examples.comparisons.generics.generics_flax
+Run directly with `python -m examples.comparisons.generics.generics_nnx`.
 """
 
 import jax

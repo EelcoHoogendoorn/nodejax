@@ -1,30 +1,8 @@
-"""A composition-oriented Flax NNX implementation of the tower.
+"""Reusable-wrapper Flax NNX implementation of the `tower` benchmark.
 
-The direct `tower_flax.py` specializes its scans, axes, carries, and MAML
-orchestration to one program. This variant instead factors stacking, scanning,
-and training into reusable operations, leaving `make_member` and `tower` to
-show the complete model graph in one place.
+Whereas `tower_nnx.py` inlines its `nnx.StateAxes`, `nnx.split_rngs`, and carry tuples at each call site, this module builds reusable `Residual`, `Serial`, `Stack`, `Scan`, and `Ensemble` wrappers so `make_member` and `tower` can assemble the model graph in one place. Inventing local `initial_carry()` and `(carry, input) -> (carry, output)` conventions takes more than 2.5x the lines of `tower_nodejax.py`, and the wrapper protocol still stops short of `maml_fit`, where cloning, inner SGD, task batching, and outer Adam revert to standalone orchestration functions.
 
-The wrappers use two narrow local conventions. A step Module implements
-``initial_carry()`` and ``(carry, input) -> (carry, output)``. A scanned Module
-maps a complete input sequence to a complete output sequence. NNX preserves the
-Modules and Variables passing through its graph-aware transforms; these
-conventions supply the semantic facts that NNX itself does not standardize.
-
-This is useful library design, not a failed attempt to imitate NodeJAX. Its
-cost is visible: the file is roughly twice the size of the direct version. NNX
-could also make MAML return another object satisfying an expanded local
-protocol. Doing that generically would require the protocol to describe
-cloning, parameter and state roles, optimizer state, inputs, auxiliary output,
-axes, and randomness. That is possible; it is also progressively more of the
-common contract NodeJAX provides once for every Node. This example leaves MAML
-as a reusable training function to show where the local abstraction stops, not
-where NNX reaches a capability limit.
-
-This file uses the same model, task, and budget as ``tower_nodejax.py`` and
-``tower_flax.py``.
-
-Run directly: python -m examples.comparisons.tower.tower_flax_reusable
+Run directly with `python -m examples.comparisons.tower.tower_nnx_reusable`.
 """
 
 from __future__ import annotations

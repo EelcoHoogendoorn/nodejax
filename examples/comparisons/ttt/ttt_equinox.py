@@ -1,24 +1,11 @@
-"""ttt_nodejax's ttt-rnn row, the equinox side of the framework comparison.
+"""Reusable test-time training wrapper in Equinox across stateless and recurrent modules.
 
-Self-contained: no nodejax import, the same model, task family, budget and
-scoring as ttt_rnn_by_hand.
+Equinox represents every `eqx.Module` as a PyTree, which makes carrying fast weights through `lax.scan` natural, yet `eqx.Module` defines no stateful call contract (`model(x)` vs. `model(carry, x)`), no step-vs-sequence wrapper algebra, and no built-in state slot for the previous-token register. Writing a reusable `TTT` wrapper therefore requires runtime `hasattr(model, 'init_carry')` inspection, `eqx.filter` partitioning to allocate per-leaf rates, and hand-rolled `Batched` and `MetaTrainer` loops around `lax.scan`.
 
-What the column prices. Equinox's one idea, a module IS a pytree, is exactly
-the ttt trick's shape: weights carried as a value. So the fast learner is
-literally the module, threaded through lax.scan and stepped by gradient, and
-the meta-params are an ordinary (model, rates) pair of pytrees, the rates a
-module-shaped tree of step sizes. eqx.filter_grad differentiates with
-respect to a module, eqx.apply_updates folds updates into one: the framework
-contributes the pytree discipline and those two calls.
-
-What it does not contribute is any structure for the loops: the token scan,
-the task vmap and the meta scan are raw jax around the module, the same
-skeleton as the by-hand file, and the previous token rides the scan carry by
-hand where the nodejax row spells it as a next_step register. The module
-system never sees the composition, only the leaves.
-
-Run directly:  python -m examples.comparisons.ttt.ttt_equinox
+Run directly with `python -m examples.comparisons.ttt.ttt_equinox`.
 """
+
+from typing import Callable
 
 import numpy as np
 import jax
@@ -26,104 +13,149 @@ import jax.numpy as jnp
 import equinox as eqx
 import optax
 
-VOCAB, HIDDEN = 8, 16
-STREAM, SUPPORT = 192, 128
-TASKS, META_STEPS = 8, 300
-TTT_LR0, META_LR = 0.05, 1e-3
-CONCENTRATION = 2.0
-QUERY0 = SUPPORT
+from examples.comparisons.ttt.ttt_common import (
+    EVAL_TASKS, HIDDEN, META_LR, META_STEPS, QUERY0, TASKS, TTT_LR0, VOCAB,
+    make_tasks, query_nll_numpy, report,
+)
 
 
-def make_tasks(rs, n_tasks: int):
-    logits = CONCENTRATION * rs.standard_normal((n_tasks, VOCAB, VOCAB))
-    P = np.exp(logits)
-    P /= P.sum(-1, keepdims=True)
-    tokens = np.zeros((n_tasks, STREAM), dtype=np.int64)
-    state = rs.randint(VOCAB, size=n_tasks)
-    rows = np.arange(n_tasks)
-    for t in range(STREAM):
-        tokens[:, t] = state
-        u = rs.random(n_tasks)[:, None]
-        state = (P[rows, state].cumsum(-1) > u).argmax(-1)
-    return jnp.asarray(tokens, dtype=jnp.int32)
+def xent(logits: jax.Array, target: jax.Array) -> jax.Array:
+    return -jax.nn.log_softmax(logits)[target]
+
+
+def query_xent(preds: jax.Array, target: jax.Array) -> jax.Array:
+    logp = jax.nn.log_softmax(preds)
+    picked = jnp.take_along_axis(logp, target[..., None], axis=-1)[..., 0]
+    return -jnp.mean(picked[..., QUERY0:])
+
+
+class MLP(eqx.Module):
+    """Stateless token predictor (`token -> logits`)."""
+
+    embed: jax.Array
+    w: jax.Array
+    out: jax.Array
+
+    def __init__(self, vocab: int, hidden: int, key: jax.Array):
+        k1, k2, k3 = jax.random.split(key, 3)
+        self.embed = 0.3 * jax.random.normal(k1, (vocab, hidden))
+        self.w = 0.3 * jax.random.normal(k2, (hidden, hidden)) / jnp.sqrt(hidden)
+        self.out = 0.1 * jax.random.normal(k3, (hidden, vocab))
+
+    def __call__(self, token: jax.Array) -> jax.Array:
+        return jnp.tanh(self.embed[token] @ self.w) @ self.out
 
 
 class RNN(eqx.Module):
-    """The inner learner. A module is a pytree of its arrays, so 'weights as
-    fast state' needs no adapter: the instance itself is the scan carry."""
+    """Recurrent token predictor (`(carry, token) -> (carry, logits)`)."""
 
     embed: jax.Array
     wh: jax.Array
     out: jax.Array
 
-    def __init__(self, key):
+    def __init__(self, vocab: int, hidden: int, key: jax.Array):
         k1, k2, k3 = jax.random.split(key, 3)
-        self.embed = 0.3 * jax.random.normal(k1, (VOCAB, HIDDEN))
-        self.wh = 0.3 * jax.random.normal(k2, (HIDDEN, HIDDEN)) / jnp.sqrt(HIDDEN)
-        self.out = 0.1 * jax.random.normal(k3, (HIDDEN, VOCAB))
+        self.embed = 0.3 * jax.random.normal(k1, (vocab, hidden))
+        self.wh = 0.3 * jax.random.normal(k2, (hidden, hidden)) / jnp.sqrt(hidden)
+        self.out = 0.1 * jax.random.normal(k3, (hidden, vocab))
 
-    def __call__(self, h, token):
-        h = jnp.tanh(self.embed[token] + self.wh @ h)
+    def init_carry(self) -> jax.Array:
+        return jnp.zeros(self.wh.shape[0])
+
+    def __call__(self, carry: jax.Array, token: jax.Array) -> tuple[jax.Array, jax.Array]:
+        h = jnp.tanh(self.embed[token] + self.wh @ carry)
         return h, h @ self.out
 
 
-def forecast_sequence(model, rates, tokens: jax.Array):
-    """One task: the fast module, its hidden and the previous token as the
-    scan carry. Predict-then-update, one gradient step per token at the
-    meta-learned per-leaf rates."""
-    def cell(carry, token):
-        # the previous token is the pairing, threaded by hand where the
-        # nodejax row spells it as a next_step register
-        fast, h, prev = carry
+class TTT(eqx.Module):
+    """Reusable online gradient-adaptation wrapper over unary or carry-based Equinox modules."""
 
-        def selfsup(m):
-            h2, logits = m(h, prev)
-            return -jax.nn.log_softmax(logits)[token], (h2, logits)
+    model: eqx.Module
+    rates: eqx.Module
+    loss_fn: Callable = eqx.field(static=True)
+    has_carry: bool = eqx.field(static=True)
 
-        grads, (h2, logits) = eqx.filter_grad(selfsup, has_aux=True)(fast)
-        # the inner rule is WELDED into the loop body: per-leaf learned-rate
-        # sgd exists in no stock optax, so it is arithmetic here, and
-        # swapping it (momentum, adam) means changing the carry to thread
-        # the rule's state and the meta tree to hold its params, by hand.
-        # The nodejax row makes the same choice an argument
-        fast = eqx.apply_updates(
-            fast, jax.tree.map(lambda g, lr: -lr * g, grads, rates))
-        return (fast, h2, token), logits
+    def __init__(self, model: eqx.Module, loss_fn: Callable, lr0: float):
+        self.model = model
+        self.loss_fn = loss_fn
+        self.has_carry = hasattr(model, 'init_carry')
+        params = eqx.filter(model, eqx.is_inexact_array)
+        self.rates = jax.tree.map(lambda x: jnp.full_like(x, lr0), params)
 
-    start = (model, jnp.zeros(HIDDEN), tokens[0])           # primed register
-    (_, _, _), logits = jax.lax.scan(cell, start, tokens)
-    return logits
+    def __call__(self, tokens: jax.Array) -> jax.Array:
+        carry0 = self.model.init_carry() if self.has_carry else ()
+
+        def step(state, token: jax.Array):
+            fast, carry, prev = state
+
+            def selfsup(m: eqx.Module):
+                if self.has_carry:
+                    next_carry, out = m(carry, prev)
+                else:
+                    next_carry, out = (), m(prev)
+                return self.loss_fn(out, token), (next_carry, out)
+
+            grads, (next_carry, out) = eqx.filter_grad(selfsup, has_aux=True)(fast)
+            updates = jax.tree.map(
+                lambda g, r: None if g is None else -r * g,
+                grads, self.rates, is_leaf=lambda x: x is None,
+            )
+            return (eqx.apply_updates(fast, updates), next_carry, token), out
+
+        _, preds = jax.lax.scan(step, (self.model, carry0, tokens[0]), tokens)
+        return preds
 
 
-def query_xent(theta, tokens: jax.Array) -> jax.Array:
-    model, rates = theta
-    logits = jax.vmap(lambda s: forecast_sequence(model, rates, s))(tokens)
-    logp = jax.nn.log_softmax(logits)
-    picked = jnp.take_along_axis(logp, tokens[..., None], axis=-1)[..., 0]
-    return -jnp.mean(picked[:, QUERY0:])
+class Batched(eqx.Module):
+    inner: eqx.Module
+
+    def __call__(self, batch: jax.Array) -> jax.Array:
+        return jax.vmap(self.inner)(batch)
+
+
+def fit_meta(model: Batched, loss_fn: Callable, tx, batches: jax.Array):
+    opt_state0 = tx.init(eqx.filter(model, eqx.is_inexact_array))
+
+    @eqx.filter_jit
+    def run_scan(m: Batched, opt_s):
+        def body(carry, batch):
+            cur_m, cur_opt = carry
+            loss, grads = eqx.filter_value_and_grad(
+                lambda mod, b: loss_fn(mod(b), b)
+            )(cur_m, batch)
+            updates, next_opt = tx.update(
+                grads, cur_opt, eqx.filter(cur_m, eqx.is_inexact_array)
+            )
+            return (eqx.apply_updates(cur_m, updates), next_opt), loss
+
+        (done_m, _), losses = jax.lax.scan(body, (m, opt_s), batches)
+        return done_m, losses
+
+    return run_scan(model, opt_state0)
+
+
+def run_variant(variant: str, inner: eqx.Module, tokens: jax.Array,
+                held_out: jax.Array) -> None:
+    batched0 = Batched(TTT(inner, xent, TTT_LR0))
+    preds0 = batched0(held_out)
+    batched1, losses = fit_meta(batched0, query_xent, optax.adam(META_LR), tokens)
+    preds1 = batched1(held_out)
+    params = eqx.filter(batched1, eqx.is_inexact_array)
+    n_weights = sum(x.size for x in jax.tree.leaves(params))
+    report(
+        'equinox', variant, n_weights, bool(jnp.all(jnp.isfinite(losses))),
+        query_nll_numpy(preds0, held_out), query_nll_numpy(preds1, held_out),
+    )
 
 
 def main() -> None:
-    model = RNN(jax.random.PRNGKey(0))
-    theta = (model, jax.tree.map(lambda x: jnp.full_like(x, TTT_LR0), model))
-    opt = optax.adam(META_LR)
-
-    train = make_tasks(np.random.RandomState(0), META_STEPS * TASKS)
-    sequence = train.reshape(META_STEPS, TASKS, -1)
-
-    def meta_step(carry, batch):
-        theta, opt_state = carry
-        loss, grads = eqx.filter_value_and_grad(query_xent)(theta, batch)
-        updates, opt_state = opt.update(grads, opt_state, theta)
-        return (eqx.apply_updates(theta, updates), opt_state), loss
-
-    (theta, _), losses = jax.lax.scan(meta_step, (theta, opt.init(theta)), sequence)
-
-    tasks = make_tasks(np.random.RandomState(99), TASKS)
-    n = sum(x.size for x in jax.tree.leaves(theta))
-    print(f'ttt-rnn equinox: weights={n} '
-          f'finite={bool(jnp.all(jnp.isfinite(losses)))} '
-          f'query xent {query_xent(theta, tasks):.2f}')
+    tokens = jnp.asarray(
+        make_tasks(np.random.RandomState(0), META_STEPS * TASKS).reshape(META_STEPS, TASKS, -1)
+    )
+    held_out = jnp.asarray(make_tasks(np.random.RandomState(99), EVAL_TASKS))
+    key = jax.random.PRNGKey(0)
+    run_variant('mlp', MLP(VOCAB, HIDDEN, key), tokens, held_out)
+    run_variant('rnn', RNN(VOCAB, HIDDEN, key), tokens, held_out)
 
 
 if __name__ == '__main__':

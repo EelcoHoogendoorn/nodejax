@@ -1,36 +1,8 @@
-"""Test-time training on next-token prediction, the nodejax side of the
-framework comparison.
+"""Reusable test-time training in NodeJAX across stateless and recurrent predictors.
 
-The row: a recurrent next-token model whose weights adapt EVERY STEP by
-one gradient step on the token it just failed to predict, while its
-hidden state carries beneath them: two memories at two speeds in one
-cell. Here that is one composition line,
-scanned(next_step_ttt(train_step(model, xent, learned_sgd(lr0)))),
-because the gradient cell is generic over its model and the next_step
-register assembles the (previous token, this token) pair in-graph. The
-rival files implement the SAME row against the same task family and
-budget: ttt_rnn_by_hand (raw jax, the ground truth), ttt_rnn_flax
-(nnx), ttt_rnn_torch, ttt_equinox and ttt_haiku. The comparison is what
-each framework charges for the generic wrapper, and one structural row
-is the pairing itself: every rival threads the previous token through
-its scan by hand.
+`ttt_meta(model)` wraps any `Node` in three composition steps: `train_step(model, xent, learned_sgd(TTT_LR0))` moves `model`'s parameters into per-token state updated by meta-learned step sizes, `next_step_ttt` pairs each incoming token with the previous token in-graph, and `train_step(batch(scanned(cell)), query_xent, optax.adam(META_LR))` meta-trains across task batches. Passing a stateless `MLP` (`PNode`) or a recurrent `RNN` (`PSNode`) calls the exact same `ttt_meta` function without protocol adapters.
 
-HOW THE STREAM IS FED. The outer trainer imposes its element contract
-Struct(input=..., target=...), and both fields are the SAME raw token
-sequence: the register derives each step's pair from `input`, and
-query_xent scores the emitted logits against `target` over the query
-region. No column of derived data exists anywhere; the loader hands
-over tokens and nothing else. Levels above peel leading axes and impose
-nothing new:
-
-    outer scan   (META_STEPS, ...)      one meta step per element
-    batch        (TASKS, ...)           one task per batch element
-    scanned      (STREAM, ...)          one token per inner step
-    ttt cell     one (previous, current) pair from the register
-
-Writes plots/meta_<name>.png per row and a summary line to stdout.
-
-Run directly:  python -m examples.comparisons.ttt.ttt_nodejax
+Run directly with `python -m examples.comparisons.ttt.ttt_nodejax`.
 """
 
 import numpy as np
@@ -38,69 +10,97 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from nodejax import (
+    KeyStream, Leaf, Node, Struct, batch, next_step_ttt, node,
+    scanned, split_aux, train_step, trained,
+)
 from nodejax.transforms.learning import learned_sgd
-from nodejax import (node, trained, Node, Leaf, scan, scanned, batch,
-                     train_step, next_step_ttt, KeyStream)
-from nodejax.struct import Struct
 
 from examples.comparisons.ttt.ttt_common import (
-    VOCAB, HIDDEN, TASKS, META_STEPS, TTT_LR0, META_LR,
-    make_tasks, xent, query_xent, report)
+    EVAL_TASKS, HIDDEN, META_LR, META_STEPS, QUERY0, TASKS, TTT_LR0, VOCAB,
+    make_tasks, query_nll_numpy, report,
+)
+
+
+def xent(logits: jax.Array, target: jax.Array) -> jax.Array:
+    return -jax.nn.log_softmax(logits)[target]
+
+
+def query_xent(out: jax.Array, target: jax.Array) -> jax.Array:
+    logp = jax.nn.log_softmax(out)
+    picked = jnp.take_along_axis(logp, target[..., None], axis=-1)[..., 0]
+    return -jnp.mean(picked[..., QUERY0:])
+
+
+@node
+def MLP(vocab: int, hidden: int) -> Node:
+    """Stateless token predictor (`input -> logits`)."""
+    def param(rng: KeyStream) -> Struct:
+        return Struct(
+            embed=0.3 * jax.random.normal(rng.next(), (vocab, hidden)),
+            w=0.3 * jax.random.normal(rng.next(), (hidden, hidden)) / jnp.sqrt(hidden),
+            out=0.1 * jax.random.normal(rng.next(), (hidden, vocab)),
+        )
+
+    def apply(param: Struct, input: jax.Array) -> jax.Array:
+        return jnp.tanh(param.embed[input] @ param.w) @ param.out
+
+    return Leaf(apply, param=param)
 
 
 @node
 def RNN(vocab: int, hidden: int) -> Node:
-    """Recurrent next-token predictor: embed the previous token, advance
-    the hidden state, emit logits for the current one."""
+    """Recurrent token predictor carrying hidden state alongside fast weights."""
     def param(rng: KeyStream) -> Struct:
-        return Struct(embed=0.3 * jax.random.normal(rng.next(), (vocab, hidden)),
-                      wh=0.3 * jax.random.normal(rng.next(), (hidden, hidden)) / jnp.sqrt(hidden),
-                      out=0.1 * jax.random.normal(rng.next(), (hidden, vocab)))
+        return Struct(
+            embed=0.3 * jax.random.normal(rng.next(), (vocab, hidden)),
+            wh=0.3 * jax.random.normal(rng.next(), (hidden, hidden)) / jnp.sqrt(hidden),
+            out=0.1 * jax.random.normal(rng.next(), (hidden, vocab)),
+        )
 
     def init(param: Struct) -> jax.Array:
         return jnp.zeros(param.wh.shape[0])
 
-    def apply(param: Struct, state: jax.Array, input: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def apply(param: Struct, state: jax.Array,
+              input: jax.Array) -> tuple[jax.Array, jax.Array]:
         h = jnp.tanh(param.embed[input] + param.wh @ state)
         return h, h @ param.out
 
     return Leaf(apply, init=init, param=param)
 
 
-def ttt_next_token() -> Node:
-    """The whole row, three lines. The INNER train_step demotes the
-    model's weights to per-step state, adapting down the sequence one
-    gradient step per token at meta-learned per-leaf rates (Meta-SGD's
-    device, applied at test time); the next_step register makes each
-    token the target of the one before it, so the raw sequence is the
-    only data anywhere. The OUTER train_step, batched over tasks,
-    learns the initialization and rates the inner adapts from, its
-    gradient travelling through the inner run."""
-    cell = next_step_ttt(train_step(RNN(VOCAB, HIDDEN), xent, learned_sgd(TTT_LR0)))
-    model = scanned(cell)
-    return train_step(batch(model), query_xent, optax.adam(META_LR))
+def ttt_meta(model: Node) -> tuple[Node, Node]:
+    """Build both the batched sequence predictor and its outer meta-trainer."""
+    cell = next_step_ttt(train_step(model, xent, learned_sgd(TTT_LR0)))
+    batched = batch(scanned(cell))
+    return batched, train_step(batched, query_xent, optax.adam(META_LR))
 
 
-def run_sequence(name: str, trainer) -> None:
-    """Meta-train on the shared budget, evaluate on held-out tasks,
-    report. The sequence is the raw token matrix twice: `input` feeds the
-    register, `target` feeds the meta-objective, and train_step's
-    element contract is why the same array appears under two names."""
-    tokens = make_tasks(np.random.RandomState(0), META_STEPS * TASKS)
-    folded = tokens.reshape(META_STEPS, TASKS, -1)
-    final, aux = trained(trainer).apply(input=folded, target=folded)
+def run_variant(variant: str, model: Node, tokens: jax.Array,
+                held_out: jax.Array) -> None:
+    batched, meta = ttt_meta(model)
+    initial = batched.parameterize(rng=jax.random.PRNGKey(0))
+    preds0, _ = split_aux(initial.apply(held_out))
 
-    held_out = make_tasks(np.random.RandomState(99), TASKS)
-    # trained's product IS the model, state-bound: call it as it stands
-    _, predictions = final(held_out)
-    weight_count = sum(leaf.size for leaf in jax.tree.leaves(final.param))
-    report(name, weight_count, bool(jnp.all(jnp.isfinite(aux.loss))),
-           predictions, held_out)
+    trainer = meta.parameterize(rng=jax.random.PRNGKey(0))
+    final, aux = trained(trainer).apply(input=tokens, target=tokens)
+    _, preds1 = final(held_out)
+    preds1, _ = split_aux(preds1)
+
+    n_weights = sum(leaf.size for leaf in jax.tree.leaves(final.param))
+    report(
+        'nodejax', variant, n_weights, bool(jnp.all(jnp.isfinite(aux.loss))),
+        query_nll_numpy(preds0, held_out), query_nll_numpy(preds1, held_out),
+    )
 
 
 def main() -> None:
-    trainer = ttt_next_token().parameterize(rng=jax.random.PRNGKey(0))
-    run_sequence('ttt-rnn', trainer)
+    tokens = jnp.asarray(
+        make_tasks(np.random.RandomState(0), META_STEPS * TASKS).reshape(META_STEPS, TASKS, -1)
+    )
+    held_out = jnp.asarray(make_tasks(np.random.RandomState(99), EVAL_TASKS))
+    run_variant('mlp', MLP(VOCAB, HIDDEN), tokens, held_out)
+    run_variant('rnn', RNN(VOCAB, HIDDEN), tokens, held_out)
 
 
 if __name__ == '__main__':

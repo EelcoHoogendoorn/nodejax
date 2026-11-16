@@ -1,351 +1,281 @@
 # NodeJAX Handbook
 
-A public technical reference to NodeJAX's concepts, authoring system,
-transforms, and composition. For the implementation architecture and authoring
-interfaces, see the [design](design.md). For the argument behind the
-model, see the [philosophy](philosophy.md).
+Technical reference for NodeJAX views, authoring primitives, combinators, transforms, domain modules (`nodejax.nn` and `nodejax.control`), and tree utilities. For boundary placement and decomposition patterns across domains, see the [authoring guide](authoring.md). For internal `Def` lowering and T3 transform construction, see the [design document](design.md).
 
----
+## 1. Views and binding stages
 
-# Part I: Core Architecture
+NodeJAX separates architectural construction, shape resolution, parameter creation, and state initialization into distinct immutable values:
 
-## 1. The Core Contract
-
-An authored Node uses up to three role functions: `param`, `init`, and
-`apply`. The canonical `Contract` presents those roles through four uniform
-entry points:
-
-```
-node.contract.param(param_input, rng)               -> param
-node.contract.init(param, state_input, rng)         -> state
-node.contract.prime(param, state_input, input, rng) -> state
-node.contract.apply(param, state, input, rng)       -> (state, output)
+```text
+Generic  --(specialize)-->  Node  --(with_input)-->  Node  --(parameterize)-->  PNode  --(initialize)-->  PSNode
 ```
 
-At this canonical boundary, `rng` is a `MaybeKeyStream`: keyed when the call
-requires randomness and empty when it does not. This keeps the contract
-signature uniform without exposing the transform-oriented type to authored
-leaf functions.
+`Node`, `PNode`, and `PSNode` inherit shared inspection and configuration operations from `BaseNode`. `Generic` represents an unspecialized `@node` call with one or more unbound static arguments (`is_generic(x)` tests for a `Generic`, and `REQUIRED` marks mandatory unbound fields internally).
 
-`init` and `prime` are two entry points to the single state-initialization
-role. A definition records one initializer and whether it requires a real
-runtime value. `init` handles the no-input form. `prime` resolves the
-definition from a real input and supplies that value when required.
-
-### The Three Contract Slots
-* **`param`**: Static weights and learnable variables created at parameterization.
-* **`state`**: Cyclic variables that evolve sequentially across calls (RNN hidden state, running moments, KV cache, simulator variables).
-* **`input` / `output`**: Transient data flowing through the node during forward execution.
-
-Nodes compose into larger nodes via combinators (`>>`, `serial`, `parallel`, `Composite`), and higher-order transforms (`batch`, `ensemble`, `scan`, `train_step`) apply to any node by transforming these three underlying contract functions.
-
----
-
-## 2. Functional State
-
-State in NodeJAX is pure and functional:
-* A stateful node is **cyclic**: its apply takes `(param, state, input)` and returns `(next_state, output)`.
-* State is an immutable value held and passed explicitly by the caller or runtime; nodes do not hold hidden mutable instance state.
-* In compositions (`>>`, `Composite`), member states are combined into an immutable `Struct` keyed by member name. State threading through intermediate members is handled automatically by the combinator.
-
----
-
-## 3. Composition
-
-### Leaf and Composite Construction
-
-`Leaf` and `Composite` are two ways to build the same definition value. They
-are not runtime subclasses.
-
-* **Leaf construction (`Leaf`)**:
-  * Implement raw array math (`apply`), parameter initializers (`param`), and state constructors (`init`).
-  * Name required values explicitly in authored signatures: `param`, `state`, `input`, `node`, and `rng`. A Leaf emits auxiliary values by returning `(output, Aux(...))`; its `apply` does not receive `self`.
-  * Contain no child sub-nodes.
-
-* **Composite construction (`Composite`, `serial`, `parallel`, `>>`)**:
-  * Build behavior from registered members. An authored `Composite` may perform arbitrary JAX operations around its member calls.
-  * Compose member hierarchies across all structural spaces:
-    1. **`param`**: Member parameter PyTrees (`param.member_a`, `param.member_b`).
-    2. **`state`**: Member state PyTrees (`state.member_a`, `state.member_b`).
-    3. **`aux`**: Member auxiliary outputs (`aux.member_a`, `aux.member_b`).
-    4. **`statics`**: Member configuration metadata.
-
-> **The Structural Registration Rule**: Every child Node relationship must be registered as a member (`Composite(**members)`, `serial`, or a wrapper's inner). Closing over Nodes in private Python variables prevents parameter collection, state composition, RNG routing, and tree surgery.
-
-Both forms finish as a `Def`, normally exposed to users through `Node`. Member
-structure and wrapper transparency are definition data, not Python class
-identity.
-
----
-
-## 4. Higher-Order Transforms
-
-Transforms consume a `Node` and produce a new `Node` by transforming its underlying contract functions:
-
-| Transform | Primary Effect | Parameter Handling | State Handling |
+| View | Bound data | JAX PyTree leaves | Calling `view(...)` |
 | :--- | :--- | :--- | :--- |
-| **`batch(node)`** | Vectorizes over data (`vmap`) | Shared across batch | Vectorized per sample |
-| **`ensemble(node, n)`** | Vectorizes over population (`vmap`) | Vectorized across members | Vectorized across members |
-| **`stack(node, n)`** | Vectorizes depth layers (`scan`) | Stacked over depth | Stacked over depth |
-| **`scan(node)`** | Sequential recurrence (`lax.scan`) | Shared across time | Carried step-to-step |
-| **`scanned(node)`** | Sequence rollout (internalized carry) | Shared across time | Initialized and consumed internally |
-| **`repeat(node, n)`** | Output fed back into input, `n` times, last output kept | Shared across iterations | Carried iteration-to-iteration |
-| **`repeated(node, n)`** | The same, every output kept: a trajectory from a start | Shared across iterations | Initialized and consumed internally |
-| **`cyclic(node)`** | A step's first field promoted to its state; the output is the successor | The step's own | The first field, bound or given at init |
-| **`train_step(node, loss, opt)`** | Turns model into a trainer | Initial weights (param) | Weights & opt moments (state) |
-| **`trained(trainer)`** | Runs optimization to completion | Evaluated weights | Returns final trained model + loss aux |
+| `Generic` | Open factory + partial statics | Not a JAX PyTree | Raises until `specialize(...)` supplies remaining `unbound()` statics |
+| `Node` | Definition only (`param` unbound) | Empty static PyTree | `node.apply(param, ...)` runs with explicit `param` |
+| `PNode` | `param` bound (stateless or uninitialized) | `param` leaves | Stateless `pnode(input)` returns `output`; cyclic `PNode` requires `.initialize(...)` first |
+| `PSNode` | `param` and `state` bound | `(param, state)` leaves | `psnode(input)` steps once and returns `(next_psnode, output)` |
 
-### Why `scan` is a transform
+### Shared `BaseNode` properties and methods
 
-JAX exposes `lax.scan(step, initial, sequence)` as an immediately applied control-flow primitive. That interface combines the declaration of a recurrence with one execution of it. The functional model does not require this coupling: a curried scan could accept `step` first and return a function of `initial` and `sequence`, while retaining the same tracing, lowering, and fixed-carry constraints.
+| Attribute / method | Behavior |
+| :--- | :--- |
+| `.name`, `.tags`, `.members` | Node identifier string, `frozenset` of tag strings, and `Struct` of child member views |
+| `.parametric`, `.cyclic` | Booleans indicating whether the Node declares `param` or `state` |
+| `.bound`, `.state_bound` | Booleans indicating parameter binding (`PNode` / `PSNode`) and state binding (`PSNode`) |
+| `.node`, `.generic` | Underlying unbound `Node` view and reconstructing `Generic` (if built by `@node`) |
+| `.with_input(input_spec, *, bundle=...)` | Resolves input-dependent shapes from an example array, `Struct`, or `spec(...)` without binding runtime data |
+| `.specialize(**overrides)` | Reruns construction with updated static arguments matched by exact path or glob (`'*.train'`, `'layer.width'`), returning a fresh unbound `Node` |
+| `.parameterize(param_input=..., **fields)` | Constructs parameters (accepting `rng=key` when stochastic) and returns a `PNode` (or `PSNode` for a stateless Node that needs no state) |
+| `.describe()`, `.tree_view(...)`, `.summary(...)`, `.statics_by_path()` | Structural and parameter/state inspection helpers (see Section 7) |
 
-NodeJAX makes that separation explicit because a Node contract already names the state and input roles. `scan(step)` declares a reusable sequence Node whose state remains externally carried. Calling `.scan(sequence)` on a bound Node executes that operation using its bound state and returns its successor. `scanned(step)` declares the alternative lifetime policy: initialize the state for each call, run the sequence, and consume the final state internally. The bound `.scan(sequence)` method is therefore the execution spelling of the `scan(step)` transform, not a separate recurrence mechanism.
+### Stage-specific view methods
 
-Because transforms operate on declared contract roles (`param` vs `state`), they nest seamlessly:
-```python
-# MAML: inner fine-tuning inside a batched meta-trainer
-maml = train_step(batch(finetune(train_step(model, mse, optax.sgd(0.1)))), mse, optax.adam(1e-3))
-```
-
----
-
-## 5. Binding Stages
-
-NodeJAX models system instantiation across five explicit stages:
-
-```
-statics -> private tree binding -> input evidence -> params -> state
-```
-
-1. **Static construction**:
-   Architectural definitions where static parameters (channel widths, layer counts, flags) are open. `specialize(**overrides)` resolves open statics.
-2. **Private tree binding**:
-   A complete construction materializes named member definitions. Framework
-   tree surgery may explicitly rebuild this stage; it is not a general public
-   Node operation.
-3. **Input evidence**:
-   `with_input` resolves shape-dependent definition facts without binding
-   runtime values.
-4. **Parameter binding**:
-   `parameterize` returns `PNode(definition, param)`. Its JAX leaves are exactly
-   the parameter tree; the definition is static auxiliary data.
-5. **State binding**:
-   initialization returns `PSNode(definition, param, state)`. Calling it
-   executes one step and returns a functional successor:
-   ```python
-   advanced, output = model(input_data)
-   ```
-
-`Node`, `PNode`, and `PSNode` are sibling views over the same `Def`, sharing a
-small `BaseNode`. A `Generic` is earlier still: an unfinished construction
-record with no executable definition. Re-entering any stage discards the
-bindings after it. In particular, `specialize` reruns construction and does
-not retain input evidence, params, state, or an ephemeral `map_members`
-rewrite.
-
----
-
-## 6. Functional Derivation (`derive`) and Methods
-
-`derive` extends an unbound Leaf definition without adding a Composite member:
+| View method | Behavior |
+| :--- | :--- |
+| `Node.bind(param=(), *, state=...)` | Attaches pre-built `param` (and optional `state`), returning a `PNode` or `PSNode` |
+| `Node.init(param, state_input=..., *, input=..., **fields)` | Computes initial `state` for `param` without wrapping in `PSNode` |
+| `PNode.init(...)` / `PNode.initialize(...)` | `.init(...)` returns the raw `state` PyTree; `.initialize(...)` returns a bound `PSNode` |
+| `PNode.bind(param=..., *, state=...)` | Replaces bound `param` or attaches `state` |
+| `PSNode.reset(*args, **fields)` | Recomputes initial state from bound `param` and returns a fresh `PSNode` |
+| `PSNode.scan(*args, **fields)` | Unrolls the `PSNode` across the leading sequence axis of its inputs and returns `(final_psnode, stacked_output)` |
+| `PSNode.pnode` | Returns the underlying `PNode` with `state` dropped |
 
 ```python
-derived = derive(
-    base,
-    param=extra_param,
-    init=extra_init,
-    methods=method_overrides,
-)
+import jax
+import jax.numpy as jnp
+from nodejax import nn
+
+net = nn.Linear(16) >> nn.gelu >> nn.Linear(4)
+model = net.with_input(jnp.zeros(8)).parameterize(rng=jax.random.PRNGKey(0))
+output = model(jnp.ones(8))
+
+eval_net = model.specialize(**{'*.bias': True}).bind(model.param)
 ```
 
-* An omitted `param`, `init`, or `apply` role is inherited.
-* If parent and child both define `param` or `init`, their constructor inputs and returned `Struct` fields must be disjoint. Their fragments form one flat parameter or state value.
-* An inherited transition may return only the state fields it updates; NodeJAX preserves the added fields. An explicit replacement transition over merged state must return every state field.
-* Methods form a union in which the child overrides equal names, and tags form a union.
-* **Bound Methods**: Methods declared on nodes bind to `PNode` and `PSNode` instances, receiving the instance's bound parameters and state automatically.
+## 2. Records, specs, randomness, and auxiliary outputs
 
-Current limits: an explicit state transition on an intermediate derived Node cannot be extended with another state fragment; define the complete transition on the most-derived Node. Random construction belongs to the derived Node as a whole, so the same root key does not guarantee that an inherited stochastic fragment reproduces its standalone base value after another constructor fragment is added.
+### `Struct`, `Aux`, and `spec`
 
----
+`Struct(**fields)` is an immutable keyword-addressed JAX PyTree container supporting attribute access (`s.x`), dictionary-style membership (`'x' in s`), shallow functional updates (`s.replace(x=new_x)`), and leading-axis indexing (`s[0]`).
 
-## 7. Statics and Reconfiguration (`specialize`)
+`Aux(**fields)` is a `Struct` subtype that carries telemetry and auxiliary losses alongside primary outputs without altering downstream input shapes. `split_aux(output)` unpacks any call result into `(primary_output, aux)` (returning an empty `Aux()` when none was emitted), and `drop_aux` either strips `Aux` from a concrete output value (`drop_aux(out)`) or wraps a `Node` so its `Aux` stream is discarded (`drop_aux(node)`).
 
-Statics are values that determine graph structure and compile-time shapes (e.g. channel widths, time constants, `dt`, mode flags). They are recorded by `@node` at construction and do not enter PyTrees.
+`spec(shape=(), dtype=jnp.float32)` builds a `jax.ShapeDtypeStruct` placeholder for `.with_input(...)` when no concrete array is needed. `spec_of(tree)` converts an array PyTree into `ShapeDtypeStruct` leaves, and `materialize(tree)` allocates zero arrays matching a spec PyTree.
 
-### Rebuilding with `specialize`
-A built node tree can be reconfigured deterministically via `specialize`:
-* `model.specialize(layer_name={'width': 128})` targets a specific member.
-* `model.specialize(**{'*.train': False})` broadcasts static flags across all matching sub-nodes.
-* Re-specializing re-runs the declarative construction top-to-bottom and
-  materializes a fresh member tree, ensuring derived shapes and topology are
-  recomputed consistently.
+### Explicit PRNG streams (`KeyStream`)
 
----
+Any authored `param`, `init`, or `apply` function that draws random numbers declares `rng` in its signature. Inside that function, `rng` is a scope-local `KeyStream` whose `rng.next()` yields independent JAX PRNG keys. At the public call boundary (`parameterize`, `initialize`, `apply`, or `PSNode(...)`), the caller passes a single `rng=jax.random.PRNGKey(seed)` keyword argument. Deterministic calls reject unexpected `rng` arguments, and stochastic calls reject missing ones.
 
-## 8. Randomness & PRNG Key Routing
+### Exported type aliases
 
-Randomness is an explicit call dependency with two deliberately separate
-representations:
+`nodejax` exports `PyTree`, `Param`, `State`, `Input`, `Output`, `ParamFn`, `InitFn`, `ApplyFn`, `LossFn`, and `StaticTree` for type annotations on authored factories, transforms, and loss functions.
 
-1. **Signature Declaration**: An authored function that draws declares `rng`
-   in its signature. Compilation records that the call requires randomness;
-   `rng` is not retained as a data-input field.
-2. **Single Boundary Key**: The caller supplies one raw key at the public
-   boundary (`parameterize(rng=key)`, `initialize(rng=key)`, or
-   `apply(rng=key)`). A deterministic definition rejects a surplus key and a
-   stochastic definition rejects a missing one.
-3. **Uniform Transform Argument**: Compiled calls receive a `MaybeKeyStream`
-   explicitly beside their data. Composites give stochastic children keyed
-   streams and deterministic children empty streams. Axis transforms split or
-   broadcast the same value according to the child's declared requirement.
-   No runtime bundle inspection or RNG `ContextVar` is involved.
-4. **Scope-Local Authoring Stream**: At the leaf-authoring boundary, the final
-   keyed value becomes a local `KeyStream`; authors draw independent
-   keys via `rng.next()`:
-   ```python
-   def param(node, rng):
-       w = jax.random.normal(rng.next(), (node.input.shape[-1], 64))
-       return Struct(w=w)
-   ```
+## 3. Authoring Nodes
 
-A state or domain PyTree may separately contain a value named `rng`. That is
-modeled state, not the framework call channel, and it advances only according
-to that node's state transition.
+### `@node` and `ambient`
 
----
+`@node` (or `@node(name='custom')`) decorates a factory function whose parameters represent compile-time statics or collaborator Nodes. Calling a `@node` factory with all required arguments returns a `Node`; omitting required static arguments (without defaults) returns a `Generic` that can be composed and later completed via `.specialize(...)` or an `ambient(**statics)` context block:
 
-## 9. Structural Parameter Sharing (`tie`)
-
-Parameter sharing in NodeJAX is structural rather than pointer-based:
-* `tie(pipeline, 'src_member', 'alias_member')` maintains a single copy of the shared tensor in the `param` PyTree.
-* At apply time, the shared parameter is forwarded to all specified consumer slots.
-* Gradients accumulate naturally via the chain rule with zero risk of PyTree de-aliasing or pointer desynchronization under transformations.
-
----
-
-## 10. Sequential Call Boundaries & Episode-Aligned Reset
-
-When scanning models over long sequences in chunks, recurrent state and running statistics have different lifetime requirements:
-* Recurrent hidden state should reset between distinct episodes.
-* Running statistics (like BatchNorm or covariance estimators) should persist across episodes.
-
-### Declaring Boundary Actions
-Nodes can declare boundary reset rules via the `boundary` dictionary:
 ```python
-def keep_statistics(carried, init, decided):
-    # Reset fast hidden state to init, but carry running stats:
-    return init.replace(stats=carried.stats)
+from nodejax import Leaf, Node, Struct, ambient, node
 
-Leaf(apply, init=init, boundary={'episode': keep_statistics})
-```
-`scan(model, boundary='episode')` runs matching hooks once at the start of each call. It names an episode boundary only when the caller aligns scan calls with episodes.
-
----
-
-# Part II: Authoring & Syntax Reference
-
-## 11. Authoring Leaf Nodes with `Leaf`
-
-Leaf functions are authored using human signatures:
-```python
 @node
-def Linear(out_features: int):
+def Affine(width: int) -> Node:
     def param(node, rng) -> Struct:
-        in_features = node.input.shape[-1]
-        w = jax.random.normal(rng.next(), (in_features, out_features)) / jnp.sqrt(in_features)
-        b = jnp.zeros(out_features)
-        return Struct(w=w, b=b)
+        in_dim = node.input.shape[-1]
+        return Struct(
+            w=jax.random.normal(rng.next(), (in_dim, width)) / jnp.sqrt(in_dim),
+            b=jnp.zeros(width),
+        )
 
     def apply(param: Struct, input: jax.Array) -> jax.Array:
         return input @ param.w + param.b
 
     return Leaf(apply, param=param)
+
+with ambient(width=32):
+    layer = Affine()
 ```
 
-### Reserved Signature Names
-* `param`: The node's parameter PyTree.
-* `state`: The node's active cyclic state PyTree.
-* `input`: The primary input data.
-* `node`: The resolved node metadata (e.g. `node.input.shape`).
-* `rng`: The local `KeyStream` for PRNG draws.
-* `self`: The Composite or Wrapper invocation scope. It calls registered members and may collect auxiliary values with `self.sow(...)`. A Leaf `apply` does not accept it.
+### `Leaf`
 
----
+`Leaf(apply, *, param=None, init=None, name=None, apply_input_spec=None, methods={}, tags=(), boundary={})` constructs an atomic Node with no child members.
 
-## 12. Hand-Wired Composites (`Composite`)
+Role functions declare only the reserved names they read:
 
-When dataflow cannot be expressed as a linear pipeline (`>>`), use `Composite` to author custom branching and gating wiring:
+| Reserved argument | Available in | Value |
+| :--- | :--- | :--- |
+| `param` | `init`, `apply`, `methods` | Bound parameter PyTree |
+| `state` | `apply`, `methods` | Current state PyTree; `apply` returns `(next_state, output)` (or `(next_state, (output, Aux(...)))`) |
+| `input` | `init`, `apply` | Primary runtime input (in `init`, marks an input-primed initializer) |
+| `node` | `param`, `init` | Resolved `Node` metadata (such as `node.input.shape` and `node.input.dtype`) |
+| `rng` | `param`, `init`, `apply`, `methods` | Scope-local `KeyStream` |
+
+Any non-reserved parameter name declared on `param`, `init`, or `apply` becomes a named constructor or call input field (`def apply(param, observation, command): ...`).
+
+`methods` maps method names to functions over `(param, state, rng, *args, **kwargs)` that bind onto `PNode` and `PSNode` views as read-only operations. `boundary` maps boundary names (such as `'episode'`) to reset hooks `(carried, init, decided) -> state` triggered when an enclosing `scan(..., boundary='episode')` starts a call.
+
+### `derive`
+
+`derive(parent, *, apply=None, init=None, param=None, name=None, apply_input_spec=None, methods={}, tags=None)` produces a new leaf `Node` from an unbound leaf `parent`:
+
+- Omitted `param`, `init`, or `apply` hooks are inherited from `parent`.
+- When both `parent` and `derive` supply `param` or `init`, their returned `Struct` keys must be disjoint and merge into one flat `Struct`.
+- Inherited transitions update their own state fields while preserving added state fields; an explicit replacement `apply` over merged state returns the complete state `Struct`.
+- `methods` and `tags` merge by union, with child methods overriding matching names.
+
+### `Composite` and `Wrapper`
+
+`Composite(**members)(apply, *, param=None, init=None, apply_input_spec=None, name=None, methods={})` wires multiple named child Nodes. Its `param`, `state`, and `Aux` PyTrees nest under the declared member names (`param.encoder`, `param.decoder`).
+
+`Wrapper(member=inner)(apply, *, init=None, name=None, tags=None, boundary={}, methods={}, rng_from=None, input_spec=None)` wraps a single named child Node while keeping `param`, `state`, and `Aux` flat (delegating directly to `inner` without adding an extra member-name level).
+
+Inside `Composite` or `Wrapper` `apply(self, ...)`:
+
+- `self.<member>` returns a live bound view of that member at its current state (`self.<member>.param`, `self.<member>.state`, plus any custom methods on that member).
+- `self.<member>(x)` executes the member, threads child `rng` and `Aux` automatically, writes any updated member state back into `self`, and returns the primary output.
+- `self.<member>.bind(state=s)` or `self.<member>.reset(...)` updates the member's state slot in `self` and returns the rebound member view.
+- `self.sow(key=value, ...)` records composite-level `Aux` fields.
+
+An authored `init(self, ...)` initializes member states imperatively through `self.<member>.bind(state=...)` and `self.<member>.reset(...)` when one member's initial state depends on another member or on runtime start data; untouched cyclic members initialize from their own defaults.
 
 ```python
+from nodejax import Composite, Wrapper, node
+
 @node
-def Highway(dim: int):
-    members = Composite(transform=Linear(dim), gate=Linear(dim))
+def GatedResidual(transform: Node, gate: Node) -> Node:
+    members = Composite(transform=transform, gate=gate)
 
     def apply(self, input: jax.Array) -> jax.Array:
-        h = jax.nn.relu(self.transform(input))
-        t = jax.nn.sigmoid(self.gate(input))
-        return h * t + input * (1.0 - t)
+        update = self.transform(input)
+        weight = jax.nn.sigmoid(self.gate(input))
+        self.sow(gate_mean=jnp.mean(weight))
+        return input + weight * update
 
     return members(apply)
 ```
 
-Inside `apply(self, ...)`, `self` is the composite's state, the one mutable thing in the step, and `self.member_name` is the member's bound view as of that read: it has a view's `param`, `state`, `bind`, `reset`, and `scan`, and its methods and members. Calling it runs the member from the view's state and stores the successor in the member's slot, so a later read of `self.member_name` sees the advance and repeated calls chain, while a view kept from before the call does not move. `bind(state=...)` and `reset(...)` store their state the same way and return the rebound view, which is how a run starts from state that arrives as data:
+## 4. Combinators and wiring transforms
 
-```python
-def apply(self, observation, command, start):
-    return self.replay.bind(state=start)(observation=observation, command=command)
-```
+| Function / operator | Signature | Behavior |
+| :--- | :--- | :--- |
+| `a >> b` | `BaseNode \| Generic \| Callable` | Chains stages sequentially; plain callables lift to stateless `Leaf` Nodes, and `>>` flattens chained anonymous pipes |
+| `serial` | `serial(**members)` | Sequential pipeline with explicit member names (`serial(embed=..., core=..., head=...)`) |
+| `parallel` | `parallel(**members)` | Broadcasts the same input to every named member and returns `Struct(**outputs)` |
+| `sum_junction` | `sum_junction(**members)` | Feeds `input.<name>` to each named member and sums their outputs tree-wise (`jax.tree.map`) |
+| `residual` | `residual(body)` | Evaluates `input + body(input)` tree-wise around a shape-preserving `body` |
+| `tie` | `tie(pipe, source, *aliases)` | Removes `*aliases` from `pipe`'s `param` tree and routes `param.<source>` into every aliased member at runtime |
+| `externalize` | `externalize(inner, member=None, at_init=None, *, field=None)` | Moves `member`'s (or the whole Node's when `member=None`) parameter tree out of `param` into a runtime call input named `field` (defaulting to `member` or `'param'`), using `at_init` if needed during shape/init probing |
+| `taps` | `taps(inner)` | Wraps a composite `inner` so its output becomes `Struct(output=..., taps=Struct(**per_member_outputs))` |
+| `at` | `at(inner, field)` | Applies `inner` to ` getattr(input, field)` of a `Struct` input and writes the result back via `input.replace({field: out})` |
 
-The one difference from a view at the harness is deliberate: there, a call returns the successor beside the output; here the successor goes into the slot, so the same line serves a cyclic and an acyclic member.
+## 5. Axis, iteration, learning, and structure transforms
 
-An authored `init` may be written against `self` in the same way, for a composite whose start is not one member's own business: a start that arrives as data has to be placed in one member before another can be primed off it. The views are the same, over the init-time slots: `bind(state=...)` places a state, `reset(...)` primes a member from an input the init computes, and a read builds a member from its own bundle. The composite's state is what the slots hold when the init returns, so it returns nothing; a member the init never touches is built from its own bundle, as it would be without an authored init. The init takes a key exactly when a member's init does, or when it declares `rng` itself. Binding each member's parameters and splitting its key is the views' job:
+### Axis and execution transforms
 
-```python
-def init(self, start):
-    self.rope.bind(state=start.rope)
-    self.actuator.reset(input=Struct(mechanical=joint_mechanical(start.rope), command=jnp.zeros((n_links,))))
-```
+| Transform | Signature | `param` axis | `state` axis | `input` / `output` axis |
+| :--- | :--- | :--- | :--- | :--- |
+| `batch` | `batch(sample, n=None, axis='batch')` | Shared | Mapped (`vmap`) | Mapped along leading axis (enforcing length `n` when given); provides named `axis` for cross-sample ops like `BatchNorm` |
+| `unbatched` | `unbatched(inner, axis='batch')` | Unchanged | Unchanged | Evaluates `inner` under a size-1 `axis_name` axis and squeezes it out so single-sample calls satisfy `lax.pmean` consumers |
+| `ensemble` | `ensemble(member, n, axis='ensemble')` | Mapped (`n`) | Mapped (`n`) | Broadcasts input across `n` independent members and stacks outputs on axis 0 |
+| `reduce` | `reduce(fn)` | Stateless `PNode` | Stateless | Applies `fn` (such as `jnp.mean` or `jnp.sum`) across axis 0 of every output leaf and emits `Aux(population=input)` |
+| `stack` | `stack(layer, n)` | Stacked (`n`) | Stacked (`n`) | Chains `n` identically structured layers sequentially via `lax.scan` over depth |
+| `remat` | `remat(inner, *, policy=None, prevent_cse=True)` | Unchanged | Unchanged | Wraps `inner`'s execution in `jax.checkpoint` for activation rematerialization |
 
-`param`, `state`, and `node` are not arguments of such an init; `input`, if declared, is the priming input, and every other name is a state input, with defaults allowed as for any init.
+### Iteration and state transforms
 
----
+| Transform | Signature | State lifetime and output |
+| :--- | :--- | :--- |
+| `scan` | `scan(step, record=False, boundary=None, n=None)` | Cyclic sequence Node: carries `step`'s state across leading time axis (length `n` if given), running `boundary` hooks at call start; emits per-step states on `Aux(state=...)` when `record=True` |
+| `scanned` | `scanned(step, record=False, n=None)` | Stateless-interface rollout: initializes `step`'s state fresh per call, scans over the sequence, and discards final carry; emits per-step states on `Aux(state=...)` when `record=True` |
+| `carried` | `carried(step, n=None)` | Initializes `step` fresh, scans over the sequence, and returns `step` bound as a `PSNode` to its final state |
+| `repeat` | `repeat(layer, n)` | Feeds output back as input `n` times with shared parameters, carrying state and returning the final output |
+| `repeated` | `repeated(step, n)` | Initializes state internally, feeds output back `n` times, and stacks all `n` outputs into a trajectory |
+| `iterated` | `iterated(step, n)` | Applies cyclic `step` `n` times to the *same* input while threading state, returning `(final_state, last_output)` |
+| `cyclic` | `cyclic(step)` | Turns a stateless transition `apply(state_like_first_arg, ...)` whose output is `next_state` (or `(next_state, output)`) into a cyclic `Node` carrying that first input as `state` |
 
-## 13. Telemetry and Auxiliary Outputs (`Aux` / `sow`)
+### Learning and test-time adaptation
 
-Leaf code returns an explicit `Aux` beside its primary output:
-```python
-def apply(param, input):
-    output = input @ param.w
-    return output, Aux(activity=jnp.linalg.norm(output))
-```
+| Transform / helper | Signature | Behavior |
+| :--- | :--- | :--- |
+| `train_step` | `train_step(model, loss_fn, tx, *, trainable=None)` | Cyclic trainer Node: `param` holds initial weights; `state` holds active weights, model state, and optimizer state (`tx` is an Optax transformation or optimizer Node). `loss_fn(output, target, *, aux=...)` (or a loss `Node`) produces scalar loss. `trainable` restricts updates by member name or path predicate. Exposes `.params()` and `.trained()` view methods |
+| `trained` | `trained(step)` | Scans a `train_step` Node over a sequence of training batches and returns `step.trained()` bound to final learned weights and state |
+| `finetune` | `finetune(step)` | Episode learner over `train_step`: adapts from `param` on `support` batches via `trained(step)` and evaluates the adapted model on `query` |
+| `supervised_ttt` | `supervised_ttt(step)` | Adapts `train_step` online per call on `(input, target)` pairs while emitting pre-update predictions |
+| `next_step_ttt` | `next_step_ttt(step)` | Self-supervised online learner over `train_step` where consecutive sequence elements form `(x[:-1], x[1:])` pairs |
+| `reconstruction_ttt` | `reconstruction_ttt(step)` | Self-supervised online learner over `train_step` where each input serves as its own reconstruction target |
+| `next_step`, `reconstruction` | `next_step()`, `reconstruction()` | Stateless `PNode` stream formatters producing `Struct(input=..., target=...)` pairs for sequence prediction or autoencoding |
 
-A Composite or Wrapper may collect values around its member calls with `self.sow(...)`:
-```python
-def apply(self, input):
-    x = self.encoder(input)
-    self.sow(latent_norm=jnp.linalg.norm(x))
-    return self.decoder(x)
-```
-Auxiliary outputs collect into an `Aux` PyTree matching the model hierarchy and automatically vectorize under `batch`, `ensemble`, and `scan`.
+Additional optimizer building blocks live in `nodejax.transforms.learning`: `optimizer(tx, name='optimizer')` wraps an Optax transformation as a cyclic `PNode`, `learned_sgd(lr0)` creates SGD with per-leaf learnable step sizes, `map_loss_target(loss_fn, target_fn)` adapts loss targets while preserving `aux` inspection, `opt_reinit(inner, boundary)` resets optimizer moments on boundaries while keeping learned weights, and `ttt(step)` wraps a `train_step` for single-sample online prediction-then-update.
 
----
+### State policy, gradient policy, and structure surgery
 
-## 14. Summary of Common Operations
+| Transform | Signature | Behavior |
+| :--- | :--- | :--- |
+| `state_reinit` | `state_reinit(inner, boundary='episode')` | Attaches a boundary hook that resets `inner`'s entire state subtree to `init` whenever an enclosing `scan` triggers `boundary` |
+| `freeze` | `freeze(inner, state)` | Fixes `inner`'s state to `state` on every call and removes `state` from the external contract |
+| `tree_freeze` | `tree_freeze(node, frozen=None, tag=None)` | Applies `freeze` selectively across `node` using a sparse `Struct` of state subtrees (`frozen`) or member tag (`tag`) |
+| `detach` | `detach(inner)` | Applies `lax.stop_gradient` to `inner`'s parameters before `apply` |
+| `tree_detach` | `tree_detach(node, name)` | Applies `detach` to members matching `name` (string or predicate) |
+| `tree_filter` | `tree_filter(state, name)` | Extracts a sparse `Struct` containing only state subtrees under members matching `name` |
+| `map_members` | `map_members(node, fn)` | Rewrites a `Node` tree bottom-up, applying `fn(path, member)` at every composite level |
 
-```python
-# 1. Pipeline Definition
-model = Linear(64) >> nn.gelu >> Linear(10)
+## 6. Domain modules
 
-# 2. Shape Binding & Parameterization
-bound_model = model.with_input(jnp.zeros((32, 128))).parameterize(rng=jax.random.PRNGKey(0))
+### `nodejax.nn`
 
-# 3. Vectorization
-batched_model = batch(bound_model)
+Import via `from nodejax import nn` or `import nodejax.nn as nn`.
 
-# 4. Evaluation Re-specialization, then explicit compatible transfer
-eval_node = bound_model.specialize(**{'*.train': False})
-eval_model = eval_node.bind(bound_model.param)
+| Category | Exports |
+| :--- | :--- |
+| Projections & shapes | `Linear(n_out, bias=True, *, weight_init=..., bias_init=...)`, `Projection(*, weight_init=..., bias_init=...)`, `Embed(vocab, hidden)`, `Unembed(vocab, hidden)`, `OneHot(classes)`, `flat`, `Reshape(shape)` |
+| Activations | `relu`, `gelu`, `silu`, `elu`, `leaky_relu`, `softplus`, `sigmoid`, `tanh`, `softmax`, `log_softmax`, `identity` |
+| Normalization | `LayerNorm(eps=1e-5)`, `RMSNorm(eps=1e-6)`, `L2Norm(eps=1e-8)`, `BatchNorm(momentum, eps=1e-5, axis='batch', train=True)`, `Whiten(momentum=0.1, eps=1e-2, axis='batch', train=True)` |
+| Spatial / 2D | `Conv(features, kernel=3, stride=1)`, `ConvTranspose(features, kernel=3, stride=2)`, `MaxPool(window=2, stride=None, padding='VALID')`, `AvgPool(window=2, stride=None, padding='VALID')`, `GlobalAvgPool()`, `Upsample(scale=2, method='nearest')`, `Downsample(scale=2, method='nearest')` |
+| Attention & FFN | `Attention(heads, causal=False)`, `TransformerBlock(width, heads, ratio, causal=False)`, `tokens()`, `PosEmbed()`, `MLP(width, ratio)`, `SwiGLU(width, ratio)`, `MoE(hidden, experts)` |
+| Recurrent cells | `RNN(hidden)`, `GRU(hidden)`, `MinGRU(hidden)`, `LSTM(hidden)` |
+| Regularization & mode | `Dropout(rate, train=True)`, `DropPath(rate, train=True)`, `GaussianNoise(std, train=True)`, `EMA(tau, warm=False)`, `eval_mode(model)` |
 
-# 5. Direct Execution
-output = eval_model.apply(batch_x)
-```
+`eval_mode(psnode)` specializes `train=False` across all training-mode layers (such as `BatchNorm` and `Dropout`), freezes running state subtrees (such as `BatchNorm` moments), and binds the learned parameters as a stateless inference `PNode`.
+
+### `nodejax.control`
+
+`control`, `closed_loop`, `observed_loop`, and `sum_junction` are exported directly from `nodejax`; the full block set lives in `nodejax.control`.
+
+| Category | Exports |
+| :--- | :--- |
+| Feedback loops | `closed_loop(pipe, output_spec=0.0)`, `feedback(pipe, output_spec=0.0)`, `observed_loop(pipe, belief_spec, output_spec=0.0)`, `sum_junction(**members)` |
+| Controllers | `PID(dt, dwrap=None)`, `PD(dt)` |
+| Signal & nonlinear blocks | `Gain()`, `Integrator()`, `Diff(dt)`, `Delay(warm=False)`, `EMA(dt, warm=False)`, `MovingAverage(window, warm=False)`, `Blend(dt)`, `Clamp()`, `ClampNorm()`, `Deadband()`, `Quantize(resolution)`, `RateLimit(dt)` |
+| Plants | `FirstOrder(dt, warm=False)`, `StateSpace()`, `Walker()` |
+
+The two `EMA` factories parameterize retention differently: `nn.EMA(tau, warm=False)` takes a static dimensionless retention factor `tau` (`tau * state + (1 - tau) * x`), whereas `control.EMA(dt, warm=False)` declares `tau` as a differentiable continuous-time constant in `param` (`alpha = 1 / (param.tau / dt + 1)`).
+
+## 7. Introspection, paths, and PyTree utilities
+
+### Structural inspection
+
+| Function | Signature | Output |
+| :--- | :--- | :--- |
+| `describe` | `describe(value) -> str` | Compact one-line summary of view stage, name, unbound statics, and `[P]` / `[C]` flags |
+| `tree_view` / `print_tree` | `tree_view(value, *, max_depth=None, unicode=True) -> str` | Hierarchical member tree with `[P]` (parametric) and `[C]` (cyclic) annotations |
+| `summary` / `print_summary` | `summary(value, *, max_depth=None, print_fn=None) -> str` | Tabular breakdown of member paths, parameter counts/shapes, and state shapes |
+| `statics_by_path` | `statics_by_path(value) -> frozendict` | Flat mapping from dotted member paths to recorded `@node` static `Struct` values |
+
+### Path and PyTree operations
+
+| Function | Signature | Behavior |
+| :--- | :--- | :--- |
+| `set_by_path` / `replace_by_path` | `set_by_path(tree, updates)` | Functional path-keyed updates (`{'encoder.w': new_w}`) over `Struct` and mapping PyTrees |
+| `tile` | `tile(tree, n)` | Broadcasts every leaf with a new leading axis of length `n` (`tree_broadcast_axis(tree, n, axis=0)`) |
+| `tree_broadcast_axis` | `tree_broadcast_axis(tree, count, axis)` | Inserts a broadcast axis of size `count` at `axis` across all leaves |
+| `tree_first`, `tree_last`, `tree_tail` | `(tree, axis=0)` | Indexes element `0`, element `-1`, or slice `1:` along `axis` on every leaf |
+| `tree_len` | `tree_len(tree) -> int` | Leading axis length (`shape[0]`) of the first leaf in `tree` |
+| `tree_reshape` | `tree_reshape(tree, shape, axes=1)` | Replaces the first `axes` dimensions of every leaf with `shape` |
+| `tree_swap_axes` | `tree_swap_axes(tree, axis_a, axis_b)` | Swaps `axis_a` and `axis_b` on every leaf (`jnp.swapaxes`) |
+| `tree_take` | `tree_take(tree, indices)` | Gathers `leaf[indices]` along axis 0 on every leaf |
+| `tree_stop_gradient` | `tree_stop_gradient(tree)` | Applies `jax.lax.stop_gradient` to all array leaves |

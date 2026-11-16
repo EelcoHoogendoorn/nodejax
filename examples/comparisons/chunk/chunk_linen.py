@@ -1,43 +1,13 @@
-"""Chunked sequences in flax LINEN, the lifted-transform API.
+"""Multi-horizon state lifetimes in Flax Linen.
 
-Kept beside the nnx version rather than replaced, because the contrast
-between them is worth as much as the contrast with the other frameworks:
-nnx exists in large part to remove what this file spends its lines on.
+Kept alongside `chunk_nnx.py` to record the four failure modes of Linen's lifted `nn.scan` API on nested stateful horizons:
 
-Original opening follows.
+1. Every `nn.scan` call site restates `variable_carry='stats'` and `variable_broadcast` policies rather than reading lifetime rules off `Norm`.
+2. `nn.scan` crashes with a PyTree carry mismatch if a state collection is created lazily on step 1 rather than pre-populated before scanning.
+3. `Module.init` executes one step of the body, advancing running statistics during initialization unless the caller constructs the initial `'stats'` dictionary manually.
+4. Freezing statistics per chunk forces the enclosing module to read `get_variable('stats', 'step')['norm']` by unchecked string path, silently returning default zeros and ones if the submodule path changes.
 
-Chunked sequences in flax linen, the whole run compiled as one program.
-
-Same task, same numbers, same references as `chunk_nodejax.py`. nn.scan over
-chunks of nn.scan over steps, so the comparison is about what the spelling
-costs rather than about python loop overhead.
-
-Four things found by making this run, none of them stylistic:
-
-1. THE ROUTING IS RESTATED AT EVERY LIFTED SITE. Each `nn.scan` must be told
-   how each kind of state crosses its axis: `variable_carry='stats'` at both
-   levels, `fnn.broadcast` for the snapshot at the inner one. The model does
-   not carry that knowledge; the transform sites do, and they are the places
-   that must change when the model gains a new kind of state.
-
-2. A COLLECTION CANNOT BE CARRIED BEFORE IT EXISTS. Running the scan straight
-   from `init` fails with a carry pytree-structure mismatch, because the body
-   creates `stats` on its first step and the carry going in has no such key.
-
-3. `init` EXECUTES THE MODULE, so initializing through it would hand back
-   statistics already advanced by one step. Between this and (2) the cold
-   variables are built by hand, which means writing out the shape, the dtype,
-   AND the collection path of state the model owns: `{'stats': {'step': ...}}`.
-
-4. THE BOUNDARY REACHES INTO A GRANDCHILD. The snapshot lives in the
-   normalizer's own collection, so the enclosing chunk fetches it by path,
-   `get_variable('stats', 'step')['norm']`, and passes it back down as an
-   argument. The parent has to know where its child's child keeps its state,
-   and a wrong path returns the DEFAULT rather than raising: making Norm a
-   submodule left this read silently producing zeros and ones until the
-   reference disagreed.
-
-Run directly:  python -m examples.comparisons.chunk.chunk_flax_linen
+Run directly with `python -m examples.comparisons.chunk.chunk_linen`.
 """
 
 import jax
@@ -45,7 +15,7 @@ import jax.numpy as jnp
 import flax.linen as fnn
 
 from examples.comparisons.chunk import chunk_common as task
-from nodejax.core.types import PyTree
+from typing import Any as PyTree
 
 
 class Norm(fnn.Module):

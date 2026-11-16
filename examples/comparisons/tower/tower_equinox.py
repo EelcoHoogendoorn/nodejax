@@ -34,7 +34,7 @@ import optax
 from examples.comparisons.tower.tower_common import (
     HIDDEN, LAYERS, MEMBERS, META_STEPS, INNER_LR, OUTER_LR, MOMENTUM,
     make_tasks)
-from nodejax.core.types import PyTree
+from typing import Any as PyTree
 
 
 def norm_step(stats: PyTree, x: jax.Array):

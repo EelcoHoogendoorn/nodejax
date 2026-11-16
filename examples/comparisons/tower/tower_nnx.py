@@ -1,30 +1,8 @@
-"""A direct Flax NNX implementation of the nested-transform tower.
+"""Bespoke Flax NNX implementation of the nested-transform `tower` benchmark.
 
-This is the same residual RNN committee, task, and training budget as
-`tower_nodejax.py`. NNX graph-aware transforms operate on the modules
-directly throughout:
+`nnx.vmap` constructs layer and committee axes while `nnx.scan` runs depth, time, inner adaptation, and outer meta-training. Because NNX modules carry no shared step/state contract across those axes, every transform site specifies its own `nnx.StateAxes` policy, `nnx.split_rngs` decoration, and hand-threaded `(h_layers, stats)` carry tuple, scattering the architecture across module methods and bespoke loop bodies. Factoring those policies into reusable wrappers in `tower_nnx_reusable.py` nearly doubles the file size (340+ lines) and still drops out of the wrapper protocol at `maml_fit`.
 
-- `nnx.vmap` constructs the layer and committee axes.
-- `nnx.scan` handles depth, time, inner adaptation, and meta-training.
-- `nnx.value_and_grad` differentiates cloned fast models inside MAML.
-- `nnx.Optimizer` updates both adapted models and the shared initialization.
-
-Each transform site states an axis policy. Params map over layers and members,
-broadcast over time and tasks, and carry through optimization. Recurrent values
-and running statistics are explicit carries in this formulation. The
-comparison with NodeJAX is therefore about whether those policies are supplied
-at transform sites or read from a common component contract, not about whether
-NNX can retain its module objects under nested transforms.
-
-This version specializes that orchestration to this one tower. That keeps it
-short: it is roughly half the size of `tower_flax_reusable.py`, which factors
-the same policies into reusable wrappers and puts the model graph in one
-assembly block. The trade is reasonable. A one-off NNX program does not need to
-invent a general component protocol; it can simply state the exact scans,
-axes, carries, and training loop it needs. The graph then lives partly in that
-orchestration rather than in one declarative construction site.
-
-Run directly:  python -m examples.comparisons.tower.tower_flax
+Run directly with `python -m examples.comparisons.tower.tower_nnx`.
 """
 
 import jax
@@ -35,7 +13,7 @@ from flax import nnx
 from examples.comparisons.tower.tower_common import (
     HIDDEN, LAYERS, MEMBERS, META_STEPS, INNER_LR, OUTER_LR, MOMENTUM,
     make_tasks)
-from nodejax.core.types import PyTree
+from typing import Any as PyTree
 
 
 # The running statistics are ordinary values in the rollout carry. NNX can

@@ -1,16 +1,12 @@
-# Framework comparison
+# Framework Comparison
 
-[`examples/comparisons/`](../examples/comparisons/) compares
-NodeJAX with Flax NNX, Equinox, Flax Linen, Haiku, PyTorch, and Keras.
+[`examples/comparisons/`](../examples/comparisons/) and [`examples/rl/`](../examples/rl/) implement identical tasks across NodeJAX, Flax NNX, Flax Linen, Equinox, Haiku, PyTorch, Keras 3 (on JAX), and Brax. Every suite shares a pure-NumPy/JAX `*_common.py` reference harness with zero `nodejax` imports in rival files, so line counts, edit counts, and failure modes come from runnable parity-checked code.
 
-## Complex composition
+## 1. Deeply transformed architectures (`tower` and `ttt`)
 
-The [composition stress test](../examples/comparisons/tower/) probes
-whether transformed components remain composable when transforms become the
-architecture. It combines a residual recurrent depth stack, an ensemble, time
-recurrence, task-local adaptation, second-order MAML, and outer Adam training.
+The [`tower`](../examples/comparisons/tower/) stress test stacks eight transformations into one program: a residual RNN cell, scanned over depth (`stack`), unrolled over time (`scanned`) behind a running normalizer, widened into a committee (`ensemble` + `reduce`), adapted per task (`finetune(train_step(...))`), mapped over task batches (`batch`), and meta-trained (`trained(train_step(...))`).
 
-The complete NodeJAX compute graph is five assembly lines:
+In NodeJAX ([`tower_nodejax.py`](../examples/comparisons/tower/tower_nodejax.py), 114 lines total), the entire architecture and nested meta-trainer is five lines:
 
 ```python
 rnn = stack(residual(RNN(HIDDEN)), n=LAYERS)
@@ -20,183 +16,92 @@ adapt = finetune(train_step(committee, mse, optax.sgd(INNER_LR)))
 return trained(train_step(batch(adapt), mse, optax.adam(OUTER_LR)))
 ```
 
-Every line consumes a Node and returns a Node. Parameter construction, state,
-RNG, axes, adaptation, and training remain in one composition.
+Every line consumes a `Node` and returns a `Node`. No rival framework's module abstraction survives this program intact:
 
-Direct NNX takes 183 source lines. Making its model graph compositional within
-a local recurrent-step protocol takes 344 and adds residual, serial, stack,
-scan, ensemble, and reduction abstractions. That closure ends at the model:
-MAML still uses another interface. The local contract is compositional within
-that model vocabulary, not across the complete transformed program.
-
-Every rival's native component covers only part of the program. NNX ends before
-`maml_fit`; Equinox before adaptation and training; PyTorch and Keras leave
-`Module` or `Layer` for `functional_call` or `stateless_call`. State falls into
-unrelated containers according to which API owns the loop. The results are not
-competitive with NodeJAX on readability.
-
-Keras does not belong beside PyTorch on compute, and the tower column measures
-the difference. On the JAX backend `keras.layers.RNN` lowers to one `lax.scan`
-and `keras.ops.vectorized_map` is `jax.vmap`, so the time and member axes stay
-vectorized: the traced meta step holds at 427 equations for 2 through 32
-members and compiles in 0.4 s, against PyTorch's 266 s for the same unrolled
-tape. Gradients are JAX's because Keras ships no gradient API, which is its own
-documented advice rather than an escape.
-
-What Keras has no representation for is the member axis. Constructing one
-cannot be mapped: `keras.initializers` reject a traced seed even though
-`keras.random.normal` accepts one, and `add_weight` under a vmap returns
-identical rows instead of failing, so a committee built that way trains as
-three copies of one member. The column builds three towers separately and
-stacks their weights, leaving `trainable_variables` a flat list in which
-nothing records which value is a parameter, which is a running statistic, or
-what a leading axis counts.
-
-The [test-time-training comparison](../examples/comparisons/ttt/) makes
-the split exact. NodeJAX composes inner `train_step`, `next_step_ttt`,
-`scanned`, `batch`, outer `train_step`, and `trained`; every result is a Node.
-NNX adds local `TTT`, `Batched`, `TrainStep`, axis, and carry policies around a
-cloned Module. Equinox carries its Module through raw JAX. Haiku and PyTorch
-move fast weights into dictionaries; PyTorch then uses `functional_call` and a
-handwritten update because `torch.optim` cannot update those values, which is
-pseudo-JAX inside PyTorch.
-
-Fast weights and hidden state advance together, yet rivals route one through
-native storage and the other through explicit carry. NodeJAX publishes both in
-one component state contract consumed unchanged by every enclosing transform.
-
-## Chunked recurrence: control over state lifetime
-
-The [`chunk`](../examples/comparisons/chunk/) comparison nests samples,
-chunks, and recordings to test whether state lifetime belongs to its component
-or leaks into control flow. Hidden state, normalization, and optimizer state
-each live across a different boundary.
-
-Rivals split that state among NNX Variables, scan `Carry`, optimizers, PyTorch
-buffers, detached tensors, or explicit tuples of params, optimizer state,
-model state, and hidden state. The division follows framework boundaries, not
-the values' lifetimes.
-
-Changing normalization to reset per recording touches these independent
-executable locations:
-
-| Framework | Locations | Owner of the rule |
+| Implementation | Total lines | Where the abstraction breaks |
 | :--- | ---: | :--- |
-| NodeJAX | 1 | The normalization Node |
-| Flax NNX | 2 | Inference and training scans |
-| Flax Linen | 4 | Collection policy and state construction |
-| Equinox | 6 | Initialization, returned state, and outer carries |
-| Haiku | 1 | A rollout that names nested state |
-| PyTorch | 2 | Loops that manipulate Module buffers |
+| NodeJAX (`tower_nodejax.py`) | 114 | Nowhere; architecture, state, adaptation, and meta-training stay in one `Node` algebra |
+| Flax NNX bespoke (`tower_nnx.py`) | 162 | Architecture is scattered across per-site `nnx.StateAxes`, `nnx.split_rngs`, and manual `(h_layers, stats)` carries |
+| Equinox (`tower_equinox.py`) | 168 | Modules cover parameters only; depth, time, committee, inner SGD, and outer Adam drop to raw `lax.scan` and `vmap` |
+| PyTorch (`tower_torch.py`) | 184 | Abandons `nn.Module` for `torch.func.functional_call` dictionaries and takes ~260 s on CPU to trace its unrolled tape (vs. 0.4 s on JAX) |
+| Keras 3 on JAX (`tower_keras.py`) | 205 | Compiles fast via `lax.scan` (427 jaxpr equations, 0.4 s), yet fails to construct an ensemble under `vmap` because `keras.initializers` crash on traced seeds and `add_weight` under `vmap` silently aliases every member onto one tensor so a 3-member committee trains as 3 identical clones |
+| Flax NNX reusable (`tower_nnx_reusable.py`) | 322 | Invents custom `Residual`, `Serial`, `Stack`, `Scan`, and `Ensemble` wrappers (2.8x NodeJAX's file size) and still abandons that protocol at `maml_fit` |
 
-NodeJAX makes the policy legible where it belongs:
-`state_reinit(RNN(), 'recording')`. An enclosing scan announces the boundary
-without inspecting state layout. Elsewhere lifetime is encoded in scans, carry
-tuples, collection paths, buffer mutation, or reset lines outside the model.
+The [`ttt`](../examples/comparisons/ttt/) benchmark isolates reusable online test-time training inside an outer meta-learner, testing each framework's `TTT` wrapper on both a stateless `MLP` predictor and a recurrent `RNN` predictor (1024 meta-weights each, verified in [`ttt_common.py`](../examples/comparisons/ttt/ttt_common.py)):
 
-Haiku's count of one is not equivalent: its rule belongs to one rollout; the
-NodeJAX rule belongs to the state and survives other rollouts and trainers.
-The competing code must be audited, not read: omitting a reset still produces a valid program with wrong semantics. In NodeJAX this scan-aligned lifetime policy stays attached to the stateful Node instead of leaking into enclosing control flow.
+| Implementation | Total lines | What reusable `TTT` requires |
+| :--- | ---: | :--- |
+| Raw JAX bespoke (`ttt_jax.py`) | 89 | Hand-rolled `RNN`-only `lax.scan` baseline with zero reusable wrapper; switching to `MLP` or another optimizer rewrites the scan body |
+| NodeJAX (`ttt_nodejax.py`) | 107 | One 3-line `ttt_meta(model)` function (`next_step_ttt(train_step(model, xent, learned_sgd(TTT_LR0)))`) wraps both stateless `MLP` (`PNode`) and stateful `RNN` (`PSNode`) with zero protocol branching |
+| PyTorch (`ttt_torch.py`) | 154 | Branches on `hasattr(model, 'init_carry')`, evicts weights out of `nn.Module` into dicts for `functional_call`, mangles `.` into `/` for `ParameterDict` rate keys, abandons `torch.optim` for inner updates, and unrolls time in Python |
+| Equinox (`ttt_equinox.py`) | 162 | Branches on `hasattr(model, 'init_carry')` because `eqx.Module` has no stateful call contract, partitions arrays via `eqx.filter` for rates, and threads `(fast, carry, prev)` through `lax.scan` by hand |
+| Haiku (`ttt_haiku.py`) | 164 | Nests an inner `hk.transform_with_state` inside the outer `hk.transform`, lifts inner parameters via `hk.lift`, registers a parallel `hk.get_parameter` rate tree, and threads `(fast_p, fast_s, prev)` by hand |
+| Flax NNX (`ttt_nnx.py`) | 178 | Branches on `hasattr(model, 'initialize_carry')` across NNX's split `Module(x)` vs. `Cell(carry, x)` protocols, clones `self.model` per sequence, subclasses `nnx.Param` (`Rate`) to separate inner and outer parameters, and threads `(carry, prev)` manually |
 
-## Recurrent PPO: where the abstraction stops
+## 2. Multi-horizon state lifetimes (`chunk`)
 
-[`ppo.py`](../examples/rl/ppo.py) implements recurrent PPO for fixed-horizon continuing control; it does not model data-dependent termination. [`distributions.py`](../examples/rl/distributions.py) supplies the learned Gaussian policy Node, and [`ppo_pendulum.py`](../examples/rl/ppo_pendulum.py) supplies the domain policy, value, data, and evaluation Nodes. [`test_ppo_pendulum.py`](../examples/rl/test_ppo_pendulum.py) assembles them over a weakly actuated pendulum with either a feed-forward or a GRU policy. The reference point is brax's [`ppo/train.py`](https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py). This is a comparison of authoring boundaries, not throughput or feature count.
+The [`chunk`](../examples/comparisons/chunk/) benchmark nests steps, chunks, recordings, and outer runs where hidden state, running normalization statistics, and optimizer momentum each reset on different boundaries. Every implementation is asserted against identical plain-JAX numerical references in [`chunk_common.py`](../examples/comparisons/chunk/chunk_common.py).
 
-Brax's network abstraction ends at feed-forward policy and value calls. Its `train` function then constructs and operates the learning system: optimizer, normalizer, environment rollout, minibatches, nested updates, device coordination, evaluation, and checkpointing. Its nested `minibatch_step`, `sgd_step`, `training_step`, and `training_epoch` functions share dependencies through closure capture. `TrainingState` names only part of the program state: the outer training scan still carries `(TrainingState, environment state, key)`, while the optimization scan carries `(optimizer state, params, key)`. One host-side function owns nearly every lifecycle, and a new concern cuts across its private carries and conventions.
+Changing normalization statistics to reset per recording exposes who actually owns state lifetimes:
 
-The NodeJAX example leaves PPO explicit: generalized advantage estimation, chunking, shuffling, clipping, and the actor and critic schedules remain statements about the algorithm. Node contracts remove a different class of authoring work:
+| Framework | Independent edits | Failure mode when one edit is missed |
+| :--- | ---: | :--- |
+| NodeJAX (`chunk_nodejax.py`, 260 lines) | 1 | `state_reinit(Norm(), 'recording')` on the owning `Node`; unclaimed boundary names raise an immediate error |
+| Haiku (`chunk_haiku.py`, 251 lines) | 1 | Reset logic lives inside one outer rollout function by string key; reusing the block in another rollout or trainer silently drops the reset |
+| Flax NNX (`chunk_nnx.py`, 274 lines) | 2 | Inference and training scans diverge silently |
+| PyTorch (`chunk_torch.py`, 326 lines) | 2 | Imperative buffer-reset loops diverge between evaluation and training |
+| Flax Linen (`chunk_linen.py`, 294 lines) | 4 | Unchecked string collection paths and manual init dicts silently compute wrong statistics |
+| Equinox (`chunk_equinox.py`, 313 lines) | 6 | Initialization, step return tuples, and outer carries still type-check and run with stale state |
 
-- no anonymous carry tuples
-- no towers of nested transformed functions
-- no manual RNG splitting or RNG keys in scan carries
-- no recurrent state threaded through policy calls or trainer state
-- no hand-authored training-state dataclass
-- no host-side epoch or minibatch loops, and no metric buffers: updates are nested scans over one permutation array, and training history is the program's aux
-- no separately maintained recurrent-state buffer: the scanned Node records its state alongside the rollout
+In NNX, Linen, Equinox, and PyTorch, state lifetimes are encoded implicitly in surrounding loop plumbing rather than on the stateful unit. Omitting one reset line produces a valid program that silently computes the wrong trajectory, forcing a reader to audit every enclosing loop body.
 
-One honest qualification: the pendulum is continuing control, so every episode boundary here is structural and declared, and no `done` flag exists to handle. Part of brax's carry traffic exists because its tasks terminate. A terminating environment would not change the authoring boundary, though: the per-world reset is one `where` over the plant's own state inside the plant's apply, written for a single world with a scalar `done`, vectorized by `batch`, and invisible to the scans, trainers, and replay around it. What no framework removes is the algorithm content that termination adds, such as masking inside an advantage recursion; that stays an explicit statement here as anywhere.
+## 3. Train and evaluation mode (`mode`)
 
-One `PPO` Node holds the sampler, the value, and the actor and critic trainers as members, receiving them assembled. Scans around the trainer Nodes express minibatches, epochs, and critic passes. The training program composes the training-data Node with `carried(ppo_learner(...))`, so one jitted Node application runs every training iteration and returns the iteration bound to its final state, with the trained policy read out of the actor trainer. Both optimizer states are ordinary Node state rather than locals in one host-side training function.
+The [`mode`](../examples/comparisons/mode/) benchmark trains a `Dropout` + `BatchNorm` network and builds a deterministic single-sample evaluator with frozen statistics:
 
-The policy exposes the same contract with identity or GRU memory. The policy owns `sample`, `logprob`, and `entropy` as methods and the plant owns `observe`, so distribution and observation semantics ride their Nodes through batching, scanning, and the trainers; brax also has distribution objects, routed into each loss function beside the networks. The PPO author still chooses sequence chunks and selects the recorded state at each chunk boundary, because those are PPO decisions. Replay then initializes a fresh scan from that ordinary data. A test verifies the property in both directions: every chunk reproduces the log-probabilities observed during collection, and replay from the neighboring recorded states does not, so the check cannot pass vacuously.
+- PyTorch (`mode_torch.py`, 71 lines) and Flax NNX (`mode_nnx.py`, 71 lines) mutate mode booleans in place on shared module instances, leaving stochastic machinery and mutable stat slots alive on the object behind flag discipline.
+- Haiku (`mode_haiku.py`, 79 lines) pollutes every forward call signature with a threaded `is_training: bool` flag.
+- Equinox (`mode_equinox.py`, 108 lines) rewrites boolean leaves via `eqx.nn.inference_mode` while still forcing every caller to thread `eqx.nn.State` in and out by hand and pass `key=None`.
+- NodeJAX (`mode_nodejax.py`, 71 lines) builds a distinct evaluation `Node` via `nn.eval_mode(final)` (`final.specialize(**{'*.train': False})` plus `tree_freeze(..., tag='running_stats')`). `Dropout` specializes to the identity so the evaluator rejects `rng` keys outright, and `BatchNorm` statistics freeze into constants (`not evaluator.cyclic`).
 
-Stock brax PPO can be made recurrent, but recurrence crosses its acting, rollout, storage, minibatching, loss, and evaluation interfaces because the network abstraction does not represent recurrent state transport. In this fixed-horizon NodeJAX example it crosses the places where PPO cares about chunk boundaries; state transport remains the responsibility of the Node and its transforms. Brax implements more production features, but adding features to that training function does not improve its authoring boundary.
+## 4. Reusable transforms and leaky module protocols (`residual` and `lift`)
 
-The same separation holds for SHAC: [`shac.py`](../examples/rl/shac.py) contains the injected learner and training program, while [`shac_pendulum.py`](../examples/rl/shac_pendulum.py) contains its domain Nodes. The PPO and SHAC assemblies share the `Pendulum` plant and use `ControlledStep` for deterministic closed-loop rollouts. Their policy and value Nodes remain algorithm-specific.
+Writing a toy unary `x + body(x)` works in any library. [`residual`](../examples/comparisons/residual/) and [`lift`](../examples/comparisons/lift/) test what happens when `residual` and `stack` have to act as general library transforms over stateful, stochastic, input-primed, `Aux`-emitting, and self-nested blocks.
 
-## Reusable transforms
+Both Flax NNX (`residual_nnx.py`, 244 lines; `lift_nnx.py`, 344 lines) and Equinox (`residual_equinox.py`, 269 lines; `lift_equinox.py`, 359 lines) fracture across incompatible state protocols inside their own ecosystems:
 
-The [`residual`](../examples/comparisons/residual/) comparison asks for compositionality in the smallest case: `input + body(input)`. NodeJAX, NNX, and Equinox can all implement and self-compose that unary case. The earlier NNX and Equinox RNG failures were mistakes in the comparison wrappers, not framework limits.
+- NNX splits graph `Variable` mutation from functional RNN `(carry, input)` cells, so a general NNX `Residual` cannot identify the signal argument or preserve the cell interface expected by `nnx.RNN` (`functional-state=NO cell-interface=NO`). Worse, if `body(x)` mutates a `Variable` and the residual `+` then fails on a shape mismatch, the module is left mutated in a corrupted half-stepped state.
+- Equinox's `StatefulLayer` (`eqx.nn.State`) cannot cross into lifted `stack` because `eqx.nn.StateIndex` fails to create independent per-layer state slots under `filter_vmap`, forcing `lift_equinox.py` onto a second `(successor, output)` convention that `StatefulLayer`-based `Residual` cannot compose (`native-state=yes successor-state=NO`). Similarly, `State.set` invalidates the old `State` before `x + out` runs, corrupting state on downstream shape errors.
+- Both rival `stack` implementations inspect `inspect.signature(member.__call__)` to detect RNG consumption. Because `LayerStack.__call__` must declare an optional `rng` parameter in case it wraps a stochastic layer, inspection confuses forwarding `rng` with requiring `rng`, breaking `stack(stack(bare_layer))` unless the author bolts on explicit `takes_rng`, `WithAux`, and `make_layer` declarations that piecemeal reinvent NodeJAX's `Def` and `Contract`.
 
-The limit appears when residual must accept arbitrary framework-native members. NNX graph `Variable` state and explicit functional `Carry` use different calls and initialization interfaces. Equinox native `StatefulLayer` and `State` work through residual, while the returned-successor convention needed by the lifted-stack comparison is a different protocol again. A wrapper cannot infer which argument is the signal, where the output lives, how state starts, or which member methods an enclosing API requires.
+NodeJAX's `residual` is 6 lines in [`nodejax/transforms/wiring/residual.py`](../nodejax/transforms/wiring/residual.py) (`residual_nodejax.py` 197 lines; `lift_nodejax.py` 243 lines) because every `Leaf`, `Composite`, `Wrapper`, and transform product already normalizes to one `Def` and `Contract`.
 
-The [lifted-stack comparison](../examples/comparisons/lift/) makes the consequence concrete: a state mechanism that composes through one transform may not compose through the next. Supporting each form requires another adapter for construction, state, RNG, aux, call binding, and member interfaces.
+## 5. Recurrent reinforcement learning (`ppo`, `shac`, and `sac` vs. Brax)
 
-A truly set-and-forget residual therefore needs something close to NodeJAX's Def and Contract machinery. The six-line NodeJAX transform is small because those facts already have one representation, not because forwarding them is intrinsically simple. Its own apply remains explicitly unary; supporting additional runtime arguments would still require the transform to declare which field is the residual signal.
+[`examples/rl/ppo.py`](../examples/rl/ppo.py), [`examples/rl/shac.py`](../examples/rl/shac.py), and [`examples/rl/sac.py`](../examples/rl/sac.py) test where abstractions stop in full RL algorithms compared against Brax's [`ppo/train.py`](https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py).
 
-## Generic construction
+Brax's network abstraction dies at a stateless feed-forward call. Everything above that call lives in one monolithic `train` function of nested closures (`minibatch_step`, `sgd_step`, `training_step`, `training_epoch`) passing ad-hoc carry tuples (`(TrainingState, env_state, key)` outside, `(opt_state, params, key)` inside) where `TrainingState` fails to hold the whole training state. Making Brax PPO recurrent cuts across acting, rollout storage, minibatch slicing, loss signatures, and evaluation because nothing in its module layer transports state. Brax ships broader production features (multi-device `pmap`, episodic `done` resets, evaluation hooks, checkpointing), whereas its module boundary helps zero lines above the MLP.
 
-The [`generics`](../examples/comparisons/generics/) comparison leaves
-width, depth, ensemble size, and nested temperature unresolved. NodeJAX keeps
-that unfinished architecture composable and specializes it by tree path.
+In NodeJAX, policies (feed-forward or `GRU`), physical plants, `nn.EMA` target networks, Optax trainers, and off-policy replay (`Buffer(capacity)` in [`replay.py`](../examples/rl/replay.py)) are all ordinary `Node`s sharing one state carry:
 
-Keras propagates input fan-in through its Functional graph and lazy
-`build(input_shape)`. It therefore matches NodeJAX on input-derived parameter
-shape. Width, depth, ensemble size, and temperature must still be supplied to
-a Python builder before a Keras Model exists.
+- Swapping a feed-forward policy for a `GRU` policy changes zero lines in `ControlledStep`, `SHACIteration`, `PPOIteration`, or `SACIteration`.
+- `PPOIteration` records `policy.state` during collection via `scan(..., record=True)` and resumes shuffled chunks from their recorded initial states via `ChunkReplay` (`self.run.bind(state=initial)(...)`), with zero hand-rolled state buffers or RNG carries.
+- `SACIteration` keeps its ring buffer, cursor, and fill count as ordinary `Node` state, compiling rollout collection, buffer insertion, minibatch sampling, and gradient updates into a single `scanned` transition.
 
-NNX, Equinox, and PyTorch forward both input fan-in and architectural statics
-through their constructor chains. The checked forwarding counts are NodeJAX 0,
-Keras 4, and NNX, Equinox, and PyTorch 5. NodeJAX separates input-derived
-construction from arbitrary open statics and composes both.
+## 6. Deferred configuration, priming, and weight tying (`generics`, `imu`, and `tie`)
 
-NodeJAX wins this comparison. It is the only checked implementation where the
-unfinished architecture is itself a composable value. Keras, NNX, Equinox,
-and PyTorch compose only after a Python builder or constructor has fixed the
-architectural statics.
+In [`generics`](../examples/comparisons/generics/), width, depth, ensemble size, and inner `Block` temperature are left unspecified while assembling `serial(entry=nn.Linear(), blocks=stack(Block()), readout=nn.Linear(1))`, then resolved by path via `.specialize(...)` (`generics_nodejax.py`, 104 lines, `THREADING_TAX = 0`). NNX (`generics_nnx.py`, 139 lines), PyTorch (`generics_torch.py`, 143 lines), and Equinox (`generics_equinox.py`, 183 lines) cannot compose an unfinished architecture at all, forwarding 5 configuration arguments through intermediate `__init__` chains that never use them (`THREADING_TAX = 5`). Keras 3 (`generics_keras.py`, 250 lines) matches NodeJAX on dataflow-inferred fan-in via lazy `build(input_shape)`, while still forwarding 4 architectural hyperparameters through Python builder functions (`THREADING_TAX = 4`).
 
-## IMU: setup and input propagation
+In [`imu`](../examples/comparisons/imu/), chaining two input-primed finite derivatives, white noise, Ornstein-Uhlenbeck drift, and quantization (`Derivative >> Derivative >> Noise >> Drift >> Quantize`) is a single `>>` expression in NodeJAX (`imu_nodejax.py`, 90 lines) whose priming, physical state container, and call-time `KeyStream` splitting derive from the leaves. NNX (`imu_nnx.py`, 101 lines) wires priming samples and named `nnx.Rngs` streams manually inside `IMU.__init__`, while Equinox (`imu_equinox.py`, 115 lines) repeats the stage topology across `IMUState`, `IMU.init`, and `IMU.step` plus manual step-key splitting so inserting one stateful stage requires four coordinated edits.
 
-The [`imu`](../examples/comparisons/imu/) pipeline combines derivatives
-requiring priming values, additive noise, drifting random bias, and
-quantization to test whether composition also propagates setup.
+In [`tie`](../examples/comparisons/tie/), tying input and output embeddings is a five-way capability draw across NodeJAX (`tie_nodejax.py`, 62 lines), Haiku (`tie_haiku.py`, 81 lines), Flax NNX (`tie_nnx.py`, 89 lines), PyTorch (`tie_torch.py`, 89 lines), and Equinox's `eqx.nn.Shared` (`tie_equinox.py`, 115 lines); all five keep a single parameter leaf for the optimizer and produce zero drift (only naive Equinox array aliasing duplicates the leaf on PyTree flatten and drifts on step 1).
 
-NodeJAX derives the pipeline's priming, state, input, and RNG behavior from the
-leaf Nodes under ordinary serial composition. NNX construction routes priming
-values and named RNG streams to the members. Equinox defines and threads the
-complete state container through the pipeline.
+## Verdicts
 
-Input shape, priming values, and entropy must reach every affected component.
-Only NodeJAX's forward pipeline also composes that setup. NNX wires priming and
-RNG in `IMU.__init__`; Equinox repeats the topology in `IMUState`, `init`, and
-`step`.
-
-## Parameter sharing
-
-The [`tie`](../examples/comparisons/tie/) comparison isolates how each
-framework represents one shared parameter. NNX and PyTorch reuse one object;
-Haiku reuses a parameter path; Equinox uses `eqx.nn.Shared`; NodeJAX stores one
-parameter value and explicitly routes it to both uses.
-
-NNX, PyTorch, Haiku, `eqx.nn.Shared`, and NodeJAX produce zero drift. The naive
-Equinox object copy drifts. The NodeJAX parameter tree contains one table, and
-the Node definition routes it to both uses. There is no capability advantage
-here: NNX and PyTorch use object identity, while NodeJAX uses a declarative
-route.
-
-## Findings
-
-1. NodeJAX wins the complex-composition comparison on readability. Its entire
-   transformed architecture is the five-line definition; the alternatives
-   distribute it across carries, axis declarations, variable mappings, and
-   training procedures.
-2. NodeJAX wins scan-aligned state-lifetime composition. Boundary policy stays attached to the stateful Node while enclosing scans and trainers change.
-3. NodeJAX wins reusable transform authoring. Its transforms preserve one common contract. NNX and Equinox compose within selected local protocols, but transparent reuse across construction, initialization, calls, state, aux, and member interfaces requires protocol-specific adapters that collectively recreate such a contract.
-4. NodeJAX wins generic construction and composed setup. Unresolved statics,
-   priming, parameter construction, and RNG routing remain in program
-   composition instead of constructor plumbing.
-5. RNG is as effortless as in PyTorch without giving up JAX's referential
-   transparency. A caller supplies one key exactly when the graph consumes
-   entropy; transforms derive splitting and forwarding from the contract.
-6. Parameter sharing is a draw on capability. The frameworks differ only in
-   whether sharing is represented by identity, path, or a declarative route.
+| Dimension | Suites | Outcome |
+| :--- | :--- | :--- |
+| Whole-program closure | `tower`, `ttt`, `rl` | Rival module abstractions stop at the forward pass of one network and collapse into closure soup, `functional_call` dicts, `hasattr` carry branching, or 320-line partial wrappers once adaptation, physics rollouts, replay buffers, and meta-optimizers enter; NodeJAX keeps the full program inside one `Node` algebra |
+| State lifetimes and modes | `chunk`, `mode` | Encoding reset schedules and train/eval modes in loop carries or mutable flags scatters invariants across 2 to 6 sites where one missed line silently computes wrong results; attaching `state_reinit` and `nn.eval_mode` to the `Node` reduces those edits to 1 checked declaration |
+| Transform composability | `residual`, `lift` | Signature inspection and split state protocols (`Variable` vs. `Carry`, `StatefulLayer` vs. `(successor, output)`) fail on nested or cross-protocol composition; one normalized `Def` and `Contract` makes a 6-line wrapper work across every `Node` |
+| Deferred sizing and setup | `generics`, `imu` | `Generic` blueprints eliminate constructor-chain parameter forwarding (0 forwarded args vs. 4-5), and `>>` composes input priming and call-time `KeyStream` routing alongside forward execution |
+| Weight sharing | `tie` | Capability tie across NodeJAX `tie`, NNX, PyTorch, Haiku, and `eqx.nn.Shared` |

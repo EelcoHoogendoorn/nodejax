@@ -1,55 +1,21 @@
-"""Tied embeddings, the torch side of the sharing comparison.
+"""Tied input/output embeddings in PyTorch.
 
-Self-contained: no nodejax import.
+Assigning `self.unembed.table = self.embed.table` shares one `nn.Parameter` instance across two submodules, and `model.parameters()` deduplicates parameters by object identity so `torch.optim` updates a single tensor with zero drift.
 
-The model is built from components (an Embed block, an RNN cell, an
-Unembed head), so the tie must cross a composition boundary: the two
-views of the table live in different modules.
-
-torch shares by OBJECT REFERENCE, and it is the standard practice the
-ecosystem calls weight tying: assign one module's nn.Parameter into the
-other after construction (the transformer idiom head.weight =
-embedding.weight), and parameters() deduplicates by identity, so the
-optimizer sees one table and both uses accumulate into its one .grad.
-It works, and this file shows it holding: no drift, one copy.
-
-As in flax, the sharing lives in Python object identity rather than in
-any value the framework could serialize or transform: a state_dict
-round trip writes the table twice under two keys, and whether a load
-re-ties them is a per-tool convention, not a property of the model.
-
-torch, like flax, is a reference-exhibit dependency: the file runs in
-any environment with torch installed.
-
-Run directly:  python -m examples.comparisons.tie.tie_torch
+Run directly with `python -m examples.comparisons.tie.tie_torch`.
 """
 
 import os
 
-# torch and conda's mkl each ship a libomp on macOS; the flag lets one
-# process host both copies so the import survives.
 os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
 
 import numpy as np
 import torch
 from torch import nn
 
-VOCAB, DIM = 8, 6
-POSITIONS, STEPS = 256, 200
-LR = 0.03
-CONCENTRATION = 2.0
-
-
-def make_data(rs):
-    logits = CONCENTRATION * rs.standard_normal((VOCAB, VOCAB))
-    P = np.exp(logits)
-    P /= P.sum(-1, keepdims=True)
-    tokens = np.zeros(POSITIONS + 1, dtype=np.int64)
-    state = rs.randint(VOCAB)
-    for t in range(POSITIONS + 1):
-        tokens[t] = state
-        state = (P[state].cumsum() > rs.random()).argmax()
-    return torch.tensor(tokens[:-1]), torch.tensor(tokens[1:])
+from examples.comparisons.tie.tie_common import (
+    DIM, LR, STEPS, VOCAB, make_data, report,
+)
 
 
 class Embed(nn.Module):
@@ -57,16 +23,16 @@ class Embed(nn.Module):
         super().__init__()
         self.table = nn.Parameter(0.3 * torch.randn(VOCAB, DIM))
 
-    def forward(self, token):
+    def forward(self, token: torch.Tensor) -> torch.Tensor:
         return self.table[token]
 
 
 class RNNCell(nn.Module):
     def __init__(self):
         super().__init__()
-        self.wh = nn.Parameter(0.5 * torch.randn(DIM, DIM) / DIM ** 0.5)
+        self.wh = nn.Parameter(0.5 * torch.randn(DIM, DIM) / (DIM ** 0.5))
 
-    def forward(self, h, x):
+    def forward(self, h: torch.Tensor, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         h = torch.tanh(x + self.wh @ h)
         return h, h
 
@@ -76,7 +42,7 @@ class Unembed(nn.Module):
         super().__init__()
         self.table = nn.Parameter(0.3 * torch.randn(VOCAB, DIM))
 
-    def forward(self, h):
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
         return h @ self.table.T
 
 
@@ -86,12 +52,9 @@ class LM(nn.Module):
         self.embed = Embed()
         self.cell = RNNCell()
         self.unembed = Unembed()
-        # the sharing crosses the component boundary after construction,
-        # the transformer idiom head.weight = embedding.weight: one
-        # Parameter object, two registrations, parameters() deduplicates
         self.unembed.table = self.embed.table
 
-    def forward(self, ids):
+    def forward(self, ids: torch.Tensor) -> torch.Tensor:
         h = torch.zeros(DIM)
         logits = []
         for token in ids:
@@ -102,7 +65,9 @@ class LM(nn.Module):
 
 def main() -> None:
     torch.manual_seed(0)
-    prev, cur = make_data(np.random.RandomState(0))
+    prev_np, cur_np = make_data(np.random.RandomState(0))
+    prev = torch.as_tensor(prev_np, dtype=torch.long)
+    cur = torch.as_tensor(cur_np, dtype=torch.long)
     model = LM()
     opt = torch.optim.Adam(model.parameters(), lr=LR)
 
@@ -114,12 +79,10 @@ def main() -> None:
         opt.zero_grad()
         loss.backward()
         opt.step()
-        losses.append(loss.item())
+        losses.append(float(loss.detach()))
 
-    drift = float(
-        (model.embed.table - model.unembed.table).abs().max().detach())
-    print(f'{"torch":14s} table_copies={len(tables)} drift={drift:.2e} '
-          f'loss {losses[0]:.2f} -> {losses[-1]:.2f}', flush=True)
+    drift = float((model.embed.table - model.unembed.table).abs().max().detach())
+    report('torch', len(tables), drift, losses[0], losses[-1])
 
 
 if __name__ == '__main__':

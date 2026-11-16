@@ -1,41 +1,12 @@
-"""Chunked sequences in flax nnx: state on the object, annotated by TYPE.
+"""Multi-horizon state lifetimes in Flax NNX.
 
-Same task, same numbers, same references as `chunk_nodejax.py`. nnx.scan over
-chunks of nnx.scan over steps, so the comparison is about what the spelling
-cost.
+Compared against `chunk_linen.py`, NNX avoids Linen's hand-built initialization dictionary and string collection names by storing running statistics on `Norm` as `nnx.Variable` attributes and annotating `nnx.scan` via `nnx.StateAxes`. Three structural costs remain:
 
-Read beside `chunk_flax_linen.py`, which is the same task in flax's older
-lifted-transform API. Most of what that file spends its lines on is gone here,
-and the difference is worth as much as the difference from the other
-frameworks:
+1. Every `nnx.scan` site repeats the `StateAxes` annotation so parameters broadcast while variables carry.
+2. Freezing normalization statistics across a chunk requires the outer chunk body to reach into `model.norm.mean` and `model.norm.var` and pass snapshots back down.
+3. Recurrent hidden state rides the functional `nnx.scan` carry while normalization statistics mutate on the module, so changing `Norm`'s reset horizon to `'recording'` requires two independent edits across the inference and training rollout loops.
 
-  NO HAND-BUILT VARIABLE TREE. The module owns its state and is constructed
-  the ordinary way. Linen could not init through the nested scans at all, so
-  the caller wrote out a dict mirroring the module nesting, at a path nothing
-  checked, and every submodule added a level to a literal in another function.
-
-  ANNOTATED BY TYPE, NOT BY NAME. One `nnx.StateAxes` says what happens to
-  nnx.Param and what happens to nnx.Variable. Linen named string collections
-  at every lift, four of them, and a missed one failed with a path rather than
-  a missing annotation.
-
-WHAT IT STILL COSTS, and this is the part the API change does not touch:
-
-  THE ANNOTATION IS PER LIFT. Both scans repeat the same StateAxes, and each
-  one has to be told again that params broadcast and state carries. It is one
-  line rather than three, and it is still a line per lift.
-
-  THE BOUNDARY REACHES IN. Holding the statistics for a chunk means reading
-  `model.norm.mean` from the chunk body and passing it down, because a
-  snapshot is a value and values are not what the module mechanism carries.
-  The parent knows where its child keeps its state, exactly as before.
-
-  THE TWO LIFETIMES ARE STILL TWO KINDS OF THING. The statistics are module
-  state; the hidden carry is the scan's carry, an ordinary value. Which one a
-  piece goes in is decided by whether the scan carries it, and separating the
-  recording lifetime from the chunk lifetime is a line in a body either way.
-
-Run directly:  python -m examples.comparisons.chunk.chunk_flax
+Run directly with `python -m examples.comparisons.chunk.chunk_nnx`.
 """
 
 import jax
@@ -44,7 +15,7 @@ import optax
 from flax import nnx
 
 from examples.comparisons.chunk import chunk_common as task
-from nodejax.core.types import PyTree
+from typing import Any as PyTree
 
 # Params broadcast, everything else carries. One annotation, by TYPE, and the
 # only thing either scan has to be told.

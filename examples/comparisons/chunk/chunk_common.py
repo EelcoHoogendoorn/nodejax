@@ -92,7 +92,7 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
-from nodejax.core.types import PyTree
+from typing import Any as PyTree
 
 
 def _once(fn: Callable):

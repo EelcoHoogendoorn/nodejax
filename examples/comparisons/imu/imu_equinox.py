@@ -1,59 +1,31 @@
-"""The compositional IMU, in equinox: what state costs without a contract.
+"""Compositional IMU sensor pipeline in Equinox.
 
-The nodejax version is five nodes and one line of composition
-(`imu_nodejax.py`):
+Equinox represents module parameters as PyTrees while leaving state threading, input priming, and PRNG key routing to user code. Building the five-stage IMU requires repeating the stage topology across `IMUState`, `IMU.init`, and `IMU.step`, plus splitting step keys across stochastic stages by hand; inserting one stateful stage mid-pipe requires four coordinated edits.
 
-    imu = derivative(DT) >> derivative(DT) >> noise() >> drift(DT) >> quantizer(RES)
-
-with state priming, key routing, and state threading all derived from
-the component definitions. This file is the same sensor in idiomatic
-equinox, which is excellent at the parameter half (modules are pytrees)
-and deliberately agnostic about the state half. The census of what that
-agnosticism costs, at five members:
-
-- a hand-written state container naming every member's state;
-- a hand-written init composing every member's state, in order, with
-  the key split count maintained by hand and the priming value
-  threaded to the members that want it;
-- a step function threading each member's state in and out by name, in
-  the right order, rebuilding the container every step.
-
-Every piece is idiomatic equinox and none of it is domain
-physics. The recomposition drag: inserting one stateful member mid-pipe
-touches the container, the init, the split count, and the step, four
-places in this file, plus every caller holding the container's shape.
-The nodejax diff for the same change is one term in the `>>` line.
-For larger composed stateful simulations, this becomes very tedious and fragile.
-
-Run directly:  python -m examples.comparisons.imu.imu_equinox
+Run directly with `python -m examples.comparisons.imu.imu_equinox`.
 """
 
 import equinox as eqx
 import jax
-
-from nodejax import Node
 import jax.numpy as jnp
-import numpy as np
 
-DT = 0.01
-RES = 0.05
+from examples.comparisons.imu.imu_common import (
+    DENSITY, DRIFT_DENSITY, DT, RES, TAU, trajectory, verify_imu,
+)
 
-
-# --- the components: params as modules (equinox's strength) ---
 
 class Derivative(eqx.Module):
     dt: float = eqx.field(static=True)
 
-    def __call__(self, last, x):
-        return x, (x - last) / self.dt          # (state, output), by convention
+    def __call__(self, last: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return x, (x - last) / self.dt
 
 
 class Noise(eqx.Module):
     density: jax.Array
 
-    def __call__(self, key, x):
-        key, sub = jax.random.split(key)
-        return key, x + self.density * jax.random.normal(sub)
+    def __call__(self, x: jax.Array, key: jax.Array) -> jax.Array:
+        return x + self.density * jax.random.normal(key, jnp.shape(x))
 
 
 class Drift(eqx.Module):
@@ -61,29 +33,26 @@ class Drift(eqx.Module):
     tau: jax.Array
     dt: float = eqx.field(static=True)
 
-    def __call__(self, state, x):
-        bias, key = state
-        key, sub = jax.random.split(key)
-        step = self.density * jnp.sqrt(self.dt) * jax.random.normal(sub)
-        bias = bias * (1.0 - self.dt / self.tau) + step
-        return (bias, key), x + bias
+    def __call__(self, bias: jax.Array, x: jax.Array,
+                 key: jax.Array) -> tuple[jax.Array, jax.Array]:
+        step = self.density * jnp.sqrt(self.dt) * jax.random.normal(key, jnp.shape(x))
+        new_bias = bias * (1.0 - self.dt / self.tau) + step
+        return new_bias, x + new_bias
 
 
 class Quantizer(eqx.Module):
     resolution: float = eqx.field(static=True)
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return jnp.round(x / self.resolution) * self.resolution
 
 
-# --- the state half: everything below is glue, not physics ---
-
 class IMUState(eqx.Module):
-    """One field per stateful member, maintained by hand."""
+    """Explicit state container holding one field per stateful stage."""
+
     d1_last: jax.Array
     d2_last: jax.Array
-    noise_key: jax.Array
-    drift: tuple
+    drift_bias: jax.Array
 
 
 class IMU(eqx.Module):
@@ -93,45 +62,53 @@ class IMU(eqx.Module):
     drift: Drift
     quant: Quantizer
 
-    def init(self, x0, key):
-        # compose every member's init by hand: the split count tracks the
-        # number of consumers, the priming value reaches the derivatives
-        k_noise, k_drift = jax.random.split(key)
-        return IMUState(d1_last=jnp.asarray(x0),
-                        d2_last=jnp.asarray(0.0),
-                        noise_key=k_noise,
-                        drift=(jnp.asarray(0.0), k_drift))
+    def init(self, x0: jax.Array) -> IMUState:
+        _, v0 = self.d1(jnp.asarray(x0), jnp.asarray(x0))
+        return IMUState(
+            d1_last=jnp.asarray(x0),
+            d2_last=v0,
+            drift_bias=jnp.asarray(0.0),
+        )
 
-    def step(self, state, x):
-        # thread each member's state in and out, in order, by name
+    def step(self, state: IMUState, x: jax.Array,
+             key: jax.Array) -> tuple[IMUState, jax.Array]:
+        k_noise, k_drift = jax.random.split(key)
         d1_last, v = self.d1(state.d1_last, x)
         d2_last, a = self.d2(state.d2_last, v)
-        noise_key, a = self.noise(state.noise_key, a)
-        drift, a = self.drift(state.drift, a)
+        a = self.noise(a, k_noise)
+        drift_bias, a = self.drift(state.drift_bias, a, k_drift)
         a = self.quant(a)
-        return IMUState(d1_last=d1_last, d2_last=d2_last,
-                        noise_key=noise_key, drift=drift), a
+        return IMUState(d1_last=d1_last, d2_last=d2_last, drift_bias=drift_bias), a
 
 
-def make_imu(density: float=0.05, tau: float=1.0, drift_density: float=0.2) -> Node:
-    return IMU(d1=Derivative(DT), d2=Derivative(DT),
-               noise=Noise(density=jnp.asarray(density)),
-               drift=Drift(density=jnp.asarray(drift_density), tau=jnp.asarray(tau), dt=DT),
-               quant=Quantizer(RES))
+def make_imu(density: float = DENSITY, tau: float = TAU,
+             drift_density: float = DRIFT_DENSITY) -> IMU:
+    return IMU(
+        d1=Derivative(DT),
+        d2=Derivative(DT),
+        noise=Noise(density=jnp.asarray(density)),
+        drift=Drift(density=jnp.asarray(drift_density), tau=jnp.asarray(tau), dt=DT),
+        quant=Quantizer(RES),
+    )
+
+
+def run(imu: IMU, positions: jax.Array, seed: int = 0) -> jax.Array:
+    state = imu.init(positions[0])
+    keys = jax.random.split(jax.random.PRNGKey(seed), positions.shape[0])
+    _, accel = jax.lax.scan(
+        lambda s, elem: imu.step(s, elem[0], elem[1]),
+        state,
+        (positions, keys),
+    )
+    return accel
 
 
 def main() -> None:
-    t = np.arange(0.0, 2.0 * np.pi, DT)
-    positions = jnp.asarray(np.sin(t) + 2.0)
-
-    imu = make_imu()
-    state = imu.init(positions[0], jax.random.PRNGKey(0))
-    _, accel = jax.lax.scan(lambda s, x: imu.step(s, x), state, positions)
-
-    true_accel = np.gradient(np.gradient(np.asarray(positions), DT), DT)
-    corr = np.corrcoef(np.asarray(accel)[5:], true_accel[5:])[0, 1]
-    print(f"correlation with true acceleration: {corr:.3f}")
-    assert corr > 0.9
+    _, positions = trajectory()
+    pos = jnp.asarray(positions)
+    accel = run(make_imu(), pos, seed=0)
+    quiet = run(make_imu(density=0.0, drift_density=0.0), pos, seed=0)
+    verify_imu('equinox', pos, accel, quiet)
 
 
 if __name__ == '__main__':

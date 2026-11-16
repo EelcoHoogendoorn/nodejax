@@ -1,32 +1,8 @@
-"""Deeply nested composition, in nodejax: a residual stacked RNN,
-scanned over time, widened into a committee, adapted per task and
-meta-trained over a task family, one tree. Each of those is an axis
-whose state some transform must route, and this file exists to show,
-beside `tower_flax.py`, `tower_equinox.py` and `tower_torch.py`,
-where each framework makes you write that routing.
+"""Eight-level nested composition in NodeJAX (`tower` benchmark).
 
-The task: predict an exponential moving average of a noisy scalar
-sequence, chosen because the target is recurrent by construction. The
-model: an input projection, a running Norm (its stats as
-ordinary cyclic state — the change-cost measurement: one pipe term
-here, hand-threaded carries in the flax file), a stack of RNN cells,
-a linear Readout.
-The tower: `residual` wraps each cell, `stack` scans over depth,
-`scanned` internalizes the time axis, `ensemble` widens the rollout
-into a committee whose mean head sows the population, `finetune`
-makes the committee's whole adaptation the inner loop, `batch` maps it over
-tasks, `train_step` meta-trains what the adaptation starts from, and
-`trained` is the run over the task sequence. Eight transform
-applications, one line each, no routing annotations anywhere: each
-transform reads which tree is params and which is state off the
-contract, and the meta gradient is second order, flowing through the
-inner run.
+Alongside `tower_nnx.py`, `tower_nnx_reusable.py`, `tower_equinox.py`, `tower_keras.py`, and `tower_torch.py`, this module builds a residual RNN cell, scans over depth (`stack`), unrolls over time (`scanned`) behind a stateful normalizer (`Norm`), widens into a committee (`ensemble` + `reduce`), adapts per task (`finetune(train_step(...))`), maps over task batches (`batch`), and meta-trains (`trained(train_step(...))`). Every transform reads `param` and `state` roles off the `Node` contract and returns another `Node`, keeping the entire meta-learner in five lines of composition.
 
-Side by side with `tower_flax.py`, `tower_equinox.py` and
-`tower_torch.py`: the same model, task, and budget, with the state
-routing written the way each framework wants it written.
-
-Run directly:  python -m examples.comparisons.tower.tower_nodejax
+Run directly with `python -m examples.comparisons.tower.tower_nodejax`.
 """
 
 import jax

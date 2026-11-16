@@ -48,7 +48,7 @@ import torch
 import torch.nn as nn
 
 from examples.comparisons.chunk import chunk_common as task
-from nodejax.core.types import PyTree
+from typing import Any as PyTree
 
 
 def _t(a: jax.Array):
