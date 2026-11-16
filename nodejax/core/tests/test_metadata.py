@@ -1,9 +1,4 @@
-"""The rigid data-input metadata surface.
-
-Input specs describe only the fields a caller supplies as data. RNG topology
-is definition metadata exposed by the corresponding ``contract.*_plan``;
-raw keys never masquerade as fields in these specs.
-"""
+"""Verifies `param_input_spec`, `state_input_spec`, and PRNG requirement flags across compositions."""
 import jax
 import jax.numpy as jnp
 
@@ -39,12 +34,12 @@ def test_param_input_spec_marks_required_and_carries_defaults():
     p = _pi().contract.param_input_spec
     assert list(p.__keys__) == ['kp', 'ki']
     assert p.kp is REQUIRED
-    assert p.ki == 0.0                       # optional field carries its default
+    assert p.ki == 0.0
 
 
 def test_param_input_spec_drops_node_and_rng_channels():
     def dense():
-        def param(node, rng):                # shape from node (encapsulated), draw from rng
+        def param(node, rng):
             return Struct(w=jnp.zeros((node.input.shape[-1], 3)))
         def apply(param, input):
             return input @ param.w
@@ -61,12 +56,10 @@ def test_param_input_spec_composes_by_member():
     assert s.a.scale is REQUIRED
     assert s.b.kp is REQUIRED and s.b.ki == 0.0
 
-    # nesting recurses
     outer = serial(x=serial(a=Gain(), b=_pi()), y=Gain())
     assert outer.contract.param_input_spec.x.b.kp is REQUIRED
     assert outer.contract.param_input_spec.y.scale is REQUIRED
 
-    # parallel composes the same way
     par = parallel(a=Gain(), b=Gain())
     assert par.contract.param_input_spec.a.scale is REQUIRED
 
@@ -77,15 +70,13 @@ def test_param_input_spec_nonparametric_is_absent():
 
 def test_state_input_spec_is_the_init_bundle():
     from nodejax.control import Integrator, Walker
-    # RNG is a separate call channel, not a state-input field.
+    # PRNG streams travel separately from state-input fields.
     walker = Walker()
     assert list(walker.contract.state_input_spec.__keys__) == []
     assert walker.contract.init_takes_rng
 
-    # plain init(param): nothing to supply
     assert list(Integrator().contract.state_input_spec.__keys__) == []
 
-    # explicit field carrying its default
     def declared():
         def param(k):
             return Struct(k=jnp.asarray(k))
@@ -109,7 +100,7 @@ def test_state_input_spec_composes_separately_from_init_entropy():
     assert list(s.__keys__) == ['w', 'g']
     assert net.contract.init_takes_rng
     assert list(s.w.__keys__) == []
-    assert type(s.g) is Struct and not s.g  # nested declaration has no fields
+    assert type(s.g) is Struct and not s.g
 
 
 def test_param_entropy_composes_separately_from_input_specs():
@@ -127,13 +118,13 @@ def test_param_entropy_composes_separately_from_input_specs():
     assert list(s.n.__keys__) == ['width'] and s.n.width == 3
     assert s.g.scale is REQUIRED
 
-    # Nested composition retains one outer RNG requirement without data fields.
+    # Nested composition exposes one outer PRNG requirement without adding data fields.
     outer = serial(x=serial(n=noisy(), g=Gain()), y=Gain())
     o = outer.contract.param_input_spec
     assert list(o.__keys__) == ['x', 'y']
     assert outer.contract.param_takes_rng
 
-    # A deterministic composite has an empty RNG plan.
+    # Deterministic composition leaves `param_takes_rng` false.
     det = serial(a=Gain(), b=Gain())
     assert not det.contract.param_takes_rng
 
@@ -144,11 +135,11 @@ def test_tree_binding_discards_captured_member_parameters():
 
     pipe = Gain() >> Gain().parameterize(scale=jnp.asarray(3.0))
     spec = pipe.contract.param_input_spec
-    assert spec.gain.scale is REQUIRED               # open slot: still required
-    assert jnp.allclose(spec.gain_2.scale, 3.0)      # bound slot: its param, as default
+    assert spec.gain.scale is REQUIRED
+    assert jnp.allclose(spec.gain_2.scale, 3.0)
 
     node = pipe.parameterize(gain=Struct(scale=jnp.asarray(2.0)))
-    assert node.apply(1.0) == 6.0                    # stored construction filled
+    assert node.apply(1.0) == 6.0
 
     rebuilt = map_members(pipe, lambda d: d)
     rebuilt_spec = rebuilt.contract.param_input_spec

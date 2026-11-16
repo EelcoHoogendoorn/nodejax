@@ -1,4 +1,4 @@
-"""Focused lowering tests for authored leaves."""
+"""Verifies `Leaf` signature lowering, restricted `node` views, and constructor role checks."""
 
 import jax.numpy as jnp
 import pytest

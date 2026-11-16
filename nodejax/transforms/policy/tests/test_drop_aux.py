@@ -1,4 +1,4 @@
-"""drop_aux removes Aux from a runtime output."""
+"""Verifies that `drop_aux` strips `Aux` from runtime `(output, aux)` pairs."""
 
 from nodejax import Aux, drop_aux
 from nodejax.struct import Struct

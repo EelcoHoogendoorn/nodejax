@@ -1,90 +1,76 @@
-"""Statics, generics, and the introspection utils, on one real tower.
+"""Construction-record inspection, `describe()` formatting, and path-addressed specialization.
 
-The tree under inspection is four levels of composition with its one
-size argument left unbound: batch(scan(stack(Cell()))). Everything this
-file demonstrates follows from two facts. The @node record keeps every
-factory call, so the whole argument graph is data (.statics_by_path()), a
-deferred build prints as the record it is (.describe()), and specialize
-re-runs it with any unambiguous spelling of the address. And bindings
-are separate trees, so the same describe that writes a def out writes
-a bound model's param and state out beside it.
-
-The record paths read as the composition reads: batch's member is the
-per-sample program, scan's is the step, stack's is the layer, so the
-unbound width lives at sample.step.layer.width, and fills route to it
-from any shorter spelling that stays unambiguous.
+Leaving `width` unbound in `batch(scan(stack(Cell(), n=3)), n=4)` defers instantiation and records
+the full static argument graph as a `Generic` blueprint. `statics_by_path()` lists every static
+argument under its dotted member address (`sample.step.layer.width`), `describe()` formats both
+deferred `Generic` blueprints and bound `PSNode` hierarchies alongside parameter and state shapes,
+and `specialize`, `parameterize`, and `initialize` resolve explicit dotted paths, nested mappings,
+or `'*.field'` wildcards.
 """
+
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 
 from nodejax import (
-    REQUIRED, Leaf, Node, Struct, batch, node, scan, stack, train_step,
+    Generic, REQUIRED, Leaf, Node, Struct, batch, node, scan, stack, train_step,
 )
 from examples.util import mse
 
 
 @node
 def Cell(width: int) -> Node:
-    """One recurrent unit: its size the ONE static, its weights drawn at
-    parameterize, its carry starting at rest."""
-    def param(rng):
+    """Steps a `width`-unit `tanh` recurrent cell from a zero initial state vector."""
+    def param(rng) -> Struct:
         return Struct(w=0.3 * jax.random.normal(rng.next(), (width, width)))
 
-    def init(node):
+    def init(node) -> jax.Array:
         return jnp.zeros(width)
 
-    def apply(param, state, input):
+    def apply(param, state, input) -> tuple[jax.Array, jax.Array]:
         new = jnp.tanh(state @ param.w + input)
         return new, new
 
     return Leaf(apply, param=param, init=init)
 
 
-def committee_tower() -> Node:
-    """The tree, in its own scope: a stack of cells makes the column,
-    scan runs the column over time, batch runs four sequences side by
-    side. The cell's width stays unbound on purpose: the whole tower is
-    a generic until that one number arrives."""
+def committee_tower() -> Generic:
+    """Builds a deferred `batch(scan(stack(Cell(), n=3)), n=4)` blueprint with `width` unbound."""
     column = stack(Cell(), n=3)
     over_time = scan(column)
     return batch(over_time, n=4)
 
 
-def test_the_record_is_readable_and_addressable():
-    """statics_by_path lists the whole argument graph at full addresses;
-    describe prints the deferred record with the unbound argument
-    marked; specialize fills it at its listed address."""
+def test_the_record_is_readable_and_addressable() -> None:
+    """Verifies that `statics_by_path`, `describe`, and `specialize` inspect and bind `width`."""
     tower = committee_tower()
     assert tower.generic
 
     listed = tower.statics_by_path()
     assert listed['sample.step.layer.width'] is REQUIRED
-    assert listed['sample.step.n'] == 3           # stack's own depth, at home
+    assert listed['sample.step.n'] == 3
 
     written = tower.describe()
     print(written)
     assert 'width=<unbound>' in written
-    assert 'generic]' in written                  # flagged generic, every level
+    assert 'generic]' in written
 
     filled = tower.specialize(**{'sample.step.layer.width': 8})
     assert not filled.generic
     assert filled.statics_by_path()['sample.step.layer.width'] == 8
 
 
-def test_describe_writes_the_bound_model_out():
-    """The same entry writes a bound model: the member hierarchy above,
-    the param and state trees below, shapes and a leaf tally. The param
-    tree carries the layer axis stack added; the carry is per layer and,
-    once batched, per sequence."""
+def test_describe_writes_the_bound_model_out() -> None:
+    """Verifies that `describe` formats member hierarchy, parameter shapes, and batched per-layer state."""
     model = committee_tower().specialize(**{'sample.step.layer.width': 8}).parameterize(
         rng=jax.random.PRNGKey(0)).initialize()
     written = model.describe()
     print()
     print(written)
     assert 'param:' in written and 'state:' in written
-    assert 'w = float32(3, 8, 8)' in written      # one weight per layer
-    assert model.state.shape == (4, 3, 8)         # per sequence, per layer
+    assert 'w = float32(3, 8, 8)' in written
+    assert model.state.shape == (4, 3, 8)
 
     sequences = jnp.ones((4, 20, 8))
     advanced, outputs = model(sequences)
@@ -92,11 +78,8 @@ def test_describe_writes_the_bound_model_out():
     assert not jnp.allclose(advanced.state, model.state)
 
 
-def test_the_trainer_prints_its_two_members():
-    """train_step is a two-member composite, and describe says so: the
-    model and loss form one objective beside the optimizer, with weights
-    under both readings (param.objective.model is what training starts from,
-    state.opt.params.model where it has got to)."""
+def test_the_trainer_prints_its_two_members() -> None:
+    """Verifies that `describe` on `train_step` displays both `objective` and `opt` parameter paths."""
     import optax
     model = committee_tower().specialize(**{'sample.step.layer.width': 8}).parameterize(
         rng=jax.random.PRNGKey(0)).initialize()
@@ -108,21 +91,16 @@ def test_the_trainer_prints_its_two_members():
     assert 'opt.params.model.w = float32(3, 8, 8)' in written
 
 
-def test_configuring_by_path():
-    """One address vocabulary, all three construction doors, and the
-    rules are strict on purpose: a bare key binds in the node's own
-    record or refuses (never routing deeper on its own), reaching a
-    depth means spelling the path (dot-joined or nested, one call
-    either way), and '*.field' is the one broadcast, string form only.
-    parameterize and initialize take the same dot-joined spelling for
-    their bundles."""
+def test_configuring_by_path() -> None:
+    """Verifies strict path addressing across `specialize` and `parameterize` with dotted keys, nested mappings, and wildcards."""
     tower = committee_tower()
     by_path = tower.specialize(**{'sample.step.layer.width': 8})
     nested = tower.specialize(sample={'step': {'layer': {'width': 8}}})
     assert by_path.statics_by_path() == nested.statics_by_path()
 
     try:
-        tower.specialize(width=8)                  # bare: nothing routes
+        # Bare keys bind only on the outer record rather than routing implicitly into nested members.
+        tower.specialize(width=8)
         raise AssertionError('a bare key must not reach a depth')
     except TypeError as refusal:
         assert 'width' in str(refusal)

@@ -1,27 +1,16 @@
-"""Batchnorm on digits: running statistics as ordinary cyclic state.
+"""Batch normalization on handwritten digits using running moments as cyclic `Node` state.
 
-Batchnorm is the classic hard state problem for functional NN
-libraries: statistics that update across training steps, are computed
-over the batch, and must freeze for evaluation — the usual source of
-mode flags, mutable collections and train/eval forks. Here the running
-moments are simply the node's state: training threads them because
-train_step threads model state, and evaluation is applying the trained
-state and discarding the returned update — freezing is a call-site
-decision, not a mode.
+Each `nn.BatchNorm` leaf normalizes activations by its stored `mean` and `var` before updating
+those moments with exponential factor `MOMENTUM`, and `train_step` threads the running statistics
+alongside optimizer state across batches.
 
-Cross-sample statistics used to dictate the data layout: without a
-named axis, a per-sample model under batch() would give every sample
-its own PRIVATE running moments, so the model had to be written
-batched. The named axis dissolves that. The model is per-sample like
-every nn block, batch() binds the reserved 'batch' axis, the norm's
-moments are collectives across it, and the per-element state copies
-agree by construction — replicated, never divergent — so any one row
-IS the statistics.
-
-The node normalizes by its running moments — not the batch moments —
-and updates them afterwards: train and eval then run the exact same
-function, with eval merely not keeping the returned state.
+Because `nn.BatchNorm` pools moments across the named `'batch'` collective axis supplied by
+`batch(...)` and declares `'single_batch_state'`, the model is authored per sample while keeping a
+single shared state copy across the batch. Freezing the trained `PSNode` with `tree_freeze` folds
+those accumulated moments into fixed constants so evaluation becomes non-cyclic and deterministic.
 """
+
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
@@ -37,8 +26,7 @@ BATCH, EPOCHS = 125, 80
 
 
 def build() -> Node:
-	"""(64,) pixels -> (10,) logits, per-sample, all stock nn; batchnorm
-	mid-pipe makes the pipe cyclic and gives it the 'batch' axis need."""
+	"""Builds a per-sample two-hidden-layer MLP with `nn.BatchNorm` on `(64,)` digit vectors."""
 	return serial(
 		up=nn.Linear(WIDTH),
 		batchnorm1=nn.BatchNorm(MOMENTUM),
@@ -50,9 +38,8 @@ def build() -> Node:
 	)
 
 
-def test_batchnorm_trains_and_freezes():
-	"""Train through the running stats, then evaluate against them
-	frozen: the stats are learned equipment, carried as state."""
+def test_batchnorm_trains_and_freezes() -> None:
+	"""Trains a batch-normalized MLP on digits and verifies frozen-statistic evaluation."""
 	X_train, y_train, X_test, y_test = data()
 	pipe = build()
 	assert pipe.cyclic
@@ -73,25 +60,18 @@ def test_batchnorm_trains_and_freezes():
 	assert jnp.all(jnp.isfinite(aux.loss))
 	assert aux.loss[-1] < 0.3 * aux.loss[0]
 
-	# the running moments absorbed the training sequence: they sit at the
-	# train set's activation statistics, far from their (0, 1) init
+	# Running moments converge to the training-set pre-activation statistics.
 	up = X_train @ final.param.up.w + final.param.up.b
 	assert jnp.allclose(final.state.batchnorm1.mean, jnp.mean(up, axis=0), rtol=0.1)
 
-	# eval = the binding frozen whole: `final` IS the trained model,
-	# state-bound, and tree_freeze consumes the state it holds — the node
-	# stops being cyclic, nothing to thread. The stats currently live at
-	# the training batch size (state-axis affinity, tasks/todo.md, will
-	# free them of it), so eval scores a test batch of that size
+	# Freezing the state-bound model absorbs its learned moments and makes evaluation deterministic.
 	frozen = tree_freeze(final)
 	_, logits = frozen(X_test[:BATCH])
-	assert jnp.allclose(logits, frozen(X_test[:BATCH])[1])      # deterministic
+	assert jnp.allclose(logits, frozen(X_test[:BATCH])[1])
 	test_accuracy = accuracy(logits, y_test[:BATCH])
 	assert test_accuracy > 0.9, test_accuracy
 
-	# the frozen stats matter: freezing FRESH (0, 1) stats instead
-	# mis-normalizes every layer (the ladder end to end: the param view,
-	# a fresh initialize, the freeze)
+	# Freezing fresh (0, 1) moments on the same trained weights degrades accuracy.
 	_, cold = tree_freeze(final.pnode.initialize())(X_test[:BATCH])
 	assert accuracy(cold, y_test[:BATCH]) < test_accuracy
 

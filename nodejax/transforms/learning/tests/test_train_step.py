@@ -1,5 +1,4 @@
-"""train_step: internalize optimization. Param is what training starts
-from, state is where it has got to."""
+"""Verifies `train_step` optimization, loss contracts, structural rewrites, and boundary resets."""
 
 import jax
 import jax.numpy as jnp
@@ -15,9 +14,7 @@ from nodejax.transforms.learning import map_loss_target, optimizer, opt_reinit
 
 
 def test_train_step_convergence():
-    """The model arrives FULLY BOUND and those weights are the
-    initialization; the trainer is itself a PSNode, immediately
-    scannable, and the run advances its state."""
+    """Verifies `train_step` produces a cyclic `PSNode` whose state converges under `scan`."""
     gain = Gain().parameterize(scale=jnp.array(1.0)).initialize()
     trainer = train_step(gain, lambda pred, target: (pred - target) ** 2, optax.sgd(0.01))
     assert type(trainer) is PSNode and trainer.cyclic
@@ -362,22 +359,21 @@ def test_mapped_aux_fit_updates_every_contributing_parameter():
 
 
 def test_train_step_rebuilds_through_its_members():
-    """A rewrite reaches the model through the explicit objective tree."""
+    """Verifies `map_members` and `tree_detach` reach the model inside the trainer objective."""
     l1 = nn.Linear(4)
     l2 = Wrapper(inner=nn.Linear(4))(name='target')
     model = serial(l1=l1, l2=l2).with_input(jnp.zeros(4)).parameterize(
         rng=jax.random.PRNGKey(0)).initialize()
     trainer = train_step(model, lambda pred, target: jnp.sum((pred - target) ** 2), optax.sgd(0.01))
 
-    # Replace l2 member inside the trainer; a rewrite reshapes state
-    # layouts, so it works the param-only view
+    # Replaces the l2 member inside the unbound trainer definition.
     new_l2 = Wrapper(inner=nn.Linear(4))(name='replacement')
     rebuilt = map_members(
         trainer.node, lambda m: new_l2 if m.name == 'target' else m)
     assert rebuilt.members.objective.members.model.members.l2.name == 'replacement'
     assert l2.name == 'target'
 
-    # tree_detach inside trainer by key
+    # Detaches l2 by key on the parameterized trainer view.
     detached = tree_detach(trainer.pnode, 'l2')
     assert detached.members.objective.members.model.members.l2.name == 'detach(target)'
 
@@ -437,12 +433,7 @@ def test_trained_rebuilds_its_current_run():
 
 
 def test_train_step_input_is_the_named_model_wire():
-    """The trainer's `input` field contains the model's computed wire.
-
-    A model may name that wire something else in its own call. The trainer
-    feeds the value into that call form once, without nesting a formed model
-    bundle under the model field again.
-    """
+    """Verifies `train_step` exposes the model's named input wire directly on the trainer contract."""
     def param(scale):
         return Struct(scale=jnp.asarray(scale))
 
@@ -465,7 +456,7 @@ def test_train_step_input_is_the_named_model_wire():
 
 
 def test_train_step_uses_the_empty_call_of_a_zero_input_model():
-    """The uniform trainer input does not become a model wire."""
+    """Verifies `train_step` omits `input` when wrapping a zero-input model."""
     def param(scale):
         return Struct(scale=jnp.asarray(scale))
 
@@ -500,8 +491,7 @@ def test_trained_routes_model_rng_only_from_the_outer_channel():
         return Struct(scale=jnp.asarray(scale))
 
     def apply(param, input, rng):
-        # `input.rng` is ordinary domain data. Only the separate outer key
-        # satisfies the authored RNG channel.
+        # `input.rng` is ordinary domain data; only the outer `rng` argument supplies PRNG keys.
         return (param.scale * input.value + input.rng
                 + jax.random.normal(rng.next(), ()))
 
@@ -526,26 +516,13 @@ def test_trained_routes_model_rng_only_from_the_outer_channel():
 
 
 def test_a_boundary_claim_crosses_the_trainer():
-    """Stateful training: the hidden carries from batch to batch and dies at
-    the epoch, THROUGH the trainer. The tag is declared inside the model, the
-    scan over an epoch's batches claims it, and train_step sits between the
-    two saying nothing: the weights and the optimizer's state cross every
-    boundary because a carry carries.
-
-    Truncated BPTT falls out rather than being said: the hidden enters each
-    step as carried state, so a step's gradient reaches back exactly to the
-    start of its own batch.
-
-    Pinned against a hand-rolled loop from both sides: the claimed run
-    matches the loop that resets per epoch, the unclaimed run matches the
-    loop that never resets, and the two disagree."""
+    """Verifies `scan(..., boundary='epoch')` resets tagged model state across `train_step` while preserving weights."""
     EPOCHS, BATCHES, LR = 2, 3, 0.1
     xs = jax.random.normal(jax.random.PRNGKey(0), (EPOCHS, BATCHES, 4))
     ts = jax.random.normal(jax.random.PRNGKey(1), (EPOCHS, BATCHES, 4))
 
     def Cell():
-        # the hidden is weight-independent on purpose, so the reference's
-        # state advance is unambiguous
+        # Keeps hidden state independent of weights so the reference trajectory is exact.
         def param():
             return jnp.ones(())
 
@@ -587,14 +564,7 @@ def test_a_boundary_claim_crosses_the_trainer():
 
 
 def test_two_tags_cross_the_trainer():
-    """Two tags in one tree, both claimed above the trainer.
-
-    The drift dies at the outer boundary, the accumulator at the inner, and
-    the weights
-    cross everything because a carry carries: they are what couples the
-    inner groups, which is why two reinit tags that would fall apart
-    untrained compose under training. The name picks the scan even through a trainer:
-    swap the two claims and the same tree computes something else."""
+    """Verifies two distinct `state_reinit` boundary tags reset independently across nested `scan` wrappers over `train_step`."""
     EP, REC, K, LR = 2, 2, 2, 0.1
     xs = jax.random.normal(jax.random.PRNGKey(0), (EP, REC, K, 3))
     ts = jax.random.normal(jax.random.PRNGKey(1), (EP, REC, K, 3))
@@ -630,9 +600,9 @@ def test_two_tags_cross_the_trainer():
     def reference():
         w, losses = jnp.ones(()), []
         for e in range(EP):
-            a = jnp.zeros(())                      # EPOCH: the drift dies
+            a = jnp.zeros(())                      # Resets drift at each epoch boundary.
             for r in range(REC):
-                b = jnp.zeros(())                  # RECORDING: the accumulator dies
+                b = jnp.zeros(())                  # Resets cell state at each recording boundary.
                 for k in range(K):
                     aa = a + jnp.cumsum(xs[e, r, k])
                     bb = b + jnp.cumsum(aa)
@@ -655,18 +625,7 @@ def test_two_tags_cross_the_trainer():
 
 
 def test_a_lifetime_on_the_optimizer_state():
-    """Warm restarts: at the cycle boundary the MOMENTS rebuild and the
-    weights carry, which is SGDR's move. The optimizer owns its weights, so a
-    whole-subtree state_reinit would restart training outright; splitting the
-    slot takes an action over the leaf's own layout.
-
-    Spelled as a WRAPPER over the stock optimizer, which is state_reinit's
-    construction with a different action, and legitimate for the same reason:
-    a transparent wrapper's state IS its inner's, so the layout the action
-    reads is its own. That reasoning stops at leaves whose layout is the
-    family's contract; over a composite the slots are member names and an
-    outer action would override what members decided, which is why no generic
-    at_boundary(node, tag, action) wrapper ships."""
+    """Verifies `opt_reinit` resets optimizer moments at cycle boundaries while keeping model weights in the carry."""
     CYCLES, BATCHES, LR = 3, 4, 0.3
     xs = jax.random.normal(jax.random.PRNGKey(0), (CYCLES, BATCHES, 8))
     ts = 3.0 * xs
@@ -688,7 +647,7 @@ def test_a_lifetime_on_the_optimizer_state():
     tx = optax.adam(LR)
     w, ref = jnp.zeros(()), []
     for c in range(CYCLES):
-        opt = tx.init(w)                                     # the restart
+        opt = tx.init(w)                                     # Reinitializes optimizer moments at each cycle boundary.
         for b in range(BATCHES):
             loss, g = jax.value_and_grad(lambda w_: mse(xs[c, b] * w_, ts[c, b]))(w)
             up, opt = tx.update(g, opt, w)

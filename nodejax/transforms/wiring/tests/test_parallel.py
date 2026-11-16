@@ -1,4 +1,4 @@
-"""parallel: named nodes over the strands of a Struct signal."""
+"""Verifies `parallel` routing named member Nodes across matching fields of a `Struct` input."""
 
 import jax
 import jax.numpy as jnp
@@ -33,8 +33,8 @@ def Streamy():
 def test_parallel_routes_strands():
     block = parallel(x=Gain(), y=ident).parameterize(x=Struct(scale=jnp.asarray(2.0)))
     out = block.apply(x=jnp.asarray(3.0), y=jnp.asarray(7.0))
-    assert jnp.allclose(out.x, 6.0)              # strand through its member
-    assert jnp.allclose(out.y, 7.0)              # explicit identity strand
+    assert jnp.allclose(out.x, 6.0)
+    assert jnp.allclose(out.y, 7.0)
 
 
 def test_parallel_cyclic_state_threads():
@@ -42,23 +42,19 @@ def test_parallel_cyclic_state_threads():
     state = block.init()
     state, out = block.apply(state, x=jnp.asarray(2.0), y=jnp.asarray(9.0))
     state, out2 = block.apply(state, x=jnp.asarray(2.0), y=jnp.asarray(9.0))
-    assert jnp.allclose(out.x, 2.0) and jnp.allclose(out2.x, 4.0)   # state accumulates
+    assert jnp.allclose(out.x, 2.0) and jnp.allclose(out2.x, 4.0)
     assert jnp.allclose(out2.y, 9.0)
 
 
 def test_parallel_is_strict():
-    """Every strand is written down: an input field without a member is
-    an error, never a silent passthrough."""
+    """Verifies that `parallel` rejects input fields that have no matching declared member."""
     block = parallel(x=Gain()).parameterize(x=Struct(scale=jnp.asarray(2.0)))
     with pytest.raises(TypeError):
         block.apply(x=jnp.asarray(1.0), y=jnp.asarray(1.0))
 
 
 def test_parallel_init_splits_rng_to_stochastic_members():
-    """A member whose init consumes RNG gets its own split key; a
-    deterministic strand alongside is untouched. Regression: parallel init
-    called _needs_rng with the wrong arity, so this path crashed the moment
-    an rng met a stochastic member (no test exercised it)."""
+    """Verifies that `parallel` splits `init` PRNG keys to stochastic members while leaving deterministic siblings untouched."""
     def Noisy():
         def init(rng):
             return jax.random.normal(rng.next(), ())
@@ -68,8 +64,8 @@ def test_parallel_init_splits_rng_to_stochastic_members():
 
     block = parallel(x=Noisy(), y=Integrator()).parameterize()
     state = block.init(rng=jax.random.PRNGKey(0))
-    assert state.x.shape == ()            # stochastic member keyed from a split
-    assert jnp.allclose(state.y, 0.0)     # deterministic strand untouched
+    assert state.x.shape == ()
+    assert jnp.allclose(state.y, 0.0)
 
 
 def test_state_bound_primer_is_a_finished_state_slot():

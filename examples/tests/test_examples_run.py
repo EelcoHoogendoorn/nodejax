@@ -1,4 +1,4 @@
-"""Import and reference-execution suite across `nodejax` and `examples`."""
+"""Verifies that every `nodejax` and `examples` module imports and that comparison scripts match reference outputs."""
 
 import importlib
 import pkgutil

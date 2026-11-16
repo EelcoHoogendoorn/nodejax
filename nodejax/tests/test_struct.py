@@ -1,4 +1,4 @@
-"""Value behavior of NodeJAX's immutable record."""
+"""Verifies immutable value updates, structural merges, and pickling on `Struct`."""
 
 import pickle
 
@@ -9,7 +9,7 @@ from nodejax.struct import Struct
 
 
 class SemanticStruct(Struct):
-    """A Struct subtype whose type carries meaning to its consumer."""
+    """Represents a `Struct` subclass whose runtime type is preserved across updates."""
 
 
 def test_functional_updates_preserve_semantic_subtypes() -> None:
@@ -62,8 +62,7 @@ def test_merge_preserves_structure_at_every_depth() -> None:
 
 
 def test_a_struct_round_trips_through_pickle() -> None:
-    """Bound parameters and state are Struct trees; saved, they must load
-    as the same tree, subtypes included."""
+    """Verifies that `Struct` trees and `Struct` subclasses round-trip through `pickle`."""
     original = Struct(
         gains=SemanticStruct(kp=jnp.asarray(2.0), ki=0.5), count=3)
 

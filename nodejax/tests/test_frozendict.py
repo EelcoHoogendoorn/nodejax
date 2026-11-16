@@ -1,3 +1,5 @@
+"""Verifies immutable mapping, hashing, union, and pickling semantics of `frozendict`."""
+
 import pickle
 
 import pytest

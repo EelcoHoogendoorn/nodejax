@@ -1,29 +1,14 @@
-"""A shape is not a value: what a transform may do with `node.input`.
+"""Verifies that walking transforms distinguish `node.input` shape specs from real sample values.
 
-`node.input` is zeros of the resolved input spec, and it exists so a walk can
-propagate SHAPES through a composition: each member's def resolved against what
-the member before it produces. It is not data. `core.Node.input` says so:
+`node.input` materializes zeros of the resolved input spec so a walk can
+propagate shapes through a composition, resolving each member's definition
+against the preceding member's output. Those zero arrays represent shape
+evidence rather than numerical data.
 
-    Zero arrays produced by `node.input` must NEVER be passed internally into
-    channels or arguments expecting real numerical data (`input`).
-
-The distinction is invisible for almost every node, because almost every init
-either ignores its input or reads only its shape. It matters for the ones that
-PRIME: a node whose state starts AT its first real sample, where a zero is a
-wrong answer rather than a missing one. A derivative's previous-sample register
-primed from zeros produces a spike on the first step; a warm filter primed from
-zeros is a cold filter.
-
-Such a node declares `init_requires_input`, and when all a walk has is a shape,
-the right answer is to REFUSE. `serial` states the rule in its own comment:
-
-    a REAL value threads as a value; a bound shape only resolves each member's
-    def. A member that PRIMES from its input refuses when all we have is a
-    shape, rather than warm-starting from zeros.
-
-Every transform that walks has to keep that distinction. This file checks that
-they do, once each, because the failure is silent: a model that should have
-refused instead trains from a subtly wrong start.
+A node whose state starts at its first real sample declares
+`init_requires_input` and refuses to initialize when only a bound shape is
+available, preventing silent warm-starts from synthetic zeros across every
+walking transform.
 """
 
 import jax
@@ -39,8 +24,7 @@ X = jnp.array([3.0, 4.0, 5.0])
 
 
 def Primed() -> Node:
-    """Its state IS its first real sample. Zeros are not a lesser start here,
-    they are a different node."""
+    """Builds a stateful leaf whose initial state equals its first sample."""
     def init(input):
         return jnp.asarray(input)
 
@@ -102,7 +86,6 @@ CASES = {
 
 @pytest.mark.parametrize('name', sorted(CASES))
 def test_a_shape_alone_refuses_to_prime(name):
-    """init() with no value supplied: the node is resolved, so a shape is
-    available, and that is exactly when the zeros are tempting."""
+    """Verifies `init()` without a real sample raises `TypeError` even when shape-resolved."""
     with pytest.raises(TypeError, match='real input value'):
         CASES[name]().init()

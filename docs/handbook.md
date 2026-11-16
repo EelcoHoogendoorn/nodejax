@@ -240,7 +240,7 @@ Import via `from nodejax import nn` or `import nodejax.nn as nn`.
 | Recurrent cells | `RNN(hidden)`, `GRU(hidden)`, `MinGRU(hidden)`, `LSTM(hidden)` |
 | Regularization & mode | `Dropout(rate, train=True)`, `DropPath(rate, train=True)`, `GaussianNoise(std, train=True)`, `EMA(tau, warm=False)`, `eval_mode(model)` |
 
-`eval_mode(psnode)` specializes `train=False` across all training-mode layers (such as `BatchNorm` and `Dropout`), freezes running state subtrees (such as `BatchNorm` moments), and binds the learned parameters as a stateless inference `PNode`.
+`eval_mode(psnode)` specializes `'*.train'` to `False` across all mode-aware layers (such as `Dropout`, `DropPath`, and `GaussianNoise`), rebinds learned parameters and state, and freezes state tagged `'running_stats'` (such as `BatchNorm` moments) into constants on the returned `PSNode` (`evaluator.pnode` drops empty state when no recurrent state remains).
 
 ### `nodejax.control`
 

@@ -1,10 +1,4 @@
-"""Apply RNG plans composed through serial, vmapped, and wired definitions.
-
-An authored leaf whose apply names ``rng`` compiles an apply RNG plan. A
-composite reflects its consuming members in its own plan, accepts one raw key
-at the public boundary, and routes explicit framework streams to child plans.
-Its runtime input bundle remains data-only, and keys never ride the data wire.
-"""
+"""Verifies `apply` PRNG plans across `serial`, `parallel`, `batch`, `ensemble`, and authored `Composite` graphs."""
 import jax
 import jax.numpy as jnp
 import pytest
@@ -24,7 +18,7 @@ def Scaler() -> Node:
 def Jitter() -> Node:
     def param(sigma):
         return Struct(sigma=jnp.asarray(sigma))
-    def apply(param, x, rng):                  # authored rng declares the plan
+    def apply(param, x, rng):                  # Declares an `apply` PRNG stream.
         return x + param.sigma * jax.random.normal(rng.next())
     return Leaf(apply, param=param, name='jitter')
 
@@ -134,16 +128,16 @@ def test_mid_pipe_member_draws_from_the_boundary_key():
     out1 = net.apply(x=jnp.asarray(3.0), rng=key)
     out2 = net.apply(x=jnp.asarray(3.0), rng=key)
     out3 = net.apply(x=jnp.asarray(3.0), rng=jax.random.PRNGKey(1))
-    assert jnp.allclose(out1, out2)        # same key -> same draw
-    assert not jnp.allclose(out1, out3)    # different key -> different draw
-    assert not jnp.allclose(out1, 6.0)     # noise actually applied to 2*3
+    assert jnp.allclose(out1, out2)
+    assert not jnp.allclose(out1, out3)
+    assert not jnp.allclose(out1, 6.0)
 
 
 def test_requirement_bubbles_through_nesting():
     inner = serial(a=Scaler(), b=Jitter())
-    assert bool(inner.contract.apply_takes_rng)                 # the flag IS the record
+    assert bool(inner.contract.apply_takes_rng)
     outer = serial(core=inner, post=Scaler())
-    assert bool(outer.contract.apply_takes_rng)                 # bubbled, not re-declared
+    assert bool(outer.contract.apply_takes_rng)
 
     net = outer.parameterize(core=Struct(a=Struct(scale=2.0), b=Struct(sigma=1.0)),
                              post=Struct(scale=10.0))
@@ -171,21 +165,21 @@ def test_parallel_splits_toward_the_stochastic_strand():
         n=jnp.asarray(1.0), g=jnp.asarray(3.0), rng=key)
     out2 = block.apply(
         n=jnp.asarray(1.0), g=jnp.asarray(3.0), rng=key)
-    assert jnp.allclose(out1.g, 6.0)           # deterministic strand untouched
-    assert jnp.allclose(out1.n, out2.n)        # same key -> same draw
+    assert jnp.allclose(out1.g, 6.0)
+    assert jnp.allclose(out1.n, out2.n)
     with pytest.raises(TypeError, match='apply requires rng='):
         block.apply(n=jnp.asarray(1.0), g=jnp.asarray(3.0))
 
 
 def test_ensemble_splits_apply_rng_per_member():
     from nodejax import ensemble
-    ens = ensemble(Jitter(), n=3).parameterize(sigma=1.0)   # one member's worth
+    ens = ensemble(Jitter(), n=3).parameterize(sigma=1.0)
     key = jax.random.PRNGKey(7)
     out1 = ens.apply(x=jnp.asarray(0.0), rng=key)
     out2 = ens.apply(x=jnp.asarray(0.0), rng=key)
     assert out1.shape == (3,)
-    assert jnp.allclose(out1, out2)              # same boundary key reproduces
-    assert len(set(map(float, out1))) == 3        # members drew DIFFERENT noise
+    assert jnp.allclose(out1, out2)
+    assert len(set(map(float, out1))) == 3
 
 
 def test_batch_splits_apply_rng_per_element():
@@ -194,7 +188,7 @@ def test_batch_splits_apply_rng_per_element():
     key = jax.random.PRNGKey(0)
     out = b.apply(x=jnp.zeros(4), rng=key)
     assert out.shape == (4,)
-    assert len(set(map(float, out))) == 4            # per-element streams
+    assert len(set(map(float, out))) == 4
 
 
 def test_nonparametric_cyclic_ensemble():
@@ -202,7 +196,7 @@ def test_nonparametric_cyclic_ensemble():
     from nodejax.control import Walker
     import pytest as _pytest
 
-    # walker minus params: a pure stochastic-state node
+    # Builds a parameterless stochastic-state node.
     def drifter():
         def init(rng):
             return Struct(x=jnp.asarray(0.0), rng=rng)
@@ -216,24 +210,21 @@ def test_nonparametric_cyclic_ensemble():
     s = node.init(rng=jax.random.PRNGKey(0))
     s2, out = node.apply(s, jnp.asarray(1.0))
     assert out.shape == (3,)
-    assert len(set(map(float, out))) == 3            # independent streams
+    assert len(set(map(float, out))) == 3
 
-    # the spectrum: n unbound makes a GENERIC ensemble, not an error
+    # Leaving `n` unbound yields a generic ensemble.
     g = ensemble(drifter().node)
-    assert g.generic                    # n unbound: a generic ensemble
+    assert g.generic
 
 
 def test_wired_composite_splits_the_boundary_key():
-    """A hand-wired composite obeys the same doctrine as every other
-    composite: one raw boundary key binds its static plan. Its invocation-local
-    framework stream supplies distinct child frames to two calls of the same
-    stochastic member; the ordinary bundle contains only ``x``."""
+    """Verifies an authored `Composite` routes distinct child PRNG frames to repeated calls of one stochastic member."""
     from nodejax import Composite
 
     def wired():
         def apply(self, x):
-            once = self.j(x=x * 2.0)             # injected draw
-            twice = self.j(x=x * 2.0)            # a DIFFERENT draw
+            once = self.j(x=x * 2.0)
+            twice = self.j(x=x * 2.0)
             return Struct(a=once, b=twice)
         return Composite(j=Jitter())(apply, name='wired')
 
@@ -241,6 +232,6 @@ def test_wired_composite_splits_the_boundary_key():
     key = jax.random.PRNGKey(0)
     out1 = node.apply(x=jnp.asarray(3.0), rng=key)
     out2 = node.apply(x=jnp.asarray(3.0), rng=key)
-    assert jnp.allclose(out1.a, out2.a)              # same key -> same draws
-    assert not jnp.allclose(out1.a, out1.b)          # two calls, two draws
-    assert bool(wired().contract.apply_takes_rng)                   # bubbled onto the flag
+    assert jnp.allclose(out1.a, out2.a)
+    assert not jnp.allclose(out1.a, out1.b)
+    assert bool(wired().contract.apply_takes_rng)

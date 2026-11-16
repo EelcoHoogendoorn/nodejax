@@ -1,4 +1,4 @@
-"""Generic pytree operations."""
+"""Verifies PyTree indexing, axis broadcasting, length, and gradient-stopping helpers."""
 
 import jax
 import jax.numpy as jnp

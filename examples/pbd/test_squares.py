@@ -1,4 +1,4 @@
-"""Mechanics, constraint schedules, and simulated rollout for an XPBD chain of 2D squares."""
+"""Verifies XPBD rigid-body anchor constraints, solver schedules, and batched 2D square-chain rollouts."""
 
 from pathlib import Path
 from typing import Callable
@@ -28,7 +28,7 @@ def square_chain_bodies(
     angle: float = 0.0,
     mass: float = 1.0,
 ) -> Struct:
-    """Build a chain of 2D square bodies rotated by ``angle`` with the first square fixed."""
+    """Builds a chain of 2D rigid square bodies rotated by `angle` with the root square fixed."""
     cosine = jnp.cos(angle)
     sine = jnp.sin(angle)
     rotation = jnp.array([[cosine, -sine], [sine, cosine]])
@@ -39,7 +39,7 @@ def square_chain_bodies(
     velocities = jnp.zeros((n_squares, 2))
     angular_velocities = jnp.zeros(n_squares)
 
-    # Square 0 is pinned; subsequent squares are free
+    # Square 0 has zero inverse mass and inertia; subsequent squares move freely.
     inv_mass = jnp.concatenate((jnp.zeros(1), jnp.full(n_squares - 1, 1.0 / mass)))
     inertia = (mass * size ** 2) / 6.0
     inv_inertia = jnp.concatenate((jnp.zeros(1), jnp.full(n_squares - 1, 1.0 / inertia)))
@@ -59,7 +59,7 @@ def square_chain_constraints(
     size: float,
     compliance: float = 0.0,
 ) -> Struct:
-    """Build consecutive hinge-pin constraints joining adjacent square edges."""
+    """Builds consecutive edge-midpoint anchor constraints joining adjacent squares."""
     n_constraints = n_squares - 1
     indices = jnp.stack((jnp.arange(n_constraints), jnp.arange(1, n_squares)), axis=-1)
     anchors = jnp.tile(
@@ -78,8 +78,7 @@ def square_chain_constraints(
 
 
 def test_one_anchor_constraint_restores_offset_bodies() -> None:
-    # Body 0 fixed at origin; Body 1 displaced to (3, 0).
-    # Anchors at (+1, 0) and (-1, 0) should meet at (1, 0).
+    # Body 0 stays fixed at the origin while body 1 starts at (3, 0), so anchors (+1, 0) and (-1, 0) meet at (1, 0).
     initial = body(
         position=jnp.array([[0.0, 0.0], [3.0, 0.0]]),
         angle=jnp.array([0.0, 0.0]),
@@ -127,7 +126,7 @@ def test_chain_schedules_reduce_the_same_stretched_chain(
 ) -> None:
     n_squares = 4
     size = 0.2
-    # Start with squares placed further apart than their size
+    # Spacing centers at 1.5 * size stretches every joint before projection.
     centers_x = (jnp.arange(n_squares) + 0.5) * (size * 1.5)
     initial = square_chain_bodies(n_squares, size).replace(
         position=jnp.stack((centers_x, jnp.zeros(n_squares)), axis=-1)
@@ -144,7 +143,6 @@ def test_chain_schedules_reduce_the_same_stretched_chain(
         step.parameterize().bind(state=initial).apply(jnp.zeros_like(initial.position))[1]
     )[0]
 
-    # Check anchor separation between first pair
     init_anchor_0 = initial.position[0] + jnp.array([size / 2.0, 0.0])
     init_anchor_1 = initial.position[1] + jnp.array([-size / 2.0, 0.0])
     init_dist = jnp.linalg.norm(init_anchor_1 - init_anchor_0)
@@ -178,9 +176,7 @@ def test_square_chain_swings_under_gravity() -> None:
     assert trajectory.angle.shape == (n_steps, n_squares)
     assert jnp.all(jnp.isfinite(trajectory.position))
     assert jnp.all(jnp.isfinite(trajectory.angle))
-    # Fixed root does not move
     assert jnp.allclose(trajectory.position[:, 0], initial.position[0])
-    # Tip falls downward under gravity
     assert trajectory.position[-1, -1, 1] < initial.position[-1, 1]
 
 
@@ -208,12 +204,11 @@ def test_composed_batched_rollout_keeps_anchor() -> None:
     assert trajectory.position.shape == (n_worlds, n_steps, n_squares, 2)
     assert trajectory.angle.shape == (n_worlds, n_steps, n_squares)
     assert jnp.all(jnp.isfinite(trajectory.position))
-    # Fixed root stays in place for both worlds
     assert jnp.allclose(trajectory.position[:, :, 0], initial.position[:, None, 0])
 
 
 def plot_squares(result: Struct, filename: str = 'xpbd_squares.png') -> str:
-    """Plot multi-world simulated frames and physical energy decay of swinging 2D rigid squares."""
+    """Renders multi-world square-chain snapshots, mechanical energy traces, and joint-error history."""
     import matplotlib
 
     matplotlib.use('Agg')
@@ -243,13 +238,11 @@ def plot_squares(result: Struct, filename: str = 'xpbd_squares.png') -> str:
     frame_indices = np.linspace(0, n_frames - 1, 7, dtype=int)
     colors = plt.cm.viridis(np.linspace(0.15, 0.95, len(frame_indices)))
 
-    # Top row: geometry for each world
     for world_idx in range(n_worlds):
         axis = figure.add_subplot(grid[0, world_idx])
         world_positions = positions[world_idx]
         world_angles = angles[world_idx]
 
-        # Draw tip trajectory trail
         axis.plot(
             world_positions[:, -1, 0],
             world_positions[:, -1, 1],
@@ -281,11 +274,11 @@ def plot_squares(result: Struct, filename: str = 'xpbd_squares.png') -> str:
                     linewidth=1.2,
                     label=label,
                 )
-                # Pin marker at the right edge
+                # Marks the right-edge hinge anchor of each square.
                 pin = frame_positions[square_idx] + rotation @ np.array([half, 0.0])
                 axis.plot(pin[0], pin[1], 'o', color=color, markersize=3.0)
 
-        # Pin marker on fixed root
+        # Marks the fixed root body.
         axis.scatter(*world_positions[0, 0], marker='s', color='black', s=45, zorder=5)
         axis.set_aspect('equal')
         axis.grid(alpha=0.2)
@@ -296,12 +289,10 @@ def plot_squares(result: Struct, filename: str = 'xpbd_squares.png') -> str:
         if world_idx == n_worlds - 1:
             axis.legend(title='time', frameon=False, fontsize=7.5, loc='lower right')
 
-    # Bottom row: Energy curves and constraint violation
-    # Compute energy for world 1 (horizontal release)
+    # Evaluates linear kinetic, rotational kinetic, and gravitational potential energy on free bodies 1..N-1.
     world_index = 1
     mass = 1.0
     inertia = (mass * size ** 2) / 6.0
-    # Kinetic energy: 0.5 * m * v^2 + 0.5 * I * w^2 (summed over free bodies 1..N-1)
     linear_kinetic_energy = 0.5 * mass * np.sum(
         velocities[world_index, :, 1:] ** 2,
         axis=(-1, -2),
@@ -311,7 +302,6 @@ def plot_squares(result: Struct, filename: str = 'xpbd_squares.png') -> str:
         axis=-1,
     )
     kinetic_energy = linear_kinetic_energy + rotational_kinetic_energy
-    # Gravitational potential energy: m * g * y
     potential_energy = np.sum(
         mass * 9.81 * positions[world_index, :, 1:, 1],
         axis=-1,
@@ -341,11 +331,9 @@ def plot_squares(result: Struct, filename: str = 'xpbd_squares.png') -> str:
     energy_axis.grid(alpha=0.2)
     energy_axis.legend(frameon=False, fontsize=8)
 
-    # Bottom-right: constraint violation across time
     error_axis = figure.add_subplot(grid[1, 2])
-    # Extract max distance error from aux diagnostics
     error = np.array(result.aux.solve.constraint.error)
-    # error shape: (n_worlds, n_frames, n_passes, n_constraints)
+    # Takes the worst-case anchor error across constraints on the final solver pass of each frame.
     max_error_per_frame = np.max(np.abs(error[world_index, :, -1, :]), axis=-1)
     error_axis.semilogy(
         time,

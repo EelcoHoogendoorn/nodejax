@@ -1,4 +1,4 @@
-"""Mechanics, composition checks, and simulated rollout for the PBD rope."""
+"""Verifies PBD distance and bend constraints, solver schedules, and batched multi-world rope rollouts."""
 
 from pathlib import Path
 from typing import Callable
@@ -29,7 +29,7 @@ def rope_constraints(
     rest_length: float,
     compliance: float = 0.0,
 ) -> Struct:
-    """The distance constraints of a chain: consecutive particles joined at one rest length."""
+    """Builds chain distance-constraint indices and parameters joining consecutive particles at `rest_length`."""
     indices = jnp.stack((jnp.arange(n_points - 1), jnp.arange(1, n_points)), axis=-1)
     return Struct(
         index=indices,
@@ -46,8 +46,7 @@ def initial_rope(
     anchor_height: float,
     angle: float = 0.0,
 ) -> Struct:
-    """A particle record forming a straight, left-fixed rope at rest,
-    ``angle`` radians above horizontal."""
+    """Builds an initial particle state for a straight rope anchored at its left endpoint at `angle` radians."""
     reach = rest_length * jnp.arange(n_points)
     position = jnp.stack((
         reach * jnp.cos(angle),
@@ -196,7 +195,7 @@ def test_composed_rollout_keeps_the_anchor_and_floor() -> None:
 
 
 def plot_rope(result: Struct, filename: str = 'pbd_rope.png') -> str:
-    """Save several real simulated frames for every world."""
+    """Renders multi-world rope snapshots across simulated time to `plots/<filename>`."""
     import matplotlib
 
     matplotlib.use('Agg')

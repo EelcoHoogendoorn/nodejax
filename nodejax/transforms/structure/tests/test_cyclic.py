@@ -1,4 +1,4 @@
-"""cyclic: a step's first field promoted to the state of a system."""
+"""Verifies `cyclic` turning an acyclic step Node's leading input field into carried state."""
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +10,7 @@ from nodejax.struct import Struct
 
 @node
 def Kick() -> Node:
-    """The step: the state plus a push."""
+    """Adds an input impulse `push` to the current value `x`."""
     def apply(x, push):
         return x + push
 
@@ -19,7 +19,7 @@ def Kick() -> Node:
 
 @node
 def Geared() -> Node:
-    """A parametric step: the state plus a gain times the push."""
+    """Adds a scaled impulse `param * push` to the current value `x`."""
     def param(gain):
         return jnp.asarray(gain)
 
@@ -43,7 +43,7 @@ def test_the_first_field_is_the_state_and_the_rest_are_the_call():
 
 
 def test_a_promoted_step_scans_over_its_other_fields():
-    """The sequence-driven run: the state carried, the pushes read in turn."""
+    """Verifies that `scan(cyclic(step))` carries the first field as state and scans over remaining fields."""
     run = scan(cyclic(Kick()), n=3).parameterize().bind(state=jnp.asarray(0.0))
     run, outputs = run.apply(push=jnp.asarray([1.0, 2.0, 3.0]))
     assert jnp.allclose(outputs, jnp.asarray([1.0, 3.0, 6.0]))
@@ -90,7 +90,7 @@ def test_batched_promoted_steps_carry_a_state_per_element():
 
 
 def test_a_self_ticking_system_scans_for_a_declared_length():
-    """The time axis of a system with no inputs: scan with n, no sequence."""
+    """Verifies that an autonomous zero-input `cyclic` Node scans for a fixed length `n`."""
     doubling = cyclic(Leaf(lambda x: 2.0 * x, name='doubling'))
     run = scan(doubling, n=3).parameterize().bind(state=jnp.asarray(1.0))
     run, trajectory = run.apply()

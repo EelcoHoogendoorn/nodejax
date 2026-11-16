@@ -1,4 +1,4 @@
-"""batch: vmap over the input axis, with broadcast params and row state."""
+"""Verifies `batch` mapping over a leading input axis with shared parameters and per-element state."""
 
 import jax
 import jax.numpy as jnp
@@ -68,7 +68,7 @@ def test_batch_cyclic():
 
 
 def test_batch_primes_each_state_from_its_own_row():
-    """Priming is mapped over values, never first-row initialization tiled."""
+    """Verifies that `batch` maps priming initialization across batch elements rather than tiling row zero."""
     def init(input):
         return input
 
@@ -82,7 +82,7 @@ def test_batch_primes_each_state_from_its_own_row():
 
 
 def test_batch_binds_its_named_axis_during_construction() -> None:
-    """A stacked prefix may use batch collectives while construction propagates its input."""
+    """Verifies that `batch` binds its collective axis name during construction-time input propagation."""
     def init(input):
         return input
 
@@ -107,7 +107,7 @@ def test_batch_binds_its_named_axis_during_construction() -> None:
 
 
 def test_batch_nonpriming_input_binds_shape_without_forwarding_value():
-    """A supplied batch can resolve shape without becoming init data."""
+    """Verifies that a non-priming `init` resolves element shape from a supplied batch without reading values."""
     def init(node):
         return jnp.zeros_like(node.input)
 
@@ -127,7 +127,7 @@ def test_batch_single_batch_state():
         new_state = Struct(count=state.count + total)
         return new_state, input * param.scale
 
-    def pop_init(param):                      # a constant state: no shape, no value
+    def pop_init(param):
         return Struct(count=jnp.array(0.0))
 
     pop_node = Leaf(pop_apply, init=pop_init, param=lambda: Struct(scale=2.0), tags={'single_batch_state'})
@@ -142,12 +142,7 @@ def test_batch_single_batch_state():
 
 
 def test_batch_splits_one_boundary_key_per_element():
-    """The apply-rng contract through batch: the structural
-    apply plan survives the wrap, the caller hands ONE key at
-    the batch boundary, and each element draws independently. The leaf
-    receives its rng as a KeyStream and draws with next(); a first
-    version of this pin passed the stream to jax.random directly, broke
-    that contract, and misread its own crash as a batch defect."""
+    """Verifies that `batch` preserves `apply_takes_rng` and splits one boundary PRNG key across elements."""
     def apply(x: jax.Array, rng) -> jax.Array:
         return x + jax.random.normal(rng.next(), jnp.shape(x))
     noisy = Leaf(apply)
@@ -155,15 +150,14 @@ def test_batch_splits_one_boundary_key_per_element():
 
     b = batch(noisy, n=4).with_input(
         bundle=Struct(x=jnp.zeros((4, 3))))
-    assert b.contract.apply_takes_rng                       # the bit cannot be erased
+    assert b.contract.apply_takes_rng
     out = b.apply(x=jnp.ones((4, 3)), rng=jax.random.PRNGKey(1))
     assert out.shape == (4, 3)
-    assert not jnp.allclose(out[0], out[1])       # each element its own draw
+    assert not jnp.allclose(out[0], out[1])
 
 
 def test_a_random_init_draws_once_per_batch_element():
-    """batch tiles a deterministic initial state; a random one is drawn per
-    element with its own key, as prime and ensemble already do."""
+    """Verifies that stochastic state initialization draws an independent subkey for each batch element."""
     noisy = Leaf(
         lambda state, input: (state, state + input),
         init=lambda rng: jax.random.normal(rng.next(), (2,)),
@@ -177,8 +171,7 @@ def test_a_random_init_draws_once_per_batch_element():
 
 
 def test_state_inputs_carry_the_batch_axis_at_init():
-    """batch maps its init over state inputs, one element each, as its prime
-    maps over inputs."""
+    """Verifies that `batch` maps `init` across batched state-initialization fields."""
     counter = Leaf(
         lambda state, input: (state + input, state),
         init=lambda initial: initial,

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from nodejax.core.pnode import PNode
 from nodejax.core.psnode import PSNode
 from nodejax.transforms.policy.freeze import tree_freeze
 
 
-def eval_mode(model: PSNode) -> PNode:
+def eval_mode(model: PSNode) -> PSNode:
     """Rebuilds a state-bound `model` for evaluation and freezes `'running_stats'` state.
 
     Specializes every `'*.train'` static argument to `False`, rebinds `model.param` and `model.state`, and folds state tagged `'running_stats'` into fixed constants via `tree_freeze`.

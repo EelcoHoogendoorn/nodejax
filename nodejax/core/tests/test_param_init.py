@@ -1,9 +1,9 @@
-"""Param construction with rng: constructors are plain callables — the
-original tree(param) form. A constructor declaring rng receives a
-KeyStream (rng.next() per draw, no split bookkeeping), and one boundary
-key routes down every path params flow: per pipe member, per ensemble
-member / stack layer. Explicit values need no key at all: PID gains from
-values, network weights from keys, one syntax.
+"""Verifies parameter construction with `KeyStream` and explicit value binding.
+
+A constructor declaring `rng` receives a `KeyStream` and draws keys via
+`rng.next()`, while a single boundary key splits across serial pipes,
+ensembles, and stacks. Explicit parameter values enter through `bind`
+without requiring a key.
 """
 
 import jax
@@ -49,9 +49,7 @@ def test_constructor_draws_from_keystream():
 
 
 def test_explicit_values_need_no_rng():
-    """Finished values enter through bind, the contract door — no key in
-    sight. The CONSTRUCTOR always takes its key (rng never has a default),
-    so parameterize without one is loud."""
+    """Verifies finished values enter via `bind` while `parameterize` requires `rng`."""
     node = Linear(2, 3).bind(Struct(weight=jnp.ones((2, 3)), bias=jnp.ones(3)))
     assert jnp.allclose(node.apply(jnp.ones(2)), 3.0)
     with pytest.raises(TypeError, match='parameterize requires rng'):
@@ -80,8 +78,7 @@ def test_pipe_splits_param_rng_per_member():
 
 
 def test_pipe_mixes_plain_constructors():
-    """Members whose constructors cannot consume a key are simply not
-    handed one; the rest draw from the split."""
+    """Verifies deterministic constructors receive no key while stochastic siblings draw."""
     pipe = Gain() >> Linear(2, 2)
     bound = pipe.parameterize(rng=jax.random.PRNGKey(0), gain=Struct(scale=2.0))
 
@@ -91,8 +88,7 @@ def test_pipe_mixes_plain_constructors():
 
 
 def test_ensemble_and_stack_draw_n_members():
-    """Declared size + one key = n independent draws, stacked — the
-    hand-built stacked-params boilerplate, deleted."""
+    """Verifies `ensemble` and `stack` split one boundary key into `n` stacked draws."""
     e = ensemble(Linear(2, 2), n=3).parameterize(rng=jax.random.PRNGKey(0))
     assert e.param.weight.shape == (3, 2, 2)
     assert not jnp.allclose(e.param.weight[0], e.param.weight[1])
@@ -100,7 +96,7 @@ def test_ensemble_and_stack_draw_n_members():
     s = stack(Linear(2, 2), n=4).parameterize(rng=jax.random.PRNGKey(0))
     assert s.param.weight.shape == (4, 2, 2)
 
-    # explicit stacked params remain a first-class path — through bind
+    # explicit stacked params enter directly through bind
     manual = ensemble(Linear(2, 2), n=3).bind(
         Struct(weight=jnp.ones((3, 2, 2)), bias=jnp.zeros((3, 2))))
     assert jnp.allclose(manual.apply(jnp.ones(2)), 2.0)

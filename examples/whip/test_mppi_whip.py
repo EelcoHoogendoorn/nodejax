@@ -1,4 +1,4 @@
-"""MPPI on the whip: the planner rolls the plant's own model out from its state."""
+"""Verifies MPPI critic training and receding-horizon planning on the whip plant."""
 
 import jax
 import jax.numpy as jnp
@@ -21,5 +21,6 @@ def test_mppi_trains_a_critic_and_plans_on_the_whip() -> None:
     controller = learned_controller(result.critic, plant, n_candidates=4, n_refinements=1, n_steps_per_plan=4)
     evaluation = whip_evaluation(
         controller, plant, evaluation_starts(plant), jax.random.PRNGKey(3), steps=3, step=control.PlannedStep)
-    assert evaluation.action.shape == (9, 3, 2)  # nine worlds, three steps, two joints
+    # Evaluates 9 initial states over 3 control steps across both arm joints.
+    assert evaluation.action.shape == (9, 3, 2)
     assert jnp.all(jnp.isfinite(evaluation.reward))

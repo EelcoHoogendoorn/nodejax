@@ -1,4 +1,4 @@
-"""PPO on the whip: one program from one key, no gradient through the plant."""
+"""Verifies single-program PPO training and evaluation on the whip plant with and without tip sensing."""
 
 import jax
 import jax.numpy as jnp
@@ -18,7 +18,8 @@ def test_ppo_trains_the_whip_as_one_program() -> None:
     assert jnp.all(jnp.isfinite(result.history.mean_cost))
     evaluation = whip_evaluation(
         mean_policy(result.policy), plant, evaluation_starts(plant), jax.random.PRNGKey(3), steps=5)
-    assert evaluation.reward.shape == (9,)  # three starts by three targets
+    # Evaluates all 9 combinations of 3 initial angles and 3 target positions.
+    assert evaluation.reward.shape == (9,)
     assert jnp.all(jnp.isfinite(evaluation.reward))
     summarize(evaluation, 'PPO, two iterations')
 

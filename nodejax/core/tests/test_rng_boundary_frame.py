@@ -1,9 +1,9 @@
-"""RNG at the public and canonical contract boundaries.
+"""Verifies PRNG handling at the public and canonical contract boundaries.
 
-Users supply raw keys to all three public operations. The public boundary
-turns that key into an invocation-local stream; canonical implementations see
-the stream as a separate channel and their ordinary data
-bundle never contains the reserved key.
+Callers supply raw keys to `parameterize`, `init`, and `apply`. The public
+boundary wraps each key into an invocation-local `MaybeKeyStream` passed
+alongside the canonical call's data bundle, keeping `rng` out of ordinary
+data fields.
 """
 
 import jax
@@ -25,7 +25,7 @@ KEYS = tuple(jax.random.split(jax.random.PRNGKey(0), 3))
 
 
 def _compiled_spy(*, stochastic: bool = True):
-    """A complete three-role definition exposing each canonical call."""
+    """Builds a three-role `Node` recording each canonical call's stream and bundle."""
     seen = {}
     def param_impl(node, param_input, rng):
         seen['param'] = rng, param_input

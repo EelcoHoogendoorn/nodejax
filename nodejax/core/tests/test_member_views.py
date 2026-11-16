@@ -1,8 +1,4 @@
-"""Inside an authored apply, ``self.member`` is the member's view as of the
-read, with a bound view's verbs. ``self`` is the composite's state, the one
-mutable thing in the step: calls, binds, and resets through a member view
-store their result in the member's slot; the view itself does not move.
-"""
+"""Verifies `self` member views, `bind`/`reset`/`scan` methods, and JAX trace guards inside `Composite`."""
 
 import jax
 import jax.numpy as jnp

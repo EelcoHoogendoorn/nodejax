@@ -1,4 +1,4 @@
-"""The whip plant: primed from one key, ticked, and swung open loop."""
+"""Verifies joint kinematics, couple forces, warm initialization, and open-loop rollouts on `whip_plant`."""
 
 import jax
 import jax.numpy as jnp
@@ -18,17 +18,17 @@ from examples.whip.whip import (
 
 
 def whip_start(angle: float | jax.Array = 0.0, target: tuple | jax.Array = TARGET) -> Struct:
-    """A start of the default plant."""
+    """Returns an initial plant configuration for the default `whip_plant` at `angle` and `target`."""
     return whip_plant().parameterize().start(angle=angle, target=target)
 
 
 def shoulder_command(n_steps: int, value: float) -> jax.Array:
-    """A command sequence that drives the shoulder and holds the elbow."""
+    """Builds an `n_steps` command sequence driving the shoulder at `value` while holding the elbow at zero."""
     return jnp.zeros((n_steps, N_LINKS)).at[:, 0].set(value)
 
 
 def shoulder_strokes(n_steps: int, value: float, period: int) -> jax.Array:
-    """Shoulder commands reversing every ``period`` steps, the elbow held."""
+    """Builds shoulder commands that reverse sign every `period` steps while holding the elbow at zero."""
     sign = jnp.where((jnp.arange(n_steps) // period) % 2 == 0, 1.0, -1.0)
     return jnp.zeros((n_steps, N_LINKS)).at[:, 0].set(value * sign)
 
@@ -41,7 +41,7 @@ def test_joint_mechanical_reads_the_rotors_off_the_links() -> None:
     )
     mechanical = joint_mechanical(spun, jnp.asarray(LINK_LENGTHS))
     assert jnp.allclose(mechanical.position, jnp.array((0.5, 0.0)), atol=1e-6)
-    # The arm rotates rigidly at 3 rad/s: the shoulder turns, the elbow does not.
+    # Rigid rotation of the two-link arm at 3 rad/s produces 3 rad/s at the shoulder and 0 rad/s at the elbow.
     assert jnp.allclose(mechanical.velocity, jnp.array((3.0, 0.0)), atol=1e-5)
 
 
@@ -97,9 +97,10 @@ def test_open_loop_strokes_swing_the_shoulder_and_the_tip_outruns_the_handle() -
     handle_speed = jnp.linalg.norm(swing.state.rope.velocity[:, HANDLE], axis=-1)
     assert jnp.all(jnp.isfinite(swing.state.rope.position))
     assert jnp.max(swing.joint_velocity[:, 0]) > 10.0
-    assert jnp.min(swing.joint_velocity[:, 0]) < -8.0  # the back stroke meets the floor sooner than the forward one
+    # Floor contact arrests the backstroke earlier than the forward stroke.
+    assert jnp.min(swing.joint_velocity[:, 0]) < -8.0
     assert jnp.max(tip_speed) > 1.5 * jnp.max(handle_speed)
-    # The controllers' estimates follow the true joint velocities, coarse encoders and all.
+    # Velocity observers track true joint velocities despite encoder quantization.
     assert jnp.all(jnp.abs(jnp.mean(swing.estimated_velocity - swing.joint_velocity, axis=0)) < 3.0)
 
 
@@ -146,14 +147,15 @@ def test_the_floor_keeps_the_arm_and_rope_above_the_pivot() -> None:
     from examples.whip.whip import FLOOR_HEIGHT
 
     n_steps = 80
-    command = shoulder_command(n_steps, -30.0)  # swing down, into the floor
+    command = shoulder_command(n_steps, -30.0)
     swing = open_loop_swing(whip_plant(), whip_start(0.3), command, jax.random.PRNGKey(1))
     assert jnp.all(swing.state.rope.position[..., 1] >= FLOOR_HEIGHT - 1e-5)
 
 
 def test_the_ideal_actuator_plant_primes_steps_and_reads_out_like_the_stack() -> None:
     plant = whip_plant(ideal_actuator=True).parameterize()
-    assert plant.contract.init_takes_rng is False  # nothing in this plant draws
+    # Replacing the stochastic actuator stack with an ideal torque source removes PRNG requirements from init.
+    assert plant.contract.init_takes_rng is False
     state = plant.init(start=whip_start(0.4))
     observation = plant.observe(state=state)
     assert set(observation.__keys__) == {'angle', 'velocity', 'current', 'target'}

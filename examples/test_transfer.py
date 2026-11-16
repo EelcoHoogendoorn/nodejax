@@ -1,10 +1,10 @@
-"""Transfer learning: pretrain, freeze the trunk, swap the head, retrain.
+"""Transfer learning via parameter tree replacement and `tree_detach`.
 
-The whole workflow is param surgery plus one transform: params are data,
-so 'swap the head' is building a param tree from the trained trunk and a
-fresh head; 'freeze the trunk' is tree_detach, which stops gradient
-through the matched members while everything else trains. The frozen
-trunk is bitwise untouched by the second training run.
+Pretraining optimizes `serial(trunk=Trunk(), head=Head())` end to end on a source
+task. Replacing `pretrained.replace(head=fresh_head)` swaps in a newly
+initialized readout on the parameter `Struct`, and `tree_detach(pipe, 'trunk')`
+stops gradients into `trunk` during target-task training so trunk weights remain
+bitwise identical while `head` adapts.
 """
 
 import jax
@@ -21,6 +21,7 @@ N_IN, FEAT = 4, 16
 
 @node
 def Trunk() -> Node:
+    """Computes `FEAT`-dimensional features through two `tanh` linear layers."""
     def param(rng):
         return Struct(w1=0.5 * jax.random.normal(rng.next(), (N_IN, FEAT)),
                       w2=0.5 * jax.random.normal(rng.next(), (FEAT, FEAT)))
@@ -33,6 +34,7 @@ def Trunk() -> Node:
 
 @node
 def Head() -> Node:
+    """Projects `FEAT`-dimensional features to a scalar prediction without bias."""
     def param(rng):
         return Struct(w=0.1 * jax.random.normal(rng.next(), (FEAT, 1)))
 
@@ -42,36 +44,38 @@ def Head() -> Node:
     return Leaf(apply, param=param)
 
 
-def _fit(node, params: PyTree, X, y: jax.Array, steps: int, lr: float=1e-2):
+def _fit(
+    node: Node, params: PyTree, X: jax.Array, y: jax.Array, steps: int,
+    lr: float = 1e-2,
+) -> tuple[PyTree, jax.Array]:
     trainer = train_step(node.bind(params).initialize(), mse, optax.adam(lr))
     done, aux = trained(trainer).apply(input=tile(X, steps), target=tile(y, steps))
     return done.param, aux.loss
 
 
-def test_freeze_trunk_swap_head_retrain():
+def test_freeze_trunk_swap_head_retrain() -> None:
+    """Verifies that `tree_detach` leaves pretrained `trunk` weights bitwise unchanged while fitting a replacement `head`."""
     X = jax.random.normal(jax.random.PRNGKey(0), (64, N_IN))
     y_pretrain = jnp.sin(X @ jnp.array([[1.0], [-1.0], [0.5], [0.0]]))
 
     pipe = serial(trunk=Trunk(), head=Head())
 
-    # task A: pretrain the whole pipe
     init = pipe.parameterize(rng=jax.random.PRNGKey(1)).param
     pretrained, losses_a = _fit(pipe, init, X, y_pretrain, steps=500)
     assert losses_a[-1] < 0.05
 
-    # task B: targets linear in the LEARNED features, so a fresh head can
-    # fit them exactly iff the trunk survives intact
+    # Target labels are a linear projection of the pretrained trunk features.
     feats = Trunk().apply(pretrained.trunk, X)
     y_transfer = feats @ jax.random.normal(jax.random.PRNGKey(2), (FEAT, 1))
 
-    # swap the head (params are data), freeze the trunk (one transform)
+    # Replace `head` in the parameter `Struct` and detach `trunk` gradients during fine-tuning.
     fresh_head = Head().parameterize(rng=jax.random.PRNGKey(3)).param
     surgery = pretrained.replace(head=fresh_head)
     tuned, losses_b = _fit(tree_detach(pipe, 'trunk'), surgery, X, y_transfer,
                            steps=1500, lr=3e-2)
 
-    assert losses_b[-1] < 1e-3 * jnp.mean(y_transfer ** 2)   # head learned task B
-    assert jax.tree.all(jax.tree.map(              # trunk bitwise untouched
+    assert losses_b[-1] < 1e-3 * jnp.mean(y_transfer ** 2)
+    assert jax.tree.all(jax.tree.map(
         jnp.array_equal, tuned.trunk, pretrained.trunk))
-    assert not jax.tree.all(jax.tree.map(          # head actually trained
+    assert not jax.tree.all(jax.tree.map(
         jnp.array_equal, tuned.head, fresh_head))

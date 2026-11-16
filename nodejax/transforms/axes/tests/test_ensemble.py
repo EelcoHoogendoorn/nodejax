@@ -1,9 +1,4 @@
-"""ensemble over a shape-resolved pipe.
-
-Regression: the non-cyclic init path handed the pipe's init walk the
-STACKED member params, which broadcast against an unstacked carry. The
-(empty) state builds through one member's row, exactly as stack does.
-"""
+"""Verifies `ensemble` mapping over member parameter and state axes with broadcast input."""
 import jax
 import jax.numpy as jnp
 import pytest
@@ -48,12 +43,7 @@ def test_reduce_returns_the_mean_and_retains_the_population() -> None:
 
 
 def test_the_declared_size_is_the_size():
-    """n is the only thing that says how many members there are, so a bound
-    param tree of another height is an error rather than a second opinion.
-
-    It used to be a second opinion, and it won: apply counted the param rows
-    while init built n states, so an n=3 ensemble bound to four rows ran four
-    members against three states, silently."""
+    """Verifies that `ensemble` rejects bound parameter trees whose leading dimension mismatches `n`."""
     d = ensemble(nn.Linear(2).node, n=3).with_input(jnp.zeros(4))
     three = d.parameterize(rng=jax.random.PRNGKey(0)).param
     assert d.bind(three).apply(jnp.ones(4)).shape == (3, 2)

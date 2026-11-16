@@ -1,4 +1,4 @@
-"""Focused behavior checks for the generic MPPI Nodes."""
+"""Verifies `GaussianProposal`, `MPPIStep`, and `RecedingMPPI` behavior."""
 
 import jax
 import jax.numpy as jnp
@@ -42,7 +42,7 @@ def test_mppi_step_matches_its_explicit_candidate_costs() -> None:
     ))
 
     def quadratic_rollout(initial_state, candidates):
-        """Accumulate each plan and charge squared distance from the target."""
+        """Accumulates each candidate control sequence and returns squared distance from `target`."""
         state = initial_state + jnp.cumsum(candidates, axis=1)
         return Struct(cost=(state - target) ** 2, next_state=state)
 

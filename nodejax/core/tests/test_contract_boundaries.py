@@ -1,4 +1,4 @@
-"""The public and compiled contract boundaries."""
+"""Verifies `with_input`, explicit `bundle=` calls, and `Contract` boundary validation."""
 
 import jax
 import jax.numpy as jnp

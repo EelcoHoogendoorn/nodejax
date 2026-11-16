@@ -1,13 +1,9 @@
-"""The full actuator stack, closed-loop: bus voltage -> voltage estimation ->
-command controller -> current controller (model-based estimation on the
-modulated voltage, per-term feedforward) -> electrical motor, with the
-battery and the mechanics at the environment level.
+"""Exercises the closed-loop `ActuatorStack` coupled to `Battery` sag and `Mechanical` load dynamics.
 
-The est/true voltage asymmetry is modeled: the controller normalizes by
-its ESTIMATED bus voltage (a noisy >> ema sensor pipeline), the motor is
-driven by pwm x TRUE battery voltage, and the battery both sags (charge
-state) and is read two ways (voltage METHOD before the step, discharge
-apply after with the power the stack reports).
+The controller normalizes PWM commands against its filtered bus-voltage estimate while the
+electrical motor sees PWM scaled by true battery voltage. Before each step the environment reads
+open-circuit sag voltage via `Battery.voltage`, and after each step it discharges the battery with
+reported electrical power.
 """
 
 import jax
@@ -28,9 +24,7 @@ DT = 1e-4
 
 
 def Environment(actuator: Node, battery: Node, mechanical: Node) -> Node:
-    """Environment-level closure: the actuator maps (mechanical, command,
-    bus voltage) -> torque and power; the environment owns the battery that
-    supplies the bus and takes the power back, and integrates mechanics."""
+    """Couples `actuator`, `battery`, and `mechanical` into a closed-loop step returning torque."""
     members = Composite(actuator=actuator, battery=battery, mechanical=mechanical)
 
     def apply(self, command, load):
@@ -44,7 +38,7 @@ def Environment(actuator: Node, battery: Node, mechanical: Node) -> Node:
 
 
 def build_env(command_ctrl = None, dt: float = DT) -> tuple[PNode, PNode]:
-    """Assemble one configured actuator and its mechanical environment."""
+    """Builds a parameterized closed-loop actuator environment and its nominal motor model."""
     with ambient(dt=dt):
         motor = Electrical().parameterize(resistance=0.24, inductance_d=2e-4, inductance_q=3e-4, kt=1.2, pole_pairs=16.0, slots=36.0, cogging=0.0)
 
@@ -84,21 +78,17 @@ def build_env(command_ctrl = None, dt: float = DT) -> tuple[PNode, PNode]:
         return environment, motor
 
 
-# a real initial condition: the actuator at rest, no command, no load. Supplying
-# one is what lets the warm filters prime; a resolved shape will not do, since
-# zeros are a spec and a spec never enters an input slot (see test_priming)
+# Warm EMA filters prime their initial state from a concrete at-rest input.
 AT_REST = Struct(command=0.0, load=0.0)
 
 
 def simulate(node, n: int, command: jax.Array, key: jax.Array=0):
+    """Runs an `n`-step recorded rollout under `command` and returns paired outputs and states."""
     rollout = scanned(node.node, record=True).bind(node.param)
     cmds = jnp.broadcast_to(jnp.asarray(command, dtype=jnp.float32), (n,))
-    # Commands are data; the raw key enters through its separate public channel.
     out, aux = rollout.apply(
         rng=jax.random.PRNGKey(key), command=cmds,
         load=jnp.zeros_like(cmds))
-    # record SOWS the trajectory rather than wrapping the output, so pairing
-    # the two is this helper's business and not the transform's
     return Struct(output=out, state=aux.state)
 
 
@@ -107,18 +97,17 @@ def test_stack_assembly():
     state = env.init(rng=jax.random.PRNGKey(0), input=AT_REST)
 
     act = state.actuator
-    assert type(act.current_ctrl.pwm_prev) is DQ             # previous pwm
-    assert type(act.current_ctrl.estimator.prev) is DQ   # model blend memory
-    assert state.battery == 1.0                               # full charge
-    assert act.current_ctrl.fets == 25.0                      # fets at ambient
+    assert type(act.current_ctrl.pwm_prev) is DQ
+    assert type(act.current_ctrl.estimator.prev) is DQ
+    assert state.battery == 1.0
+    assert act.current_ctrl.fets == 25.0
     assert act.motor_thermal == 25.0
     assert act.mechanical_est.observer.velocity == 0.0
-    # one sensor stream per stochastic member, all split from one key
+    # Each stochastic sensor member receives an independent PRNG stream split from the root key.
     keys = [act.current_ctrl.bus_est.noisy.rng, act.mechanical_est.encoder.rng,
             act.current_ctrl.estimator.filter.current_sensor.rng]
     assert jnp.any(keys[0] != keys[1]) and jnp.any(keys[1] != keys[2])
 
-    # the maximal-stack claim, quantified: connected stateful leaves
     assert len(jax.tree.leaves(state)) >= 20
 
     paths = {jax.tree_util.keystr(p)
@@ -128,15 +117,14 @@ def test_stack_assembly():
 
 
 def test_torque_command():
-    """Torque command -> current target -> pwm -> electrical torque."""
+    """Verifies closed-loop torque tracking under `torque_command` control."""
     env, _ = build_env(command_ctrl=torque_command())
     traj = simulate(env, 1500, command=3.0)
 
-    # the sigmoid rollbacks derate ~10% even at ambient (their tails never
-    # reach 1), so delivered torque sits near 2.7, not 3.0 — physics, not
-    # tracking error; the tolerance accounts for it
+    # Smooth thermal-derating sigmoids attenuate torque by roughly 10% at ambient temperature,
+    # settling delivered torque near 2.7 Nm for a 3.0 Nm command.
     assert jnp.abs(jnp.mean(traj.output[-500:]) - 3.0) < 0.5
-    assert traj.state.mechanical.velocity[-1] > 1.0           # spinning up
+    assert traj.state.mechanical.velocity[-1] > 1.0
 
 
 def test_velocity_command():
@@ -146,38 +134,35 @@ def test_velocity_command():
 
 
 def test_pwm_is_normalized():
-    """The actuation variable is a PWM with dq norm <= 1 — the power stage
-    limit, not an absolute voltage clamp."""
+    """Verifies that the current controller normalizes PWM output within the unit `DQ` disk."""
     env, _ = build_env()
-    traj = simulate(env, 2000, command=50.0)                  # absurd command
+    traj = simulate(env, 2000, command=50.0)
 
     pwm = traj.state.actuator.current_ctrl.pwm_prev
     assert jnp.all(pwm.norm() <= 1.0 + 1e-4)
-    assert jnp.max(pwm.norm()) > 0.9                          # limit exercised
+    assert jnp.max(pwm.norm()) > 0.9
 
 
 def test_battery_sags_and_the_stack_feels_it():
-    """Finite capacity: charge drains with drawn power, the sag curve
-    lowers the true bus voltage, and the voltage estimator tracks it."""
+    """Verifies that finite battery capacity drains under load, lowers bus voltage, and updates the bus-voltage estimator."""
     env, _ = build_env()
     env = replace_by_path(env, {'.battery.capacity': 10.0})
     traj = simulate(env, 4000, command=3.0)
 
     charge = traj.state.battery
-    assert charge[-1] < 0.95                                  # visibly drained
-    # (not asserted monotone: momentary negative power is regeneration)
+    assert charge[-1] < 0.95
+    # Momentary regenerative braking can briefly recharge the battery during transients.
     est_v = traj.state.actuator.current_ctrl.bus_est.ema
-    assert est_v[-1] < 47.0                                   # estimator follows the sag
-    assert jnp.abs(traj.state.mechanical.velocity[-1] - 3.0) < 0.5  # still tracks
+    assert est_v[-1] < 47.0
+    assert jnp.abs(traj.state.mechanical.velocity[-1] - 3.0) < 0.5
 
 
 def test_model_blend_runs():
-    """tau > 0 engages the FOC current model (prediction from the
-    previously commanded modulated voltage) in the estimator blend.
+    """Verifies stability of `ModelEstimator` when `tau > 0` blends the `foc_current_model` prediction.
 
-    The blend's recursion through the previous estimate has loop gain
-    (model weight) * L/(R*dt) ~ 8.3 at these motor constants, so model
-    weights above ~0.12 DIVERGE. Tested at a provably stable weight."""
+    Recursion through the previous current estimate carries loop gain proportional to
+    `L / (R * dt)` (~8.3 here), so model weights above ~0.12 diverge while `0.05 * DT` remains stable.
+    """
     env, _ = build_env()
     env = replace_by_path(env, {'.actuator.current_ctrl.estimator.mix.tau': 0.05 * DT})
     traj = simulate(env, 2000, command=2.0)
@@ -187,12 +172,10 @@ def test_model_blend_runs():
 
 
 def test_thermals_heat_and_derate():
-    """Dissipation heats both thermal nodes; a tight fet temperature limit
-    visibly derates the delivered current."""
+    """Verifies that ohmic dissipation heats both thermal models and that a tight `FET` limit derates current."""
     env, _ = build_env(command_ctrl=torque_command())
     traj = simulate(env, 3000, command=30.0)
-    # windings warm slowly (heavy mass) — and the fets derate the current
-    # before a full degree accumulates; the fets themselves run away fast
+    # High winding thermal mass warms slowly while the low-mass FET stage heats rapidly and derates current.
     assert traj.state.actuator.motor_thermal[-1] > 25.5
     assert traj.state.actuator.current_ctrl.fets[-1] > 29.0
 
@@ -215,33 +198,28 @@ def test_streams_are_keyed():
 
 
 def punchy_command():
-    """The aggressive velocity PID of the step-response story.
+    """Builds a high-gain velocity `PID` controller with `integral_limit` sized against cascade windup.
 
-    integral_limit is the anti-windup story here: the PID's
-    back-calculation only sees its OWN clamp, not the downstream
-    current/voltage saturation (cascade windup), so the cap must sit
-    just above the legitimate steady demand — friction torque at speed
-    (0.2 * 55 = 11 Nm). At 60 the integral winds ~50 Nm of phantom
-    demand and velocity parks 3 rad/s above command at the bus rail."""
+    Back-calculation inside `PID` observes its own output clamp rather than downstream current or
+    bus-voltage saturation, so capping steady demand at 15 Nm (just above the 11 Nm friction torque
+    at 55 rad/s) prevents overshoot at the voltage rail.
+    """
     return VelocityCommand(
         PID(DT).parameterize(kp=8.0, ki=40.0, integral_limit=15.0))
 
 
 def step_profile(n: int=8000):
-    """The step up/down velocity command, sized to exhaust the bus:
-    back-EMF is ~0.8*omega volts against a 48V battery, so +/-55 rad/s
-    puts the CRUISE at the pwm norm-1 rail (velocity asymptotes as
-    headroom vanishes — no field weakening), while each acceleration
-    slams the +/-50A current limit."""
+    """Generates a +/-55 rad/s velocity step profile that exercises both the 50 A current limit and the 48 V bus rail."""
     t = jnp.arange(n) * DT
     return t, jnp.where(t < 0.25, 55.0, jnp.where(t < 0.55, -55.0, 0.0))
 
 
 def render_stack_panels(t: float, cmd, traj, filename: str, title: str):
-    """The four-panel stack view (velocity, currents, pwm, thermals),
-    shared by the visual tests. A trajectory with a trailing member axis
-    overlays one line per ensemble member (matplotlib draws 2-D arrays
-    column-wise); labels go on the first line of each family."""
+    """Renders a four-panel diagnostic plot of velocity, `DQ` currents, PWM utilization, and temperatures.
+
+    Trajectories with a trailing ensemble axis overlay one curve per member with a single legend
+    entry per signal family.
+    """
     import os
     import matplotlib
     matplotlib.use('Agg')
@@ -296,9 +274,7 @@ def render_stack_panels(t: float, cmd, traj, filename: str, title: str):
 
 
 def test_step_response_visual():
-    """The aggressive step against both limits (see punchy_command and
-    step_profile). Renders commands vs truth vs estimates, both limits,
-    thermals — tests/plots/step_response.png."""
+    """Verifies that the high-gain velocity step engages both current and PWM limits without windup and writes `step_response.png`."""
     import os
 
     env, _ = build_env(command_ctrl=punchy_command())
@@ -309,11 +285,9 @@ def test_step_response_visual():
     iq = act.motor.q
     pwm = act.current_ctrl.pwm_prev.norm()
 
-    # the plot must actually close up on both limits — and the voltage
-    # rail must be a sustained operating point, not an edge transient
-    assert jnp.max(jnp.abs(iq)) > 45.0                 # current limit engaged
-    assert jnp.mean(pwm > 0.95) > 0.1                  # rail held ~10%+ of the run
-    # windup tamed: cruise tracks the command through the saturated ramps
+    # Acceleration engages the 50 A current limit, cruise sustains the unit PWM rail, and anti-windup holds 55 rad/s.
+    assert jnp.max(jnp.abs(iq)) > 45.0
+    assert jnp.mean(pwm > 0.95) > 0.1
     assert jnp.abs(jnp.mean(traj.state.mechanical.velocity[1800:2500]) - 55.0) < 1.0
 
     out = render_stack_panels(
@@ -323,8 +297,7 @@ def test_step_response_visual():
 
 
 def census(title: str, tree: PyTree):
-    """Print every leaf of a pytree by keyed path, dtype and shape
-    (visible under pytest -s); returns the keyed leaf list."""
+    """Prints every leaf of `tree` with its keyed path, dtype, and shape, returning the flattened `(path, leaf)` pairs."""
     keyed = jax.tree_util.tree_flatten_with_path(tree)[0]
     print(f"\n=== {title}: {len(keyed)} leaves, "
           f"{sum(jnp.size(l) for _, l in keyed)} scalars ===")
@@ -335,32 +308,23 @@ def census(title: str, tree: PyTree):
 
 
 def test_structure_census(capsys=None):
-    """Print the full param and state trees of the maximal stack — every
-    leaf by keyed path, dtype and shape (run with -s to see it). Param
-    addresses read as the object graph and resolve as attribute chains;
-    state mirrors it member-for-member."""
+    """Verifies that flattened PyTree key paths on `env` resolve as attribute chains on `env.param`."""
     env, _ = build_env()
     state = env.init(rng=jax.random.PRNGKey(0), input=AT_REST)
 
     params = census('params (the object graph)', env)
     states = census('state (one tick of the world)', state)
 
-    # param addresses ARE attribute chains off env.param, the explicit
-    # value spelling (member hops off the node itself slice bound nodes)
+    # Keyed PyTree paths resolve directly via attribute lookup on env.param.
     import functools
     for key_path, leaf in params[:6]:
         chain = jax.tree_util.keystr(key_path).split('.')[1:]
         assert functools.reduce(getattr, chain, env.param) is leaf
-    # state mirrors the stateful members only; both trees are non-trivial
     assert len(params) > 25 and len(states) > 15
 
 
 def test_dt_is_one_ambient_knob():
-    """dt is one ambient value at one point of use, so rebinding it
-    re-times every block coherently: the same 0.2s velocity command at
-    half the step size tracks the same physics (dt-in-seconds discipline
-    enforced across 11 nodes at once — a per-step unit bug anywhere
-    splits these runs)."""
+    """Verifies that halving ambient `dt` while doubling step count reproduces the same physical velocity trajectory."""
     fine, _ = build_env(dt=DT / 2)
     coarse, _ = build_env()
 
@@ -370,15 +334,11 @@ def test_dt_is_one_ambient_knob():
 
 
 def test_model_mismatch_ensemble_visual():
-    """The step-response setup, run as an ensemble of ten: identical
-    true plants, each CONTROLLER holding a corrupted model — R, L and Kt
-    estimates scaled by uniform factors in [0.9, 1.1] per member (member
-    0 nominal). ensemble maps params per member and splits the boundary
-    key per member, so each actuator runs its own sensor-noise
-    realization: the nominal member shows what noise alone does to one
-    actuator, and the fan beyond that baseline is the model error.
-    Renders the shared four-panel view —
-    tests/plots/model_mismatch_ensemble.png."""
+    """Evaluates a 10-member `ensemble` where each controller's internal motor model is perturbed by +/-10% against a nominal plant.
+
+    `ensemble` maps perturbed parameters and splits sensor-noise keys across members, isolating
+    plant-model mismatch around the nominal member 0 baseline and saving `model_mismatch_ensemble.png`.
+    """
     import os
     from nodejax import ensemble
 
@@ -408,15 +368,13 @@ def test_model_mismatch_ensemble_visual():
         load=jnp.zeros_like(cmd))
     traj = Struct(output=out, state=aux.state)
 
-    vel = traj.state.mechanical.velocity                   # (n, N)
+    vel = traj.state.mechanical.velocity
     assert vel.shape == (len(t), N)
     assert jnp.all(jnp.isfinite(vel))
-    # the nominal member holds the step test's cruise tracking; the
-    # corrupted ones stay in the fold — feedback absorbs a 10% model
-    # error, it does not hide it
+    # Feedback keeps all perturbed controllers within 3 rad/s of the 55 rad/s cruise target while leaving model spread measurable.
     assert jnp.abs(jnp.mean(vel[1800:2500, 0]) - 55.0) < 1.0
     assert jnp.all(jnp.abs(jnp.mean(vel[1800:2500], axis=0) - 55.0) < 3.0)
-    assert jnp.std(vel[2500]) > 0.0                        # the mismatch is visible
+    assert jnp.std(vel[2500]) > 0.0
 
     out = render_stack_panels(
         t, cmd, traj, 'model_mismatch_ensemble.png',

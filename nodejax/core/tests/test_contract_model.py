@@ -1,4 +1,4 @@
-"""The uniform T4 call records and their T3 Contract view."""
+"""Verifies `CallForm`, `CallField`, `ContractCalls`, and `Contract` view invariants."""
 
 import jax.numpy as jnp
 import pytest

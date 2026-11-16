@@ -1,4 +1,4 @@
-"""Spatial and stochastic stock blocks."""
+"""Verifies spatial pooling, convolution, and stochastic regularization Nodes."""
 
 import jax
 import jax.numpy as jnp

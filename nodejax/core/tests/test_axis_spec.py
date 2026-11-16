@@ -1,12 +1,4 @@
-"""AxisSpec: the element under the map survives an unknown count.
-
-A mapping transform reshapes its input, so it cannot publish its inner's
-spec as its own. It used to publish the stacked shape when it knew the
-count and nothing at all when it did not, erasing a fully known element.
-Now it publishes the element under the map: params build against it,
-bindings validate against it and adopt the count, and only tiling ever
-demands a number.
-"""
+"""Verifies `AxisSpec` element publication, count adoption, validation, and nested axis mapping."""
 
 import jax
 import jax.numpy as jnp
@@ -25,15 +17,13 @@ def net() -> Node:
 def test_batch_publishes_the_element():
     b = batch(net())
     spec = b.contract.input_spec
-    assert type(spec.input) is AxisSpec          # the map lives per field
+    assert type(spec.input) is AxisSpec
     assert spec.input.count is None
     assert element_spec(spec).input.shape == (4,)
 
 
 def test_params_build_before_any_batch_binds():
-    """The capability the erasure used to cost: params never depend on
-    the count, so an element-resolved batch parameterizes without a
-    batch in sight."""
+    """Verifies `batch` parameterizes from element shapes before any batch size is bound."""
     node = batch(net()).parameterize(rng=jax.random.PRNGKey(0))
     assert node.param.linear.w.shape == (4, 5)
     out = node.apply(jnp.ones((8, 4)))
@@ -46,7 +36,7 @@ def test_binding_adopts_the_count():
     assert type(spec.input) is AxisSpec and spec.input.count == 3
     node = b.parameterize()
     state = node.init()
-    assert state.shape == (3,)                 # tiled from the adopted count
+    assert state.shape == (3,)
 
 
 def test_axis_declarations_support_functional_replacement():
@@ -206,8 +196,7 @@ def test_wrong_element_fails_named():
 
 
 def test_an_unbatched_input_fails_named():
-    """The old ndim-sniffing case, principled: a scalar leaf has no axis
-    to map."""
+    """Verifies `batch` rejects scalar inputs that lack a mappable axis."""
     with pytest.raises(TypeError, match='no axis to map|scalar leaf'):
         batch(Integrator().with_input(jnp.zeros(())), n=4).with_input(jnp.zeros(()))
 

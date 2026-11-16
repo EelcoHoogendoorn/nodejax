@@ -1,19 +1,4 @@
-"""The aux stream: one tuple convention for secondary outputs.
-
-The output doctrine makes it unambiguous: a node's output is an array or a
-Struct (positional pairs as DATA are named Structs, in the same
-named-bundle style as param/state/input; lists remain the positional
-escape hatch). The 2-tuple is thereby contract syntax:
-
-    return output          # no aux
-    return output, aux     # sown losses, taps, metrics
-
-Composites divert member aux under member names and re-emit
-(carry, collection) — same pair shape, so the slot nests with no
-wrapper fields and no unwrap heuristics; destructure at the top. And
-because aux rides ordinary outputs, scan stacks it over time, ensemble
-over members, batch over elements: the axes just appear.
-"""
+"""Verifies `Aux` collection across `Leaf`, `Composite`, `serial`, `scan`, and `train_step`."""
 
 import jax.numpy as jnp
 import optax
@@ -30,7 +15,7 @@ def mse(prediction, target):
 
 
 def Watched() -> Node:
-    """A node that sows: emits its activity alongside its output."""
+    """Builds a `Leaf` that emits squared output activity as `Aux`."""
     def param(w):
         return Struct(w=jnp.asarray(w))
     def apply(param, input):
@@ -47,8 +32,8 @@ def test_aux_diverts_and_carry_flows_clean():
                               watched=Struct(w=jnp.asarray(3.0)),
                               gain_2=Struct(scale=jnp.asarray(10.0)))
     out, aux = bound.apply(1.0)
-    assert out == 60.0                   # 1 * 2 * 3 * 10 — aux never touched the wire
-    assert aux.watched.activity == 36.0  # (2*3)^2, sown from mid-pipe
+    assert out == 60.0                   # Primary wire evaluates 1 * 2 * 3 * 10.
+    assert aux.watched.activity == 36.0  # Mid-pipe `Aux` records (2 * 3)^2.
 
 
 def test_aux_nests_through_composition():
@@ -58,11 +43,11 @@ def test_aux_nests_through_composition():
                                post=Struct(scale=10.0))
     out, aux = bound.apply(1.0)
     assert out == 60.0
-    assert aux.core.watched.activity == 36.0   # member path, nested
+    assert aux.core.watched.activity == 36.0
 
 
 def test_aux_stacks_under_scan():
-    """Time axis appears on the aux automatically: it is just output."""
+    """Verifies `scan` stacks `Aux` leaves along the leading time axis."""
     def watched_integrator():
         def param(gain):
             return Struct(gain=jnp.asarray(gain))
@@ -78,12 +63,12 @@ def test_aux_stacks_under_scan():
     ys, aux = seq.apply(jnp.array([1.0, 1.0, 1.0]))
 
     assert jnp.allclose(ys, jnp.array([10.0, 20.0, 30.0]))
-    assert jnp.allclose(aux.wint.mag, jnp.array([1.0, 4.0, 9.0]))  # (T,)
+    assert jnp.allclose(aux.wint.mag, jnp.array([1.0, 4.0, 9.0]))
 
 
 def test_aux_loss_in_training():
     """An aux-aware loss reaches the expected analytic compromise."""
-    model = Watched()   # y = w*x, aux.activity = y^2
+    model = Watched()
     lam = 0.125
 
     def loss(output, target, *, aux):
@@ -95,7 +80,7 @@ def test_aux_loss_in_training():
     final, (_, aux) = trainer.scan(input=tile(jnp.asarray(2.0), steps),
                                    target=tile(jnp.asarray(6.0), steps))
 
-    # d/dw [(2w-6)^2 + lam*(2w)^2] = 0  ->  w = 24/(8 + 8*lam) = 8/3
+    # Stationary point of (2w - 6)^2 + lam * (2w)^2 is w = 24 / (8 + 8 * lam) = 8 / 3.
     assert jnp.allclose(
         final.state.opt.params.model.w,
         24.0 / (8.0 + 8.0 * lam),
@@ -104,19 +89,19 @@ def test_aux_loss_in_training():
 
 
 def test_split_aux_is_the_whole_convention():
-    """The channel is one public function; custom composites reuse it."""
+    """Verifies `split_aux` distinguishes `(output, Aux)` pairs from `Struct`, array, and plain tuple outputs."""
     out, aux = split_aux((1.0, Aux(a=2.0)))
-    assert out == 1.0 and aux.a == 2.0            # pair = (output, aux)
+    assert out == 1.0 and aux.a == 2.0
     out, aux = split_aux(Struct(y=1.0, z=2.0))
-    assert out.y == 1.0 and aux is None           # Structs are plain outputs
+    assert out.y == 1.0 and aux is None
     out, aux = split_aux(jnp.asarray(3.0))
-    assert aux is None                            # arrays too
-    out, aux = split_aux((1.0, 2.0))              # plain 2-tuple of numbers is clean positional data
+    assert aux is None
+    out, aux = split_aux((1.0, 2.0))
     assert out == (1.0, 2.0) and aux is None
 
 
 def test_self_sow_sugar():
-    """Verify self.sow(**kwargs) imperatively sows aux fields into the step's aux stream."""
+    """Verifies `self.sow(**kwargs)` emits auxiliary fields from an authored `Composite`."""
     from nodejax import Composite
 
     def Block():

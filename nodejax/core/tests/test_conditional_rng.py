@@ -1,4 +1,4 @@
-"""Conditional RNG forwarding keeps authored code uniform and APIs exact."""
+"""Verifies conditional PRNG stream forwarding via `MaybeKeyStream` and `rng_from`."""
 
 import jax
 import jax.numpy as jnp

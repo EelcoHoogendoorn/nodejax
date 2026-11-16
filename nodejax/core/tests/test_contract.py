@@ -1,14 +1,4 @@
-"""The compiled contract and its validated public construction surface.
-
-One data bundle in, validated against the spec: unknown fields and missing
-REQUIRED fields are loud; RNG is a separate framework channel; a
-shape-reading constructor reaches its node through the node itself, never a
-bundle field. These are the bundled signatures of the public node contract.
-
-Above the contract sits the ONE boundary sugar, symmetric across all three
-channels: parameterize / init / apply each take ONE bundle positionally, or
-loose fields packed into one (state stays positional on a cyclic apply).
-"""
+"""Verifies compiled `Contract` operations, bundle validation, PRNG streams, and call sugar."""
 import jax
 import jax.numpy as jnp
 import pytest
@@ -76,14 +66,12 @@ def Derivative(dt: float) -> Node:
     return Leaf(apply, init=init)
 
 
-# --- param construction ---
-
 def test_contract_param_leaf():
     p = _param(Gain(), Struct(scale=2.0))
     assert jnp.allclose(p.scale, 2.0)
     assert Gain().bind(p).apply(3.0) == 6.0
 
-    q = _param(PI(), Struct(kp=1.0))       # ki falls to the ctor's default
+    q = _param(PI(), Struct(kp=1.0))
     assert jnp.allclose(q.ki, 0.0)
 
 
@@ -93,7 +81,7 @@ def test_parameterize_validates_the_bundle():
     with pytest.raises(TypeError, match='missing required'):
         Gain().parameterize(Struct())
     with pytest.raises(TypeError, match='parameterize requires rng'):
-        Noisy().parameterize(Struct(width=4))   # compiled plan requires a key
+        Noisy().parameterize(Struct(width=4))
     with pytest.raises(TypeError, match='not parametric'):
         Plant(0.1, 1.0, 0.1).node.parameterize(Struct(x=1.0))
     assert _param(Plant(0.1, 1.0, 0.1).node) == ()
@@ -106,7 +94,7 @@ def test_contract_param_rng_is_a_separate_frame():
     p3 = _param(Noisy(), key=jax.random.PRNGKey(1))
     assert jnp.allclose(p1.w, p2.w)
     assert not jnp.allclose(p1.w, p3.w)
-    assert p1.w.shape == (3,)                  # width falls to its default
+    assert p1.w.shape == (3,)
 
 
 def test_contract_param_composite_boundary_rng():
@@ -116,7 +104,7 @@ def test_contract_param_composite_boundary_rng():
     assert p.n.w.shape == (3,)
     assert jnp.allclose(p.g.scale, 2.0)
     with pytest.raises(TypeError, match='parameterize requires rng'):
-        net.parameterize(Struct(g=Struct(scale=2.0)))   # boundary rng enforced
+        net.parameterize(Struct(g=Struct(scale=2.0)))
 
     det = serial(a=Gain(), b=PI())
     q = _param(det, Struct(a=Struct(scale=2.0), b=Struct(kp=1.0)))
@@ -126,8 +114,6 @@ def test_contract_param_composite_boundary_rng():
             Struct(a=Struct(scale=2.0), b=Struct(kp=1.0)),
             rng=jax.random.PRNGKey(0))
 
-
-# --- state initialization ---
 
 def test_contract_init_leaf_and_state_input():
     node = Integrator().parameterize()
@@ -149,10 +135,10 @@ def test_public_init_non_cyclic_rejects_an_rng_channel():
 
 def test_contract_init_primes_from_the_input_channel():
     derivative = Derivative(0.1)
-    # input is its OWN channel, typed by apply_input_spec — never a bundle field
+    # Priming `input` travels through `contract.prime` rather than the state-input bundle.
     state = _init(derivative.node, (), input=jnp.asarray(5.0))
-    assert jnp.allclose(state, 5.0)                # primed from the real value
-    assert derivative.contract.init_requires_input          # the record, stored on the node
+    assert jnp.allclose(state, 5.0)
+    assert derivative.contract.init_requires_input
     with pytest.raises(TypeError, match='unknown bundle fields'):
         derivative.init(Struct(input=jnp.asarray(5.0)))
 
@@ -161,8 +147,8 @@ def test_contract_init_composite_boundary_rng():
     net = serial(w=Walker(), g=Gain()).parameterize(
         w=Struct(sigma=1.0), g=Struct(scale=2.0))
     s = _init(net.node, net.param, key=jax.random.PRNGKey(0))
-    assert s.w.x == 0.0                        # walker started from the split
-    assert s.g == ()                           # dense T4 state slot
+    assert s.w.x == 0.0
+    assert s.g == ()
 
 
 def test_composite_published_state_spec_is_a_canonical_init_input():
@@ -173,7 +159,6 @@ def test_composite_published_state_spec_is_a_canonical_init_input():
     assert state.integrator == 0.0
     assert state.relu == ()
 
-# --- the boundary sugar: loose fields pack the same on all three channels ---
 
 def test_apply_fields_pack_into_the_bundle():
     def mix():
@@ -184,7 +169,7 @@ def test_apply_fields_pack_into_the_bundle():
         return Leaf(apply, param=param, name='mix')
 
     n = mix().parameterize(gain=2.0)
-    assert n.apply(jnp.asarray(3.0), jnp.asarray(1.0)).y == 7.0   # positional, in order
+    assert n.apply(jnp.asarray(3.0), jnp.asarray(1.0)).y == 7.0
     assert n.apply(a=jnp.asarray(3.0), b=jnp.asarray(1.0)).y == 7.0
     assert n.apply(bundle=Struct(a=jnp.asarray(3.0), b=jnp.asarray(1.0))).y == 7.0
     with pytest.raises(TypeError, match='positionally and by keyword'):
@@ -205,12 +190,11 @@ def test_cyclic_apply_fields_keep_state_positional():
     _, via_bundle = n.apply(s, bundle=Struct(x=jnp.asarray(2.0)))
     assert via_fields == via_bundle == 2.0
     with pytest.raises(TypeError, match='positional'):
-        n.apply(x=jnp.asarray(2.0))              # state missing
+        n.apply(x=jnp.asarray(2.0))
 
 
 def test_unbound_surface_mirrors_the_bound_one():
-    """d.apply(param, ...) == d.bind(param).apply(...), sugar included;
-    init and scan mirror the same way."""
+    """Verifies unbound `Node.apply`, `Node.init`, and `scan` match their bound counterparts."""
     d = Gain()
     p = _param(d, Struct(scale=2.0))
     assert d.apply(p, 3.0) == d.bind(p).apply(3.0) == 6.0
@@ -221,7 +205,7 @@ def test_unbound_surface_mirrors_the_bound_one():
     assert s == idef.bind(q).init()
     s2, out = idef.apply(q, s, 5.0)
     assert out == 5.0
-    _, traj = scan(idef).apply(q, s, jnp.ones(3))   # unbound: param first
+    _, traj = scan(idef).apply(q, s, jnp.ones(3))
     assert jnp.allclose(traj, jnp.array([1.0, 2.0, 3.0]))
 
 

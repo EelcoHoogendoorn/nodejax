@@ -1,4 +1,4 @@
-"""Tests for moving one member's params into the input."""
+"""Verifies `externalize` moving parameters of a Node or composite member into runtime `apply` inputs."""
 
 import jax
 import jax.numpy as jnp
@@ -16,10 +16,10 @@ def test_externalize_member():
 
     node = ext.parameterize(gain=Struct(scale=jnp.asarray(2.0)),
                             gain_2=Struct(scale=jnp.asarray(0.0)))
-    assert node.param.gain_2 == ()               # externalized: an empty slot
+    assert node.param.gain_2 == ()
 
     out = node.apply(gain_2=Struct(scale=jnp.asarray(3.0)), input=1.0)
-    assert jnp.allclose(out, 6.0)                # 1 * 2 * 3, world bound from input
+    assert jnp.allclose(out, 6.0)
 
     reference = pipe.parameterize(gain=Struct(scale=jnp.asarray(2.0)),
                                   gain_2=Struct(scale=jnp.asarray(3.0)))
@@ -27,9 +27,7 @@ def test_externalize_member():
 
 
 def test_externalize_at_init():
-    """A cyclic pipe's init spec-propagates by running each member, so
-    the externalized slot needs values there; at_init supplies the
-    stand-in, and apply still binds the member from the input."""
+    """Verifies that `at_init` supplies stand-in member parameters during composite `init` propagation."""
     pipe = Gain() >> Integrator()
 
     bare = externalize(pipe, 'gain').parameterize(
@@ -45,7 +43,7 @@ def test_externalize_at_init():
         Struct(gain=Struct(scale=jnp.asarray(0.0)), input=0.0)
     ).bind(node.param).init()
     _, out = node.apply(state, gain=Struct(scale=jnp.asarray(3.0)), input=2.0)
-    assert jnp.allclose(out, 6.0)                # 0 + (2 * 3), accumulated once
+    assert jnp.allclose(out, 6.0)
 
 
 def test_externalize_composite_subtree() -> None:
@@ -85,7 +83,7 @@ def test_externalize_whole_node() -> None:
 
 
 def test_externalized_call_stays_flat_beside_the_node_fields() -> None:
-    """A node with several call fields keeps them; the parameter field joins."""
+    """Verifies that an externalized member parameter joins existing named `apply` fields."""
     members = Composite(gain=Gain(), offset=Gain())
 
     def apply(self, input, shift):

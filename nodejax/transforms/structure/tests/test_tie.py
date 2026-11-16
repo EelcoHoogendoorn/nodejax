@@ -1,19 +1,9 @@
-"""Tests for structural parameter sharing, without reference semantics: SHARING IS
-REPARAMETERIZATION. tie() precomposes a composite def with an expand map
-that inserts one param subtree at every consumer's slot before init/apply.
-The composite param carries a single copy, so:
+"""Verifies structural parameter sharing via `tie` across composite members.
 
-- gradients from every use accumulate by the chain rule (verified exactly
-  against the untied sum below),
-- the optimizer sees one object; tied training cannot diverge,
-- the sharing cannot be silently lost through a jax boundary — it is
-  structural; there is no second copy to lose.
-
-State stays per-member: share the object, not its state.
-
-Two archetypes: a tied autoencoder, and tied embeddings, where the
-embed and unembed views of a language model read one table: the same
-object by definition, so training either view trains both.
+`tie` stores one canonical parameter subtree on the source member and expands it
+into every tied consumer before `init` and `apply`, so gradients accumulate by
+the chain rule, PyTree operations preserve sharing, and member state remains
+independent.
 """
 
 import jax
@@ -28,9 +18,6 @@ from nodejax.core.types import PyTree
 from nodejax.struct import Struct
 
 
-# these are tie's foundational tests.
-
-
 def mse(pred: jax.Array, target: jax.Array) -> jax.Array:
     return jnp.mean((pred - target) ** 2)
 
@@ -39,8 +26,6 @@ def tile(tree: PyTree, n: int):
     return jax.tree.map(lambda x: jnp.broadcast_to(x, (n,) + jnp.shape(x)), tree)
 
 
-# === archetype 1: tied autoencoder (shared layer weights, summed grads) ===
-
 K = 3
 
 
@@ -48,7 +33,7 @@ def Encoder(k: int) -> Node:
     def param(rng):
         return Struct(weight=jax.random.normal(rng.next(), (k,)))
     def apply(param, input):
-        return param.weight @ input          # k -> scalar code
+        return param.weight @ input
     return Leaf(apply, param=param, name='enc')
 
 
@@ -56,7 +41,7 @@ def Decoder(k: int) -> Node:
     def param(rng):
         return Struct(weight=jax.random.normal(rng.next(), (k,)))
     def apply(param, input):
-        return param.weight * input          # scalar -> k, SAME weights
+        return param.weight * input
     return Leaf(apply, param=param, name='dec')
 
 
@@ -78,8 +63,7 @@ def tied_autoencoder() -> Node:
 
 
 def test_single_copy_survives_jax_boundaries():
-    """One weight array in the whole composite param — and because sharing
-    is structural, no jit/tree_map boundary can lose it."""
+    """Verifies that `tie` stores one weight leaf and preserves sharing across `tree_map` and `jit`."""
     node = tied_autoencoder().parameterize(rng=jax.random.PRNGKey(0))
     assert len(jax.tree.leaves(node.param)) == 1
     assert 'dec' not in node.param
@@ -92,12 +76,10 @@ def test_single_copy_survives_jax_boundaries():
 
 
 def test_gradients_accumulate_across_uses():
-    """The chain rule does the bookkeeping: the tied gradient equals the
-    SUM of the untied per-use gradients at the same values."""
+    """Verifies that the tied parameter gradient equals the sum of untied per-member gradients."""
     w = jnp.array([0.5, -1.0, 2.0])
     x = jnp.array([1.0, 2.0, 3.0])
 
-    # ready-made param pytrees enter via bind; bundles carry param inputs
     tied = tied_autoencoder().bind(Struct(enc=Struct(weight=w), dec=()))
     untied = (Encoder(K) >> Decoder(K)).bind(
         Struct(enc=Struct(weight=w), dec=Struct(weight=w)))
@@ -109,17 +91,16 @@ def test_gradients_accumulate_across_uses():
 
 
 def test_tied_training_cannot_diverge():
-    """train_step on the tied def: the optimizer sees one copy, so the
-    encoder/decoder weights are identical forever, by construction."""
+    """Verifies that `train_step` updates the single shared parameter copy of a tied autoencoder."""
     auto = tied_autoencoder().parameterize(rng=jax.random.PRNGKey(1)).initialize()
     trainer = train_step(auto, mse, optax.adam(0.05))
 
-    u = jnp.array([0.6, -0.8, 0.0])          # unit direction to reconstruct
+    u = jnp.array([0.6, -0.8, 0.0])
     steps = 400
     final, aux = trained(trainer).apply(input=tile(u, steps), target=tile(u, steps))
 
-    assert aux.loss[-1] < 1e-3                  # rank-1 reconstruction learned
-    assert 'dec' not in final.param               # still exactly one copy
+    assert aux.loss[-1] < 1e-3
+    assert 'dec' not in final.param
 
 
 def test_alias_parameterization_rejected():
@@ -256,15 +237,11 @@ def test_alias_before_captured_source_uses_source_during_spec_walk():
     assert output == 12.0
 
 
-# === archetype 2: tied embeddings (one table, two views) ===
-
 VOCAB, DIM = 8, 4
 
 
 def test_tied_embeddings_are_one_object():
-    """One table serves both views; training the round trip toward
-    identity moves embed and unembed together, because there is nothing
-    else to move."""
+    """Verifies that tying `nn.Embed` and `nn.Unembed` shares one embedding table across training."""
     lm = tie(nn.Embed(VOCAB, DIM) >> nn.Unembed(VOCAB, DIM), 'embed', 'unembed')
     ids = jnp.arange(VOCAB)
 
@@ -277,13 +254,12 @@ def test_tied_embeddings_are_one_object():
 
     trainer = train_step(node.initialize(), xent, optax.adam(0.1))
     final, aux = trained(trainer).apply(input=tile(ids, 200), target=tile(ids, 200))
-    assert aux.loss[-1] < 0.1                          # round trip learned
-    assert 'unembed' not in final.param                  # still one copy
+    assert aux.loss[-1] < 0.1
+    assert 'unembed' not in final.param
 
 
 def test_tie_rejects_leaves_and_unknown_members():
-    """tie rewires member param slots, so a memberless def and a name that
-    is no member both fail at construction."""
+    """Verifies that `tie` rejects memberless leaf Nodes and unknown member names."""
     from nodejax.control import Gain
     with pytest.raises(TypeError, match='has none'):
         tie(Gain(), 'enc', 'dec')
@@ -293,10 +269,7 @@ def test_tie_rejects_leaves_and_unknown_members():
 
 
 def test_tie_resolves_shape_reading_members():
-    """The tied constructor runs serial's spec walk, so a member that reads
-    its fan-in off the resolved node (nn.Linear) builds inside a tied pipe.
-    It did not, once: tie built each member from its raw def, and a
-    shape-reading constructor read its fan-in off nothing."""
+    """Verifies that `tie` propagates input shapes to interior shape-reading members like `nn.Linear`."""
     ids = jnp.arange(VOCAB)
     pipe = nn.Embed(VOCAB, DIM) >> nn.Linear(DIM) >> nn.Unembed(VOCAB, DIM)
     node = tie(pipe, 'embed', 'unembed').with_input(ids).parameterize(rng=jax.random.PRNGKey(0))

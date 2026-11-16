@@ -33,8 +33,7 @@ def test_compiled_init_has_binary_arity():
     shape_init = _shape_initialized()._def.calls.init
     value_init = _value_initialized()._def.calls.init
 
-    # The canonical order is binding order: what the definition IS, then
-    # what it has been bound to, then what the call supplies, entropy last.
+    # Canonical parameter order places `definition`, `param`, `formed_input`, optional `input`, and `rng`.
     assert not shape_init.requires_input
     assert tuple(inspect.signature(shape_init.impl).parameters) == (
         'definition', 'param', 'formed_input', 'rng')

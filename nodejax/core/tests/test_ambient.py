@@ -1,6 +1,4 @@
-"""Ambient construction arguments: dynamic scope for the node-building
-stage — declared at the definition site, supplied at one point of use,
-construction-time only."""
+"""Verifies `ambient` dynamic construction scopes, override precedence, and scope exit."""
 
 import pytest
 
@@ -20,7 +18,7 @@ def test_scope_fills_unbound():
 
 def test_explicit_always_wins():
     with ambient(dt=0.5, gain=3.0):
-        node = block(0.1)                        # positional dt beats scope
+        node = block(0.1)                        # Positional argument overrides ambient scope.
     assert node.apply(1.0) == pytest.approx(0.3)
 
 
@@ -34,12 +32,11 @@ def test_scopes_nest_inner_wins():
 
 
 def test_outside_scope_nothing_becomes_optional():
-    """No scope, no fill: dt stays unbound, so the product is a GENERIC
-    (the spectrum: statics unbound is a generic, never an error)."""
+    """Verifies `block()` remains generic when `dt` has no ambient or explicit value."""
     assert block().generic
 
 
 def test_scope_restores_on_exit():
     with ambient(dt=1.0):
         pass
-    assert block().generic                       # the fill died with the scope
+    assert block().generic                       # Ambient binding expires when the block exits.

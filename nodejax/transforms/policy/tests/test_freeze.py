@@ -1,10 +1,4 @@
-"""freeze / tree_freeze / map_members — structural rewrites over the node
-tree, resting on composite member nodes.
-
-The models are stock nn blocks: Linear for the param-carrying members,
-EMA for a member whose state is all it owns, RNN for a live cyclic
-member that must survive a partial freeze.
-"""
+"""Verifies structural state freezing, gradient detachment, and `map_members` rewrites."""
 import jax
 import jax.numpy as jnp
 
@@ -43,22 +37,21 @@ def test_freeze_whole_node_is_noncyclic_and_faithful():
     snet, model, state, ref = _pipe()
     assert snet.cyclic
     fz = freeze(model, state)
-    assert not fz.cyclic                     # the cyclic slot is gone
-    assert jnp.allclose(fz.apply(X), ref)         # applies with the held state
-    assert jnp.allclose(fz.apply(X), fz.apply(X)) # and is deterministic (frozen)
+    assert not fz.cyclic
+    assert jnp.allclose(fz.apply(X), ref)
+    assert jnp.allclose(fz.apply(X), fz.apply(X))
 
 
 def test_tree_freeze_propagates_cyclicity():
     snet, model, state, ref = _pipe()
     tf = tree_freeze(model, tree_filter(state, 'ema'))
-    # the only stateful member froze, so the pipe recomputes to non-cyclic
+    # Freezing the sole stateful member makes the enclosing pipe acyclic.
     assert not tf.cyclic
-    assert tf.contract.input_spec is None  # tree binding discards input evidence
+    assert tf.contract.input_spec is None
     assert jnp.allclose(tf.apply(X), ref)
 
 
 def test_tree_freeze_full_state_equals_freeze():
-    # a full state (no KEEP) freezes everything, matching whole-node freeze
     snet, model, state, ref = _pipe()
     tf = tree_freeze(model, state)
     assert not tf.cyclic
@@ -66,27 +59,23 @@ def test_tree_freeze_full_state_equals_freeze():
 
 
 def test_tree_freeze_partial_stays_cyclic():
-    # two stateful members; freeze one, the pipe must stay cyclic
     snet = nn.Linear(4) >> nn.EMA(0.1) >> nn.EMA(0.05)
     model = snet.with_input(X).parameterize(rng=jax.random.PRNGKey(0))
     state = model.init()
     frozen_all = tree_freeze(model, tree_filter(state, 'ema'))
-    assert not frozen_all.cyclic             # both froze -> non-cyclic
-    # a filter matching nothing is a loud miss, never an empty spec
+    assert not frozen_all.cyclic
     import pytest
     with pytest.raises(ValueError, match='matched nothing'):
         tree_filter(state, 'nomatch')
 
 
 def test_freeze_removes_state_slots():
-    snet, model, state, ref = _pipe()             # Linear >> EMA >> Linear
-    assert len(jax.tree.leaves(state)) > 0        # the ema's smoothed copy
+    snet, model, state, ref = _pipe()
+    assert len(jax.tree.leaves(state)) > 0
 
-    # whole freeze: no state slot survives at all
     fz = freeze(model, state)
     assert jax.tree.leaves(fz.init()) == []
 
-    # tree_freeze the only stateful member: its slots vanish, pipe non-cyclic
     tf = tree_freeze(model, tree_filter(state, 'ema'))
     assert not tf.cyclic
     assert jax.tree.leaves(
@@ -94,27 +83,25 @@ def test_freeze_removes_state_slots():
 
 
 def test_tree_freeze_partial_drops_only_frozen_slots():
-    # EMA (frozen) + RNN (live): the smoothing slots go, the RNN state
-    # stays, and the model stays cyclic
     snet = nn.Linear(4) >> nn.EMA(0.1) >> nn.RNN(4)
     model = snet.with_input(X).parameterize(rng=jax.random.PRNGKey(0))
     state = model.init()
     n_before = len(jax.tree.leaves(state))
 
     tf = tree_freeze(model, tree_filter(state, 'ema'))
-    assert tf.cyclic                         # the RNN is still live
+    assert tf.cyclic
     after = tf.with_input(X).bind(tf.param).init()
     n_after = len(jax.tree.leaves(after))
-    assert 0 < n_after < n_before                 # ema slots dropped, RNN kept
+    assert 0 < n_after < n_before
 
 
 def test_tree_freeze_hand_built_sparse_spec():
-    # freeze one node by hand: just the key you want — no mirror, no filter
+    # A sparse `Struct` naming only the target member freezes that member directly.
     snet = nn.Linear(4) >> nn.EMA(0.1) >> nn.RNN(4)
     model = snet.with_input(X).parameterize(rng=jax.random.PRNGKey(0))
     state = model.init()
     tf = tree_freeze(model, Struct(ema=state.ema))
-    assert tf.cyclic                          # the RNN is still live
+    assert tf.cyclic
     after = tf.with_input(X).bind(tf.param).init()
     assert 0 < len(jax.tree.leaves(after)) < len(jax.tree.leaves(state))
 
@@ -163,7 +150,7 @@ def test_map_members_identity_rebuilds_the_same_computation():
 
 
 def test_detach_stops_gradient():
-    # detach is the param-side twin of freeze: it pins weights, not state
+    # `detach` stops gradients through all parameters of the wrapped Node.
     model = (nn.Linear(8) >> nn.gelu >> nn.Linear(4)).with_input(X).parameterize(
         rng=jax.random.PRNGKey(0))
 
@@ -172,8 +159,8 @@ def test_detach_stops_gradient():
 
     g_full = jax.tree.leaves(jax.grad(loss)(model))
     g_detached = jax.tree.leaves(jax.grad(loss)(detach(model)))
-    assert any(jnp.abs(x).sum() > 0 for x in g_full)       # baseline has real grads
-    assert all(jnp.abs(x).sum() == 0 for x in g_detached)  # detached weights get none
+    assert any(jnp.abs(x).sum() > 0 for x in g_full)
+    assert all(jnp.abs(x).sum() == 0 for x in g_detached)
 
 
 def test_detach_preserves_bound_state_and_state_transition():
@@ -200,12 +187,11 @@ def test_detach_preserves_bound_state_and_state_transition():
 
 
 def test_tree_detach_selects_by_key():
-    # tree_detach freezes the weights of members matched by key; here both
-    # linears match, so no weight gets a gradient
+    # `tree_detach` stops gradients on members matched by substring key.
     model = (nn.Linear(8) >> nn.gelu >> nn.Linear(4)).with_input(X).parameterize(
         rng=jax.random.PRNGKey(0))
     frozen = tree_detach(model, 'linear')
-    assert frozen.contract.input_spec is None  # tree binding discards input evidence
+    assert frozen.contract.input_spec is None
 
     def loss(node):
         return jnp.sum(node.apply(X[0]) ** 2)
@@ -247,9 +233,7 @@ def test_tree_detach_preserves_bound_state_and_other_gradients():
 
 
 def test_selective_walks_fail_loud_on_a_miss():
-    """A selector that lands on nothing raises at the call: leaf targets
-    point to the whole-node twins, and a name matching no member is an
-    error, never a silent identity."""
+    """Verifies that `tree_detach`, `tree_freeze`, and `tree_filter` raise on unmatched keys or leaf targets."""
     import pytest
     model = (nn.Linear(8) >> nn.gelu >> nn.Linear(4)).with_input(X).parameterize(
         rng=jax.random.PRNGKey(0))
@@ -268,7 +252,7 @@ def test_selective_walks_fail_loud_on_a_miss():
 
 
 def test_a_rewrite_discards_later_boundary_shape_evidence():
-    """Tree binding precedes and therefore invalidates input binding."""
+    """Verifies that `map_members` clears prior `with_input` resolution until `with_input` runs again."""
     from nodejax import map_members
 
     d = (nn.Linear(4) >> nn.EMA(0.1)).with_input(jnp.zeros(4))

@@ -1,4 +1,4 @@
-"""Focused checks for reusable reinforcement-learning distribution Nodes."""
+"""Verifies joint sampling, log-probability, and entropy on reinforcement-learning distribution `Node`s."""
 
 import jax
 import jax.numpy as jnp

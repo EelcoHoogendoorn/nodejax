@@ -1,4 +1,4 @@
-"""Focused checks for the runnable recurrent PPO Pendulum example."""
+"""Verifies feedforward and recurrent PPO training, ensemble value losses, and evaluation on `Pendulum`."""
 
 import jax
 import jax.numpy as jnp
@@ -37,7 +37,7 @@ N_VALUE_MEMBERS = 2
 
 
 def min_ensemble_pendulum_value() -> Node:
-    """Build the min-valued ensemble used to test architecture-local loss logic."""
+    """Builds a min-reduced `PendulumValue` ensemble that exposes member predictions on `Aux`."""
     return (
         ensemble(PendulumValue(hidden=HIDDEN), n=N_VALUE_MEMBERS)
         >> reduce(jnp.min)
@@ -45,13 +45,13 @@ def min_ensemble_pendulum_value() -> Node:
 
 
 def min_ensemble_value_loss(reduced_value, target, *, aux) -> jax.Array:
-    """Fit every ensemble member before the min reduction."""
+    """Computes mean squared error across all ensemble member value predictions against `target`."""
     member_values = aux.reduce_min.population
     return mse(member_values, target[..., None])
 
 
 def test_ppo_improves_both_policy_lifecycles() -> None:
-    """A short run moves rollout cost for feed-forward and recurrent policy."""
+    """Verifies that 20 PPO iterations reduce rollout cost for both feedforward and recurrent policies."""
     policies = (
         pendulum_policy(nn.identity),
         pendulum_policy(nn.GRU(MEMORY)),

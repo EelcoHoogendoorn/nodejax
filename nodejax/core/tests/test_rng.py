@@ -1,17 +1,12 @@
-"""The public RNG channel and model-owned RNG state are distinct.
+"""Verifies boundary PRNG routing and model-owned `rng` state advancement.
 
-- ``parameterize/initialize/apply(rng=key)`` accepts a raw boundary key only
-  when the compiled role's static RNG plan requires one.
-- A declared authored ``rng`` parameter receives a scope-local ``KeyStream``;
-  it is never a field in the role's data bundle or input spec.
-- A model STATE value named ``rng`` is modeled state. The authoring layer
-  advances that stored key on apply, so stochastic step nodes need not split
-  or thread their state key by hand.
-
-The auto-advance lives inside the contract apply_fn, so it composes with
-every transform unchanged. The one rule transforms must honor: key state
-replicates by SPLITTING (batch/ensemble/stack inits), never by broadcast —
-a copied key would give every element the same noise stream.
+Public `parameterize`, `initialize`, and `apply` calls accept a raw boundary
+key only when the compiled role's static PRNG plan requires one. A declared
+authored `rng` parameter receives a scope-local `KeyStream` rather than a
+field in the role's data bundle. Model state stored under `rng` advances
+automatically on apply, and replicating transforms (`batch`, `ensemble`,
+`stack`) split key state across elements rather than broadcasting a single
+stream.
 """
 
 import jax
@@ -24,8 +19,7 @@ from nodejax.control import Gain, Integrator, Walker
 
 
 def test_rng_state_advances():
-    """Successive applies draw different noise; the same state redraws the
-    same noise (purity)."""
+    """Verifies successive applies draw distinct noise while identical state replays."""
     node = Walker().parameterize(sigma=jnp.asarray(1.0))
     s0 = node.init(rng=jax.random.PRNGKey(0))
 
@@ -38,7 +32,7 @@ def test_rng_state_advances():
 
 
 def test_state_rng_can_seed_a_local_keystream():
-    """A Leaf can wrap its explicit RNG state for multiple local draws."""
+    """Verifies a `Leaf` can wrap its `rng` state in a `KeyStream` for multiple draws."""
     def param(scale):
         return Struct(scale=jnp.asarray(scale))
 
@@ -81,8 +75,7 @@ def test_rng_determinism_across_keys():
 
 
 def test_rng_in_param_constructor():
-    """Param-init keys don't come from state — a constructor declaring rng
-    receives a KeyStream at parameterize(rng=key)."""
+    """Verifies a `param` constructor declaring `rng` receives a `KeyStream` at `parameterize`."""
     def param(rng, n):
         return Struct(w=jax.random.normal(rng.next(), (n,)))
 
@@ -99,11 +92,10 @@ def test_rng_in_param_constructor():
 
 
 def test_apply_rng_is_a_declared_requirement():
-    """An authored trailing rng parameter compiles into the apply RNG plan.
+    """Verifies an authored trailing `rng` parameter compiles into `apply_takes_rng`.
 
-    The public key arrives beside ordinary input fields, and the authoring
-    adapter exposes the corresponding framework stream as a ``KeyStream``.
-    A key buried inside opaque domain data is not the call channel.
+    The public key arrives alongside ordinary input fields, and the authoring
+    adapter exposes the framework stream as a `KeyStream`.
     """
     def noise():
         def param(scale):
@@ -123,8 +115,7 @@ def test_apply_rng_is_a_declared_requirement():
 
 
 def test_batch_splits_keys():
-    """batch(...).init tiles ordinary state but SPLITS the rng field: each
-    batch element gets an independent noise stream."""
+    """Verifies `batch(...).init` tiles ordinary state while splitting `rng` per element."""
     b = batch(Walker(), n=3).parameterize(sigma=jnp.asarray(1.0))
     state = b.init(rng=jax.random.PRNGKey(0))
 
@@ -134,7 +125,7 @@ def test_batch_splits_keys():
 
 
 def test_ensemble_splits_keys():
-    """ensemble(...).init splits a single key across members."""
+    """Verifies `ensemble(...).init` splits a single boundary key across members."""
     e = ensemble(Walker(), n=2).parameterize(sigma=1.0)
     state = e.init(rng=jax.random.PRNGKey(0))
 
@@ -187,11 +178,7 @@ def test_rng_routing_by_inspection():
 
 
 def test_rng_to_deterministic_node_is_an_error():
-    """The compiled RNG plan is exact in both directions.
-
-    A deterministic role has an empty plan, so a surplus raw key fails at the
-    public RNG boundary independently of ordinary bundle validation.
-    """
+    """Verifies passing `rng=` to a deterministic role raises `TypeError` at the boundary."""
     with pytest.raises(TypeError, match='does not accept rng='):
         Gain().parameterize(scale=1.0, rng=jax.random.PRNGKey(0))
 
@@ -200,11 +187,7 @@ def test_rng_to_deterministic_node_is_an_error():
 
 
 def test_keystreams_never_escape_the_lifts():
-    """The stream object never enters a pytree. A field named 'rng'
-    stores it as its advanced raw key at every lift exit, param, init
-    and apply alike; any OTHER field is a leak and raises, pinned in
-    the leak tests below (recalibrated when the silent collapse of
-    non-rng stores became a named error)."""
+    """Verifies storing a `KeyStream` under `'rng'` collapses to an advanced raw key at lift exit."""
     def hoarder():
         def param(rng):
             return Struct(rng=rng)                 # the one sanctioned store
@@ -223,11 +206,7 @@ def test_keystreams_never_escape_the_lifts():
 
 
 def test_a_leaked_keystream_raises_named():
-    """The stream is scope-local: it leaves a node only through a field
-    named 'rng', as its advanced key. Any other escape raises at the
-    lift exit with the path, instead of surfacing later as an illegible
-    jax error (KeyStream.__jax_array__ once auto-drew on coercion, and
-    jax dropped that hook)."""
+    """Verifies returning a `KeyStream` outside `'rng'` raises `TypeError` naming the field path."""
     def stash(rng) -> Struct:
         return Struct(stash=rng)
     leaky = Leaf(lambda state, input: (state, input), init=stash, name='leaky')
@@ -236,8 +215,7 @@ def test_a_leaked_keystream_raises_named():
 
 
 def test_the_rng_field_still_stores_the_stream():
-    """The sanctioned store: init returns the stream under 'rng' and the
-    lift collapses it to an advanced key, dropout's own idiom."""
+    """Verifies returning `Struct(rng=rng)` from `init` stores an advanced raw key."""
     def start(rng) -> Struct:
         return Struct(rng=rng)
     keeper = Leaf(lambda state, input: (state, input), init=start, name='keeper')
@@ -254,8 +232,7 @@ def test_a_stream_returned_from_apply_raises_named():
 
 
 def test_rng_requirement_flags_read_the_tree():
-    """Each role's static RNG plan survives composition independently of its
-    data-input spec. A role that does not exist consumes no key."""
+    """Verifies each role's static PRNG flag composes across members independently of data specs."""
     from nodejax import nn
 
     def Withkey():

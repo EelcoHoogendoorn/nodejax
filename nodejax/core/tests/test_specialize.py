@@ -1,11 +1,9 @@
-"""specialize: statics as first-class metadata on the node, re-bound on a
-built tree.
+"""Verifies static metadata recording, `specialize` overrides, `statics_by_path`, and `describe`.
 
-A decorated factory stamps its record (factory, statics) on the node it
-builds; specialize re-runs the factory under overrides and rebuilds the
-tree around the changed leaves through the same recorded call that
-map_members uses. Broadcasts ('*.field') reach every leaf whose record
-declares the field and pass the rest untouched.
+A `@node`-decorated factory records `(factory, statics)` on the node it
+constructs. `specialize` replays the factory with overridden statics and
+rebuilds enclosing composites around changed leaves, while wildcard overrides
+(`'*.field'`) target matching leaves and leave unrelated members untouched.
 """
 
 import jax
@@ -19,12 +17,7 @@ from nodejax.control import Integrator
 
 
 def test_leaf_respecializes_and_keeps_its_kind():
-    """The record is the argument set the factory ran with; the eval
-    rebuild is the identity. Dropout draws at APPLY, so BOTH builds are
-    stateless and the flip moves only the key requirement: contract
-    honesty, with the state tree invariant across the mode switch
-    (recalibrated when dropout left the state-rng home). And the road
-    back exists."""
+    """Verifies `Dropout.specialize(train=False)` toggles `apply_takes_rng` while staying stateless."""
     drop = nn.Dropout(0.3).node
     assert drop.statics_by_path()['rate'] == 0.3
     ident = drop.specialize(train=False)
@@ -48,11 +41,7 @@ def test_static_replay_discards_later_input_specialization():
 
 
 def test_wildcards_and_transfer_through_the_tree():
-    """'*.train' reaches the leaves that declare it, through the pipe.
-    The train build's state bundle demands the dropout key; the eval
-    build's does not. Params transfer across the flip (the constraint a
-    mode static must keep), the stats freeze, and the evaluator is a
-    plain deterministic function."""
+    """Verifies `'*.train'` reaches matching pipe leaves while preserving parameter compatibility."""
     pipe = (nn.Linear(16) >> nn.gelu >> nn.Dropout(0.3)
             >> nn.BatchNorm(0.1) >> nn.Linear(3)).with_input(jnp.zeros(4))
     evalp = pipe.specialize(**{'*.train': False})
@@ -68,8 +57,7 @@ def test_wildcards_and_transfer_through_the_tree():
 
 
 def test_dot_path_addresses_one_member():
-    """Two dropouts, one addressed by member path: the other keeps its
-    record and its draw."""
+    """Verifies dot-path `specialize` updates the addressed member without altering its sibling."""
     pipe = (nn.Dropout(0.3) >> nn.Dropout(0.5)).with_input(jnp.zeros(4))
     tuned = pipe.specialize(**{'drop.train': False})
     assert not tuned.members.drop.contract.apply_takes_rng
@@ -89,14 +77,14 @@ def test_unknown_member_refuses():
 
 
 def test_transform_records_respecialize_and_rebuild():
-    """Static specialization and structural replacement remain independent."""
+    """Verifies static specialization and `map_members` structural replacement compose."""
     roll = scanned(Integrator()).parameterize()
     ys = roll.apply(jnp.ones(3))
 
     recording = roll.specialize(record=True).parameterize()
     clean, aux = split_aux(recording.apply(jnp.ones(3)))
     assert jnp.allclose(clean, ys)               # same run
-    assert aux.state.shape == (3,)               # the trajectory now sows
+    assert aux.state.shape == (3,)               # recorded state trajectory
 
     rebuilt = map_members(recording.node, lambda d: d)
     again, _ = split_aux(rebuilt.bind(recording.param).apply(jnp.ones(3)))
@@ -149,10 +137,7 @@ def test_node_names_the_def_from_the_factory():
 
 
 def test_statics_of_lists_the_whole_argument_graph():
-    """statics_by_path walks the RECORD, dot-joined, bound and unbound alike:
-    the canonical listing, and the same paths are the addresses:
-    specialize binds a bare key in the node's own record or refuses, so
-    reaching a depth means spelling the path this listing prints."""
+    """Verifies `statics_by_path` lists dot-joined bound and unbound factory statics."""
     from nodejax import batch, scan, statics_by_path
     from nodejax.core.binding import REQUIRED
 
@@ -170,7 +155,7 @@ def test_statics_of_lists_the_whole_argument_graph():
     tree = batch(scan(Cell()), n=4)
     listed = statics_by_path(tree)
     assert listed['sample.step.width'] is REQUIRED       # the unbound argument, at home
-    assert listed['sample.step.leak'] == 0.1             # defaults are statics now
+    assert listed['sample.step.leak'] == 0.1             # default recorded as a static
     assert listed['n'] == 4                              # explicit args list deferred too
 
     filled = tree.specialize(**{'sample.step.width': 8})  # the listed address
@@ -182,12 +167,7 @@ def test_statics_of_lists_the_whole_argument_graph():
 
 
 def test_describe_writes_the_trees_out():
-    """describe is one entry over every tree the library holds: a def's
-    member hierarchy with kind flags and its own statics inline, a
-    generic's deferred record standing in for the members it does not
-    have yet, a bound node's binding trees with a
-    leaf tally, a plain pytree alone. Pins are substrings on purpose:
-    the format may evolve, the CONTENT may not silently vanish."""
+    """Verifies `describe` formats generic nodes, bound nodes, and plain pytrees."""
     from nodejax import describe, batch, scan
 
     @node

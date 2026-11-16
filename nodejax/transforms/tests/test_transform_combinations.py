@@ -1,3 +1,5 @@
+"""Verifies multi-axis, routing, surgery, and PRNG-splitting transform compositions."""
+
 from __future__ import annotations
 
 import jax
@@ -18,10 +20,8 @@ from nodejax.transforms.wiring.at import at
 from nodejax.transforms.policy.taps import taps
 
 
-# --- Helper Test Nodes ---
-
 def StatefulLinearNode(D: int = 4) -> Node:
-    """A parametric, cyclic node with internal state."""
+    """Builds a parametric cyclic linear Node that increments a step counter."""
     def param(node, rng: KeyStream):
         return Struct(w=jax.random.normal(rng.next(), (D, D)))
 
@@ -35,7 +35,7 @@ def StatefulLinearNode(D: int = 4) -> Node:
 
 
 def StochasticNode() -> Node:
-    """A parametric, cyclic node consuming apply-side RNG."""
+    """Builds a parametric cyclic Node that draws `apply`-time PRNG noise."""
     def param(node, rng: KeyStream):
         return Struct(scale=jnp.array(1.0, dtype=jnp.float32))
 
@@ -49,17 +49,14 @@ def StochasticNode() -> Node:
     return Leaf(apply, param=param, init=init, name='stochastic_node')
 
 
-# --- 1. Multi-Axis Lifts (Vmap + Scan Towers) ---
-
 def test_batch_ensemble_and_ensemble_batch():
-    """Dual vmap towers: batch of ensemble and ensemble of batch."""
+    """Verifies both `batch(ensemble(node))` and `ensemble(batch(node))` axis orderings."""
     D = 4
     N_ens = 3
     B = 5
 
     StatefulLinear = StatefulLinearNode(D)
 
-    # 1. batch(ensemble(node))
     be = batch(ensemble(StatefulLinear, n=N_ens), n=B).with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_be = be.init()
     assert jax.tree.leaves(be.param)[0].shape == (N_ens, D, D)
@@ -70,7 +67,6 @@ def test_batch_ensemble_and_ensemble_batch():
     assert out_be.shape == (B, N_ens, D)
     assert jnp.all(s_be2.count == 1)
 
-    # 2. ensemble(batch(node))
     eb = ensemble(batch(StatefulLinear, n=B), n=N_ens).with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_eb = eb.init()
     assert jax.tree.leaves(eb.param)[0].shape == (N_ens, D, D)
@@ -80,14 +76,13 @@ def test_batch_ensemble_and_ensemble_batch():
 
 
 def test_batch_stack_and_stack_batch():
-    """Batched layer scan: batch(stack) and stack(batch)."""
+    """Verifies both `batch(stack(node))` and `stack(batch(node))` compositions."""
     D = 4
     L = 3
     B = 5
 
     StatefulLinear = StatefulLinearNode(D)
 
-    # 1. batch(stack(node, n=L))
     bs = batch(stack(StatefulLinear, n=L), n=B).with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_bs = bs.init()
     assert jax.tree.leaves(bs.param)[0].shape == (L, D, D)
@@ -97,7 +92,6 @@ def test_batch_stack_and_stack_batch():
     s_bs2, out_bs = bs.apply(s_bs, x_batch)
     assert out_bs.shape == (B, D)
 
-    # 2. stack(batch(node), n=L)
     sb = stack(batch(StatefulLinear, n=B), n=L).with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_sb = sb.init()
     assert jax.tree.leaves(sb.param)[0].shape == (L, D, D)
@@ -107,14 +101,13 @@ def test_batch_stack_and_stack_batch():
 
 
 def test_batch_scan_and_scan_batch():
-    """Sequence processing over batched data: batch(scan) and scanned(batch)."""
+    """Verifies both `batch(scanned(node))` and `scanned(batch(node))` axis layouts."""
     D = 4
     T = 6
     B = 5
 
     StatefulLinear = StatefulLinearNode(D)
 
-    # 1. batch(scanned(node)) - scan input is (T, D), batched input is (B, T, D)
     bsc = batch(scanned(StatefulLinear), n=B).with_input(jnp.zeros((B, T, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_bsc = bsc.init()
     assert s_bsc == ()
@@ -123,7 +116,6 @@ def test_batch_scan_and_scan_batch():
     out_bsc = bsc.apply(x_seq_batch)
     assert out_bsc.shape == (B, T, D)
 
-    # 2. scanned(batch(node)) - batch input is (B, D), sequence input is (T, B, D)
     scb = scanned(batch(StatefulLinear, n=B)).with_input(jnp.zeros((T, B, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_scb = scb.init()
     assert s_scb == ()
@@ -134,7 +126,7 @@ def test_batch_scan_and_scan_batch():
 
 
 def test_ensemble_stack_and_ensemble_scan():
-    """Population of stacked layers and scanned sequence models."""
+    """Verifies `ensemble(stack(node))` and `ensemble(scanned(node))` compositions."""
     D = 4
     N_ens = 3
     L = 4
@@ -142,7 +134,6 @@ def test_ensemble_stack_and_ensemble_scan():
 
     StatefulLinear = StatefulLinearNode(D)
 
-    # 1. ensemble(stack(node, n=L), n=N_ens)
     es = ensemble(stack(StatefulLinear, n=L), n=N_ens).with_input(jnp.zeros((D,))).parameterize(rng=jax.random.PRNGKey(0))
     s_es = es.init()
     assert jax.tree.leaves(es.param)[0].shape == (N_ens, L, D, D)
@@ -152,7 +143,6 @@ def test_ensemble_stack_and_ensemble_scan():
     s_es2, out_es = es.apply(s_es, x)
     assert out_es.shape == (N_ens, D)
 
-    # 2. ensemble(scanned(node), n=N_ens)
     escan = ensemble(scanned(StatefulLinear), n=N_ens).with_input(jnp.zeros((T, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_escan = escan.init()
     assert s_escan == ()
@@ -162,17 +152,14 @@ def test_ensemble_stack_and_ensemble_scan():
     assert out_escan.shape == (N_ens, T, D)
 
 
-# --- 2. State & Gradient Surgery under Lifts ---
-
 def test_batch_freeze_and_freeze_batch():
-    """Batched evaluation under frozen state."""
+    """Verifies that `batch(freeze(node, st))` and `freeze(batch(node), batch_st)` agree."""
     D = 4
     B = 5
     StatefulLinear = StatefulLinearNode(D)
     node = StatefulLinear.with_input(jnp.zeros((D,))).parameterize(rng=jax.random.PRNGKey(0))
     st = node.init()
 
-    # 1. batch(freeze(node, st))
     bf = batch(freeze(node, st), n=B).with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_bf = bf.init()
     assert s_bf == ()
@@ -181,7 +168,6 @@ def test_batch_freeze_and_freeze_batch():
     out_bf = bf.apply(x_batch)
     assert out_bf.shape == (B, D)
 
-    # 2. freeze(batch(node), batch_st)
     b_nd = batch(StatefulLinear, n=B).with_input(jnp.zeros((B, D)))
     s_b = b_nd.parameterize(rng=jax.random.PRNGKey(0)).init()
     fb = freeze(b_nd, s_b).parameterize(rng=jax.random.PRNGKey(0))
@@ -193,7 +179,7 @@ def test_batch_freeze_and_freeze_batch():
 
 
 def test_tree_freeze_on_nested_transform_towers():
-    """tree_freeze on a nested batch(ensemble(serial(...))) tower."""
+    """Verifies `tree_freeze` across a nested `batch(ensemble(serial(...)))` tower."""
     D = 4
     N_ens = 3
     B = 5
@@ -205,10 +191,9 @@ def test_tree_freeze_on_nested_transform_towers():
     tower = batch(ensemble(pipe, n=N_ens), n=B).with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(0))
     st = tower.init()
 
-    # Freeze state in the nested tower
     frozen_tower = tree_freeze(tower, st)
     s_ft = frozen_tower.init()
-    assert s_ft == ()                # everything frozen: no state at all
+    assert s_ft == ()
 
     x_batch = jnp.ones((B, D))
     out_ft = frozen_tower.apply(x_batch)
@@ -216,12 +201,11 @@ def test_tree_freeze_on_nested_transform_towers():
 
 
 def test_detach_stack_and_stack_detach():
-    """Gradient detachment across stacked layers."""
+    """Verifies that `stack(detach(node))` zeroes gradients across all stacked layers."""
     D = 4
     L = 3
     StatefulLinear = StatefulLinearNode(D)
 
-    # 1. stack(detach(node), n=L)
     sd = stack(detach(StatefulLinear), n=L).with_input(jnp.zeros((D,))).parameterize(rng=jax.random.PRNGKey(0))
     s_sd = sd.init()
 
@@ -234,19 +218,15 @@ def test_detach_stack_and_stack_detach():
     assert jnp.all(grads.w == 0.0)
 
 
-# --- 3. Structural Routing under Lifts (at & taps) ---
-
 def test_batch_at_and_stack_at():
-    """Field routing via at() under batch and stack transforms."""
+    """Verifies field routing via `at` inside `batch` and `stack`."""
     D = 4
     B = 5
     L = 3
     StatefulLinear = StatefulLinearNode(D)
 
-    # Struct with field 'x'
     sample_input = Struct(x=jnp.zeros((D,)), y=jnp.zeros((2,)))
 
-    # 1. batch(at(node, 'x'))
     bat = batch(at(StatefulLinear, 'x'), n=B).with_input(Struct(x=jnp.zeros((B, D)), y=jnp.zeros((B, 2)))).parameterize(rng=jax.random.PRNGKey(0))
     s_bat = bat.init()
 
@@ -254,7 +234,6 @@ def test_batch_at_and_stack_at():
     assert out_bat.x.shape == (B, D)
     assert jnp.allclose(out_bat.y, jnp.ones((B, 2)))
 
-    # 2. stack(at(node, 'x'), n=L)
     sat = stack(at(StatefulLinear, 'x'), n=L).with_input(sample_input).parameterize(rng=jax.random.PRNGKey(0))
     s_sat = sat.init()
 
@@ -264,7 +243,7 @@ def test_batch_at_and_stack_at():
 
 
 def test_batch_taps_and_stack_taps():
-    """Tapping intermediate outputs under batch and stack lifts."""
+    """Verifies intermediate wire recording via `taps` under `batch` and `stack`."""
     D = 4
     B = 5
     L = 3
@@ -273,7 +252,6 @@ def test_batch_taps_and_stack_taps():
 
     pipe = serial(a=StatefulLinear1, b=StatefulLinear2)
 
-    # 1. batch(taps(pipe))
     btap = batch(taps(pipe), n=B).with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(0))
     s_btap = btap.init()
 
@@ -282,7 +260,6 @@ def test_batch_taps_and_stack_taps():
     assert out_taps.a.shape == (B, D)
     assert out_taps.b.shape == (B, D)
 
-    # 2. stack(taps(pipe), n=L)
     stap = stack(taps(pipe), n=L).with_input(jnp.zeros((D,))).parameterize(rng=jax.random.PRNGKey(0))
     s_stap = stap.init()
 
@@ -292,10 +269,8 @@ def test_batch_taps_and_stack_taps():
     assert out_taps_s.b.shape == (L, D)
 
 
-# --- 4. Apply-Side RNG Splitting across Multi-Axis Towers ---
-
 def test_rng_splitting_across_batch_and_ensemble():
-    """Apply-side PRNG key splitting across batch and ensemble dimensions."""
+    """Verifies `apply`-time PRNG key splitting across combined `batch` and `ensemble` axes."""
     D = 4
     N_ens = 3
     B = 5
@@ -305,15 +280,12 @@ def test_rng_splitting_across_batch_and_ensemble():
     s = be_stoch.init()
 
     x_batch = jnp.ones((B, D))
-    # Calling apply with the key beside the field, split per element
     s2, out = be_stoch.apply(s, x=x_batch, rng=jax.random.PRNGKey(42))
     assert out.shape == (B, N_ens, D)
 
 
-# --- 5. Deep Tower Rebuilds ---
-
 def test_map_members_rebuild_on_nested_towers():
-    """map_members on a nested batch(stack(serial(...))) tower."""
+    """Verifies `map_members` replacing a leaf member inside `batch(stack(serial(...)))`."""
     D = 4
     L = 3
     B = 5
@@ -324,12 +296,10 @@ def test_map_members_rebuild_on_nested_towers():
     )
     tower = batch(stack(pipe, n=L), n=B).with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(0))
 
-    # Replace l2 member deep in the tower
     new_l2 = nn.Linear(D)
     rebuilt_tower = map_members(
         tower.node, lambda m: new_l2 if m.name == 'l2' else m)
 
-    # Re-parameterize and run forward pass
     rebuilt_tower = rebuilt_tower.with_input(jnp.zeros((B, D))).parameterize(rng=jax.random.PRNGKey(1))
 
     x_batch = jnp.ones((B, D))
@@ -337,10 +307,8 @@ def test_map_members_rebuild_on_nested_towers():
     assert out_reb.shape == (B, D)
 
 
-# --- 6. Triple Transform Composition Towers ---
-
 def test_batch_ensemble_scan_triple_tower():
-    """Batch of ensembles of sequence models: batch(ensemble(scanned(node)))."""
+    """Verifies `batch(ensemble(scanned(node)))` over batched sequence inputs."""
     D = 4
     N_ens = 3
     T = 6
@@ -357,7 +325,7 @@ def test_batch_ensemble_scan_triple_tower():
 
 
 def test_batch_ensemble_stack_triple_tower():
-    """Batch of ensembles of stacked layers: batch(ensemble(stack(node, n=L)))."""
+    """Verifies `batch(ensemble(stack(node, n=L)))` parameter and state shapes."""
     D = 4
     N_ens = 3
     L = 4
@@ -377,7 +345,7 @@ def test_batch_ensemble_stack_triple_tower():
 
 
 def test_batch_repeat_freeze_triple_tower():
-    """Batched sequence processing over a frozen non-cyclic model: batch(repeat(freeze(node, st)))."""
+    """Verifies `batch(repeat(freeze(node, st), n=T))` over frozen state."""
     D = 4
     T = 6
     B = 5

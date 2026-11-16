@@ -1,6 +1,6 @@
 """Train and evaluation mode construction in NodeJAX.
 
-NodeJAX represents evaluation as a distinct `PNode` rather than a mutable flag or call-time boolean. `nn.eval_mode(final)` runs `final.specialize(**{'*.train': False})` so `nn.Dropout` rebuilds as the identity with no `rng` requirement, and freezes `tag='running_stats'` state slots via `tree_freeze` so `nn.BatchNorm` folds its accumulated statistics into constants (`not evaluator.cyclic`).
+NodeJAX represents evaluation as a distinct `PSNode` rather than a mutable flag or call-time boolean. `nn.eval_mode(final)` runs `final.specialize(**{'*.train': False})` so `nn.Dropout` rebuilds as the identity with no `rng` requirement, and freezes `tag='running_stats'` state slots via `tree_freeze` so `nn.BatchNorm` folds its accumulated statistics into constants (`not evaluator.cyclic`).
 
 Run directly with `python -m examples.comparisons.mode.mode_nodejax`.
 """

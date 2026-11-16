@@ -1,27 +1,19 @@
-"""A tiny GAN: two trainers, one scanned round, params spliced as data.
+"""Simultaneous adversarial training of a 1D Gaussian GAN built from two nested `train_step` trainers.
 
-Adversarial training needs no framework support:
+`GAN` is a two-member `Composite` pairing a discriminator trainer on real-versus-fake batches with
+a generator trainer wrapping `fooled`, a `Wrapper` that evaluates the discriminator at critic
+weights passed as an explicit `critic` input argument. Because `train_step` differentiates only
+with respect to its wrapped model's parameters, passing `critic` as input leaves discriminator
+weights untouched during the generator step without detaching gradients, keeping outer
+meta-gradients open across unrolled rounds.
 
-- the discriminator's trainer is train_step on the discriminator,
-  fed real-vs-fake batches with labels;
-- the generator's trainer is train_step on a node whose apply runs
-  the generator then the critic, with the critic's params on the INPUT
-  channel: params are data, and the inner grad differentiates the
-  model only, so the critic sits outside it with no detach anywhere —
-  which also leaves the OUTER path open, so meta-gradients (see the
-  last test) flow through the critic while inner training never
-  moves it;
-- each round feeds the previous round's discriminator params into that
-  input slot. Cross-network flow is input plumbing, not state surgery.
-
-Generator noise enters through declared apply-rng: its data input is empty,
-and the generator's boundary key is routed to the noise head separately.
-The round IS a node: an authored composite whose members are the two
-trainers, whose apply performs one simultaneous adversarial update, and
-whose per-round losses ride the aux channel keyed by member. It scans, so
-the host loop reads distribution stats between fused chunks (the
-train_loop pattern).
+Latent samples enter `Generator` through `Noise`, which draws from the per-step `rng` stream
+rather than taking a data array. Unrolling `GAN` with `.scan` advances both optimizers
+simultaneously and collects per-round losses under `Aux` keyed by member name, composing directly
+with `ensemble` for parallel games and `train_step` for meta-learning optimizer learning rates.
 """
+
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
@@ -29,54 +21,55 @@ import optax
 
 from nodejax.struct import Struct
 from nodejax import (
-    Composite, Leaf, Node, Wrapper, nn, node, split_aux, trained, train_step,
+    Composite, Leaf, Node, PNode, PyTree, Wrapper, nn, node, split_aux, trained, train_step,
 )
 
 BATCH, ZDIM, HIDDEN = 128, 4, 16
 MU, SIGMA = 3.0, 0.5
 
+
 @node
-def Noise() -> Node:
-    """The latent source: BATCH draws from the declared apply-rng key."""
-    def apply(rng):
+def Noise() -> PNode:
+    """Draws a `(BATCH, ZDIM)` standard normal latent batch from the `apply`-time `rng` stream."""
+    def apply(rng) -> jax.Array:
         return jax.random.normal(rng.next(), (BATCH, ZDIM))
+
     return Leaf(apply)
 
 
 def mlp() -> Node:
-    """Both nets are the same stock sandwich; fan-ins from the shape walk."""
+    """Builds a two-layer `tanh` MLP mapping inputs to scalar outputs with lazy fan-in inference."""
     return nn.Linear(HIDDEN) >> nn.tanh >> nn.Linear(1)
 
 
 def Generator() -> Node:
-    """noise head >> mlp; the empty-input source already resolves the pipe,
-    whose shape walk derives the linears' fan-ins from the noise output."""
+    """Composes `Noise` with `mlp` so the latent output shape resolves downstream linear fan-ins."""
     return Noise() >> mlp()
 
 
 def Discriminator() -> Node:
-    """sample -> realness logit; fan-in from the sample shape."""
+    """Builds an `mlp` critic sized to `(BATCH, 1)` scalar samples."""
     return mlp().with_input(jnp.zeros((BATCH, 1)))
 
 
 def bce(logits: jax.Array, target: jax.Array) -> jax.Array:
+    """Computes mean sigmoid binary cross-entropy loss."""
     return jnp.mean(optax.sigmoid_binary_cross_entropy(logits, target))
 
 
 @node
-def GAN(discriminator_opt, generator_opt) -> Node:
-    """The adversarial round as one authored composite.
+def GAN(discriminator_opt: optax.GradientTransformation,
+        generator_opt: optax.GradientTransformation) -> Node:
+    """Assembles one simultaneous adversarial training round over `Generator` and `Discriminator`.
 
-    The updates are simultaneous: each trainer attacks the other's
-    parameters from the previous round, read as data from its member
-    state. ``tick`` is the length-giving sequence and nothing else:
-    entropy cannot ride the xs, so a zero per round says how many
-    rounds. The per-round losses arrive on the aux channel, keyed by
-    member."""
+    Each `apply` step updates both nested `train_step` members against each other's previous-round
+    weights read from state, uses scalar `tick` inputs to set the `.scan` horizon, and emits
+    per-round losses via `Aux`.
+    """
     generator, discriminator = Generator(), Discriminator()
 
-    def fooled(self, critic):
-        # the generator's own params; the critic's params are input data
+    def fooled(self, critic: PyTree) -> jax.Array:
+        # Evaluating the critic at input-supplied weights restricts inner gradients to `self.generator`.
         return discriminator.apply(critic, self.generator())
 
     fooled = Wrapper(generator=generator)(fooled, name='fooled')
@@ -87,29 +80,29 @@ def GAN(discriminator_opt, generator_opt) -> Node:
     real_labels = jnp.concatenate(
         [jnp.ones((BATCH, 1)), jnp.zeros((BATCH, 1))])
 
-    def apply(self, tick, rng):
-        # D round: real against the previous round's generator's fakes
+    def apply(self, tick: jax.Array, rng) -> None:
+        # `self.discriminator` updates on real samples paired with fakes from the previous generator weights.
         real = MU + SIGMA * jax.random.normal(rng.next(), (BATCH, 1))
         fake = generator.apply(self.generator.state.opt.params.model,
                                rng=rng.next())
         self.discriminator(input=jnp.concatenate([real, fake]),
                            target=real_labels)
-        # G round: the previous round's critic rides the input bundle
+        # `self.generator` updates against the previous round's critic weights passed via `critic`.
         self.generator(critic=self.discriminator.state.opt.params.model,
                        target=jnp.ones((BATCH, 1)))
 
     return members(apply, name='gan')
 
 
-def test_gan_learns_a_gaussian():
+def test_gan_learns_a_gaussian() -> None:
+    """Trains `GAN` across scanned 500-round chunks and verifies convergence to the target Gaussian."""
     gan = GAN(optax.adam(2e-3), optax.adam(5e-4))
     generator = Generator()
     game = gan.parameterize(rng=jax.random.PRNGKey(0)).initialize()
 
     log = []
     for chunk in range(6):
-        # ONE key per chunk, split per round inside .scan; the tick says
-        # how many
+        # `.scan` splits one chunk key across the 500 rounds specified by `tick`.
         game, output = game.scan(rng=jax.random.PRNGKey(10 + chunk),
                                  tick=jnp.zeros(500))
         samples_output, losses = split_aux(output)
@@ -123,20 +116,16 @@ def test_gan_learns_a_gaussian():
               f"(target {MU} / {SIGMA})  d {log[-1].discriminator:.2f} "
               f"g {log[-1].generator:.2f}")
 
-    # a GAN equilibrium oscillates; judge the orbit, not one checkpoint
+    # Averaging the trailing three chunks scores the equilibrium orbit rather than one step.
     tail_mean = sum(s.mean for s in log[-3:]) / 3
     tail_std = sum(s.std for s in log[-3:]) / 3
-    assert abs(tail_mean - MU) < 0.3                  # orbiting the mode
-    assert 0.2 < tail_std < 1.0                       # spread, not collapse
-    # the equilibrium is adversarial: the discriminator has not won
+    assert abs(tail_mean - MU) < 0.3
+    assert 0.2 < tail_std < 1.0
     assert log[-1].discriminator > 0.3
 
 
-def test_gan_population_by_ensemble():
-    """What the round-as-node buys: transforms written for ANY node apply
-    to the adversarial game verbatim. ensemble runs n independent GANs —
-    split init keys, split per-round keys, stacked trainer states (adam
-    moments and all) — under one vmap, knowing nothing about GANs."""
+def test_gan_population_by_ensemble() -> None:
+    """Runs four independent `GAN` games in parallel under `ensemble` and verifies convergence."""
     from nodejax import ensemble
 
     gan = GAN(optax.adam(2e-3), optax.adam(5e-4))
@@ -148,38 +137,32 @@ def test_gan_population_by_ensemble():
         tournament, output = tournament.scan(rng=jax.random.PRNGKey(50 + chunk),
                                              tick=jnp.zeros(500))
     output, losses = split_aux(output)
-    assert losses.discriminator.loss.shape == (500, 4)   # per-round, per-member
+    assert losses.discriminator.loss.shape == (500, 4)
 
     means = jax.vmap(
         lambda member: jnp.mean(generator.apply(
             member, rng=jax.random.PRNGKey(99))))(
         tournament.state.generator.opt.params.model)
     assert means.shape == (4,)
-    assert jnp.unique(means).size == 4                # four independent games
-    assert jnp.all(jnp.abs(means - MU) < 0.5)         # all found the mode
+    assert jnp.unique(means).size == 4
+    assert jnp.all(jnp.abs(means - MU) < 0.5)
 
 
-def test_meta_learn_the_learning_rates():
-    """Meta-learning over the adversarial process: the two learning rates
-    move to the PARAM channel (log-space), each meta-step replays a short
-    game from scratch and scores the generator's output distribution, and
-    the meta-gradient flows through every unrolled round — both adams
-    included. The tower is stock: train_step over the game-scoring node."""
+def test_meta_learn_the_learning_rates() -> None:
+    """Optimizes log-space generator and discriminator learning rates through unrolled `GAN` games."""
     from nodejax import tile
     ROUNDS, META_STEPS = 60, 100
 
-    def Score():
-        def param(g_lr, d_lr):
+    def Score() -> Node:
+        def param(g_lr: float, d_lr: float) -> Struct:
             return Struct(log_g=jnp.log(jnp.asarray(g_lr)),
                           log_d=jnp.log(jnp.asarray(d_lr)))
 
-        def apply(param, rng):
+        def apply(param, rng) -> Struct:
             gan = GAN(optax.adam(jnp.exp(param.log_d)),
                       optax.adam(jnp.exp(param.log_g)))
             generator = Generator()
-            # ONE key at the boundary, split per round inside .scan; the
-            # tick is what says how many rounds there are, since entropy
-            # cannot ride the xs (see the rng doctrine in scan)
+            # `.scan` unrolls `ROUNDS` adversarial updates from fresh initialization before sampling.
             game = gan.parameterize(rng=rng.next()).initialize()
             game, _ = game.scan(rng=rng.next(), tick=jnp.zeros(ROUNDS))
             samples = generator.apply(game.state.generator.opt.params.model,
@@ -188,15 +171,14 @@ def test_meta_learn_the_learning_rates():
 
         return Leaf(apply, param=param, name='score')
 
-    def dist(out, target):
+    def dist(out: Struct, target: Struct) -> jax.Array:
         return (out.mean - target.mean) ** 2 + (out.std - target.std) ** 2
 
     score = Score()
-    lr0 = score.parameterize(g_lr=1e-4, d_lr=1e-4).param     # far too slow to converge
-    meta = train_step(score.bind(lr0), dist, optax.adam(0.2))   # lr0 is where it starts
+    lr0 = score.parameterize(g_lr=1e-4, d_lr=1e-4).param
+    meta = train_step(score.bind(lr0), dist, optax.adam(0.2))
 
-    # ONE key rides the sequence: scan splits it per meta-step and the
-    # trainer hands the drawing model its share; nothing rides the input
+    # `trained(meta)` splits one sequence key across `META_STEPS` outer updates.
     final, aux = jax.jit(trained(meta).apply)(
         rng=jax.random.PRNGKey(3),
         target=tile(Struct(mean=jnp.asarray(MU), std=jnp.asarray(SIGMA)),
@@ -206,9 +188,9 @@ def test_meta_learn_the_learning_rates():
     g_lr, d_lr = jnp.exp(final.param.log_g), jnp.exp(final.param.log_d)
     print(f"[meta] lrs 1e-4 -> g {g_lr:.2e}, d {d_lr:.2e} | "
           f"score {meta_losses[0]:.3f} -> {meta_losses[-1]:.3f}")
-    assert g_lr > 5e-4 and d_lr > 5e-4                # both rates grew an order
+    assert g_lr > 5e-4 and d_lr > 5e-4
 
-    # the learned rates beat the initial ones on the SAME game (one key)
+    # Shared probe keys compare the learned learning rates directly against the initial rates.
     probe = jax.random.PRNGKey(77)
     target = Struct(mean=jnp.asarray(MU), std=jnp.asarray(SIGMA))
     before = dist(score.apply(lr0, rng=probe), target)

@@ -1,4 +1,4 @@
-"""Focused integration checks for the runnable Pendulum SAC example."""
+"""Verifies `Pendulum` swing-up learning, recurrent replay, and single-critic variants under SAC."""
 
 import jax
 import numpy as np
@@ -21,16 +21,16 @@ from examples.rl.sac_pendulum import (
 
 
 def single_pendulum_critic() -> Node:
-    """Build one ordinary critic for the non-ensemble variant check."""
+    """Builds a single unensembled `PendulumQ` critic."""
     return PendulumQ(hidden=HIDDEN)
 
 
 def test_sac_learns_the_swing_up() -> None:
-    """A short run of the real assembly brings the pendulum up.
+    """Verifies that 90 SAC iterations train a policy that swings `Pendulum` upright from hanging starts.
 
-    Eight-step collection costs are dominated by uniformly random starts, so
-    the useful check is deterministic evaluation from hanging starts. The
-    untrained baseline has mean cost near 3.6 and final angle near 2.5.
+    Eight-step collection costs are dominated by uniformly random starts, so deterministic
+    evaluation from hanging starts measures progress against the untrained baseline (mean cost ~3.6,
+    final angle ~2.5 rad).
     """
     trained = sac_training(
         pendulum_training_program(
@@ -57,7 +57,7 @@ def test_sac_learns_the_swing_up() -> None:
 
 
 def test_recurrent_sac_is_wired() -> None:
-    """The real assembly accepts recurrent policy state throughout replay."""
+    """Verifies that the SAC training program threads recurrent `GRU` policy state through replay."""
     trained = sac_training(
         pendulum_training_program(
             pendulum_policy(nn.GRU(MEMORY)),

@@ -1,11 +1,9 @@
-"""PSNode: the state-bound rung of the binding ladder.
+"""Verifies `PSNode` state-bound execution, JAX pytree scanning, and `trained()` projection.
 
-(definition, param, state) as one object. It owns its state: apply takes no
-state and returns none, and the advance flows into the successor,
-session, out = session(x), one arity whatever the node's kind. A pytree with
-param and state as separate children, so lax.scan carries a whole
-PSNode. trained() lands here: a finished run hands back the model as a
-thing you can call.
+`PSNode` pairs a definition with bound `param` and `state` trees. Calling a
+`PSNode` advances state into a new `PSNode` successor alongside the output,
+registers `param` and `state` as separate JAX pytree children for `lax.scan`,
+and serves as the callable model returned by `trained()`.
 """
 
 import jax
@@ -58,8 +56,7 @@ def test_session_scan_reuses_one_compilation():
 
 
 def test_methods_bind_the_state_seat():
-    """A node method naming `state` reads the live state on a PSNode,
-    where a bare PNode leaves that channel to the caller."""
+    """Verifies a node method declaring `state` reads the bound state on `PSNode`."""
     def Level():
         def apply(state, input):
             return state + input, state
@@ -73,9 +70,7 @@ def test_methods_bind_the_state_seat():
 
 
 def test_trained_hands_back_a_callable_model():
-    """The finalizing projection lands as a PSNode of the MODEL: weights
-    at .param, the model's own state carried, the trainer scaffolding
-    struck. done(x) infers; done.pnode is the param-only view."""
+    """Verifies `trained(trainer)` returns a callable `PSNode` carrying the fitted model weights."""
     key = jax.random.PRNGKey(0)
     net = nn.Linear(1).with_input(jnp.zeros(3)).parameterize(rng=key).initialize()
     trainer = train_step(net, lambda out, target: jnp.mean((out - target) ** 2),
@@ -92,10 +87,7 @@ def test_trained_hands_back_a_callable_model():
 
 
 def test_a_whole_tree_freeze_makes_a_plain_function():
-    """tree_freeze consumes the binding it holds: no spec argument, the
-    state comes from the object, and a whole-tree freeze leaves nothing
-    moving, so the successor equals its predecessor and discarding it is
-    safe."""
+    """Verifies `tree_freeze(psnode)` embeds the bound state and leaves `state == ()`."""
     pipe = (Integrator() >> Integrator()).parameterize()
     session = pipe.bind(state=pipe.init())
     successor, _ = session(1.0)
@@ -103,5 +95,5 @@ def test_a_whole_tree_freeze_makes_a_plain_function():
     assert type(frozen) is PSNode and frozen.state == ()
     f2, a = frozen(1.0)
     f3, b = frozen(1.0)
-    assert jnp.allclose(a, b)                    # pinned state: same answer
+    assert jnp.allclose(a, b)                    # frozen state: same answer
     assert f2.state == () == f3.state

@@ -1,10 +1,11 @@
-"""Population training in one combinator line: train_step(ensemble(...)).
+"""Population training via `train_step(ensemble(...))`.
 
-ensemble stacks n independently drawn members under one vmap; train_step
-sees one parametric node. The composition trains the whole population in
-a single scanned loop — one XLA program, n models — and the population
-is ordinary data afterwards: index any member's row out of the param
-tree and bind it.
+`ensemble` maps `n` independently parameterized copies of a `Node` under a
+single `jax.vmap`, exposing one combined parameter tree with leading axis `n`.
+Wrapping that population in `train_step` and `trained` optimizes all `n`
+members in a single scanned XLA loop, after which indexing any row along axis 0
+of `done.param` extracts an individual model's parameters for standalone
+binding.
 """
 
 import jax
@@ -19,31 +20,29 @@ N_IN, HIDDEN, POP = 4, 16, 8
 
 
 def MLP() -> Node:
-    return nn.Linear(HIDDEN) >> nn.tanh >> nn.Linear(1)   # sizes flow from the data
+    """Builds a two-layer `tanh` regression network with hidden width `HIDDEN`."""
+    return nn.Linear(HIDDEN) >> nn.tanh >> nn.Linear(1)
 
 
-def test_population_trains_in_one_line():
+def test_population_trains_in_one_line() -> None:
+    """Verifies parallel training of an `ensemble` population and standalone binding of the lowest-loss member."""
     X = jax.random.normal(jax.random.PRNGKey(0), (64, N_IN))
     y = jnp.sin(X @ jnp.array([[1.0], [-1.0], [0.5], [0.0]]))
 
-    # one key draws POP independent models; one finalized run trains them
-    # all, and what comes back IS the trained population, callable
+    # A single root key initializes `POP` independent models, and `trained` optimizes them jointly.
     population = ensemble(MLP().with_input(X), n=POP).parameterize(
         rng=jax.random.PRNGKey(1)).initialize()
     trainer = train_step(population, mse, optax.adam(1e-2))
     steps = 500
     done, aux = trained(trainer).apply(input=tile(X, steps),
                                        target=tile(y, steps))
-    assert aux.loss[-1] < 0.05                       # the population fits
+    assert aux.loss[-1] < 0.05
 
-    # the population is data: per-member fit, the best member's row
-    # INDEXED out of the mapped param axis (ensemble refuses the member
-    # slice door for exactly this reason: a row is an indexing, not a
-    # slot) and bound as an ordinary single model
-    _, outs = done(X)                                # (POP, 64, 1)
+    # Indexing the mapped parameter axis extracts the best member's weights to bind onto `MLP()`.
+    _, outs = done(X)
     per_member = jnp.mean((outs - y) ** 2, axis=(1, 2))
     assert per_member.shape == (POP,)
-    assert jnp.unique(per_member).size == POP      # independent draws, distinct fits
+    assert jnp.unique(per_member).size == POP
 
     best = jax.tree.map(lambda w: w[jnp.argmin(per_member)], done.param)
     champion = MLP().bind(best)

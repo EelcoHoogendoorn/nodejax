@@ -1,14 +1,16 @@
-"""Third-order learning from ordinary Node composition.
+"""Third-order differentiation through three nested `train_step` Nodes.
 
-The innermost train step adapts a model during a sequence. Fine-tuning differentiates through that
-adaptation over support data. The outer train step differentiates through fine-tuning on the query.
-Nothing in any of the three train steps knows which level it serves.
+`supervised_ttt` adapts `Scale` online within a sequence, `finetune`
+differentiates through that online adaptation over support episodes, and an
+outer `train_step` differentiates through episodic fine-tuning on the query. All
+three levels apply the same `train_step` transform without level-specific
+differentiation hooks.
 
-The scalar task keeps the derivative visible. Its TTT loss is ``weight**4 / 4``, whose third
-derivative is nonzero. The test compares the gradient produced by the composed Nodes with its exact
-formula, then removes only that third derivative from the formula and shows that the result changes.
-
-Run directly: ``python -m examples.test_third_order_learning``
+Using the quartic test-time loss `weight**4 / 4` produces a nonzero third
+derivative. `test_outer_gradient_contains_the_inner_third_derivative` checks the
+observed outer gradient against the exact analytical expression and verifies
+that dropping the third-derivative term breaks agreement. Executing
+`python -m examples.test_third_order_learning` prints the numerical breakdown.
 """
 
 import jax
@@ -35,6 +37,7 @@ META_RATE = 0.01
 
 
 def Scale() -> Node:
+    """Multiplies its input by a scalar trainable weight initialized to `1.0`."""
     def param(weight: PyTree = 1.0) -> PyTree:
         return jnp.asarray(weight)
 
@@ -45,15 +48,18 @@ def Scale() -> Node:
 
 
 def quartic(output: jax.Array, target: jax.Array) -> jax.Array:
+    """Computes one-quarter of the fourth power of prediction error."""
     error = output - target
     return 0.25 * error ** 4
 
 
 def terminal_quadratic(output: PyTree, terminal_target: jax.Array) -> jax.Array:
+    """Computes half the squared error between the final sequence prediction and `terminal_target`."""
     return 0.5 * (output[-1] - terminal_target) ** 2
 
 
 def third_order_learner() -> Node:
+    """Composes online test-time training, episodic fine-tuning, and meta-training from three `train_step` Nodes."""
     online = scanned(supervised_ttt(
         train_step(Scale(), quartic, optax.sgd(TTT_RATE))))
     adapted = finetune(
@@ -62,6 +68,7 @@ def third_order_learner() -> Node:
 
 
 def task() -> Struct:
+    """Constructs a deterministic two-step scalar episode for closed-form gradient verification."""
     sequence = Struct(input=jnp.ones(2), target=jnp.zeros(2))
     support = Struct(
         input=jnp.ones((1, 2)),
@@ -72,6 +79,7 @@ def task() -> Struct:
 
 
 def run() -> Struct:
+    """Evaluates one outer `train_step` update and compares the observed gradient against closed-form formulas."""
     trainer = third_order_learner().parameterize().initialize()
     episode = task()
     successor, (_, aux) = jax.jit(trainer.apply)(
@@ -109,12 +117,14 @@ def run() -> Struct:
 
 
 def test_outer_gradient_contains_the_inner_third_derivative() -> None:
+    """Verifies that the outer meta-gradient matches the exact third-order formula and differs when the third derivative is omitted."""
     result = run()
     assert jnp.allclose(result.observed, result.exact, rtol=1e-5, atol=1e-6)
     assert not jnp.allclose(result.observed, result.without_third, rtol=1e-3, atol=1e-3)
 
 
 def test_full_showcase_trains_through_the_tied_recurrent_tree() -> None:
+    """Verifies `BatchNorm` state axes, loss descent, parameter tying, and tapped `Aux` shapes on `third_order_learning`."""
     input = jnp.zeros((showcase.TASKS, showcase.FEATURES))
     batched_predictor = batch(showcase.predictor()).with_input(input).parameterize(
         rng=jax.random.PRNGKey(0)
@@ -161,6 +171,7 @@ def test_full_showcase_trains_through_the_tied_recurrent_tree() -> None:
 
 
 def main() -> None:
+    """Prints the outer loss, observed meta-gradient, and analytical third-derivative contribution."""
     result = run()
     contribution = result.exact - result.without_third
     print(f'outer loss: {float(result.loss):.7f}')

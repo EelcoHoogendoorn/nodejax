@@ -1,4 +1,4 @@
-"""Behavior and transform coverage for stock control primitives."""
+"""Verifies behavior and transform composition for stock control primitives."""
 
 import jax
 import jax.numpy as jnp

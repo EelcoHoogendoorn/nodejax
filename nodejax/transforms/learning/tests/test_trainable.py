@@ -1,5 +1,4 @@
-"""``train_step(trainable=...)``: the optimizer holds and the gradient reaches
-the selected parameters only; the rest are constants of the step."""
+"""Verifies `train_step(..., trainable=...)` restricts optimizer state and updates to selected parameter paths."""
 
 import jax
 import jax.numpy as jnp

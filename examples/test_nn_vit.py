@@ -1,15 +1,11 @@
-"""The conv-transformer on digits, built from nodejax.nn.
+"""Convolutional-stem Vision Transformer on 8x8 digit images using `nodejax.nn`.
 
-The statics exhibit: every constant below is a DESIGN decision (stem
-width, hidden width, heads, depth, data geometry) — no GRID, no
-TOKENS, no conv-flatten arithmetic, no in-features anywhere. All
-in-shapes derive at parameterize from one example input, threaded
-member by member; the head's fan-in (the classic hand-computed
-tokens * hidden) is inferred like every other.
-
-Same architecture and assertions as test_conv_vit, whose docstring
-names the hand-computed sizes as the measure of whether late-bound
-shapes deserve building. This file is the answer.
+Every module constant specifies an architectural width, head count, depth, or
+image dimension rather than hand-computed intermediate feature sizes. Calling
+`with_input` with one flattened image propagates intermediate shapes through
+`serial`, inferring convolutional kernel input dimensions, positional embedding
+token counts, and the flattened classification head fan-in during
+`parameterize`.
 """
 
 import numpy as np
@@ -21,12 +17,13 @@ from nodejax.struct import Struct
 from nodejax import Node, trained, stack, batch, train_step, serial, Leaf, nn
 from examples.test_conv_vit import data, xent, accuracy
 
-IMAGE = 8                       # data geometry
-STEM, HIDDEN, HEADS, DEPTH = 16, 32, 4, 2   # design decisions
+IMAGE = 8
+STEM, HIDDEN, HEADS, DEPTH = 16, 32, 4, 2
 BATCH, EPOCHS = 125, 40
 
 
 def build() -> Node:
+    """Builds a convolutional-stem Vision Transformer classifier for 8x8 digit images."""
     return serial(
         image=nn.Reshape((IMAGE, IMAGE, 1)),
         conv1=nn.Conv(STEM),
@@ -41,10 +38,8 @@ def build() -> Node:
     )
 
 
-def test_nn_assembly():
-    """One key and one example: every in-shape inferred, including the
-    conv-flatten head width; the same def re-parameterizes at other
-    widths, shapes living in the params alone."""
+def test_nn_assembly() -> None:
+    """Verifies shape propagation from one example input and re-parameterization of a single `Node` at distinct input widths."""
     pipe = build()
     model = pipe.with_input(jnp.zeros(IMAGE * IMAGE)).parameterize(rng=jax.random.PRNGKey(0))
 
@@ -61,16 +56,17 @@ def test_nn_assembly():
     batched = batch(pipe).bind(model.param)
     assert batched.apply(jnp.zeros((5, IMAGE * IMAGE))).shape == (5, 10)
 
-    # def reuse across widths: same pipe, different example
+    # Re-parameterizing the same unbound `Node` with different example inputs yields distinct weight shapes.
     small = nn.Linear(4) >> nn.gelu >> nn.Linear(2)
     a = small.with_input(jnp.zeros(7)).parameterize(rng=jax.random.PRNGKey(0))
     b = small.with_input(jnp.zeros(3)).parameterize(rng=jax.random.PRNGKey(0))
     assert a.param.linear.w.shape == (7, 4) and b.param.linear.w.shape == (3, 4)
 
 
-def test_nn_vit_trains_on_real_digits():
+def test_nn_vit_trains_on_real_digits() -> None:
+    """Verifies that the batched convolutional Vision Transformer reaches above 85% held-out accuracy on 8x8 digits."""
     X_train, y_train, X_test, y_test = data()
-    # the inner resolves against ONE element; batch's spec is a batch
+    # Binding a single-sample input spec before `batch` resolves all inner layer shapes.
     pipe = batch(build().with_input(jnp.zeros(IMAGE * IMAGE)))
 
     shuffle = np.random.RandomState(1)

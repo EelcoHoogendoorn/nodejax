@@ -1,4 +1,4 @@
-"""Sanity tests for tree_view, summary, and print utilities."""
+"""Verifies `tree_view`, `summary`, `print_tree`, and `print_summary` across node stages."""
 
 import jax
 import jax.numpy as jnp
@@ -46,7 +46,7 @@ def StatefulCell(width: int) -> Node:
 
 
 def test_tree_view_and_summary_on_generic_node():
-    """tree_view and summary work on unbound generic nodes."""
+    """Verifies `tree_view` and `summary` format unbound generic nodes."""
     tower = SimpleLinear() >> stack(StatefulCell(), n=3)
     assert tower.generic
 
@@ -63,7 +63,7 @@ def test_tree_view_and_summary_on_generic_node():
 
 
 def test_tree_view_and_summary_on_bound_pnode():
-    """tree_view and summary work on parameterized PNodes."""
+    """Verifies `tree_view` and `summary` format parameterized `PNode` instances."""
     model = (SimpleLinear(16) >> SimpleLinear(8)).with_input(jnp.zeros((32, 10))).parameterize(
         rng=jax.random.PRNGKey(0)
     )
@@ -82,7 +82,7 @@ def test_tree_view_and_summary_on_bound_pnode():
 
 
 def test_tree_view_and_summary_on_bound_psnode():
-    """tree_view and summary work on state-bound PSNodes."""
+    """Verifies `tree_view` and `summary` format state-bound `PSNode` instances."""
     cell = StatefulCell(16).with_input(jnp.zeros(16)).parameterize(
         rng=jax.random.PRNGKey(1)
     ).initialize()
@@ -101,7 +101,7 @@ def test_tree_view_and_summary_on_bound_psnode():
 
 
 def test_summary_with_max_depth():
-    """max_depth truncation parameter works without error."""
+    """Verifies `max_depth` truncates `summary` and `tree_view` output without error."""
     deep_tree = ensemble(SimpleLinear(16) >> stack(StatefulCell(16), n=4), n=2)
     model = deep_tree.with_input(jnp.zeros((8, 16))).parameterize(
         rng=jax.random.PRNGKey(0)
@@ -116,7 +116,7 @@ def test_summary_with_max_depth():
 
 
 def test_summary_on_composite_trainer():
-    """summary works on composite training pipelines."""
+    """Verifies `summary` formats composite `train_step` pipelines."""
     model = SimpleLinear(4).with_input(jnp.zeros((2, 8))).parameterize(
         rng=jax.random.PRNGKey(0)
     )

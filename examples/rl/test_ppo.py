@@ -1,4 +1,4 @@
-"""Focused checks for reusable PPO operations."""
+"""Verifies generalized advantage estimation, advantage standardization, and `ChunkReplay` likelihoods."""
 
 import jax
 import jax.numpy as jnp
@@ -72,7 +72,7 @@ def test_advantage_standardization_preserves_returns() -> None:
 
 
 def test_replay_reproduces_the_rollout() -> None:
-    """Replay every chunk from recorded state and recover its log-probability."""
+    """Verifies that `ChunkReplay` recovers rollout log-probabilities from recorded initial `GRU` states."""
     policy = pendulum_policy(nn.GRU(MEMORY))
     plant = Pendulum()
     sampler = batch(
@@ -83,9 +83,7 @@ def test_replay_reproduces_the_rollout() -> None:
     policy_param = policy.with_input(observation).parameterize(
         rng=jax.random.PRNGKey(0),
     ).param
-    # The production head starts at zero. Activate its memory path here so
-    # a chunk's last recorded GRU state, rather than its first, cannot pass
-    # vacuously.
+    # Non-zero output weights ensure log-probabilities depend on the initial GRU state rather than passing vacuously at zero.
     policy_param = replace_by_path(policy_param, {
         '.mean.command.projection.w': lambda weight: jnp.linspace(
             -0.1, 0.1, weight.shape[0]),

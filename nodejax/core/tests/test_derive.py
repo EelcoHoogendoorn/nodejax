@@ -1,4 +1,4 @@
-"""Methods and leaf definition derivation."""
+"""Verifies `Leaf` methods and `derive` constructor, state, method, tag, and boundary inheritance."""
 
 import jax
 import jax.numpy as jnp
@@ -10,8 +10,7 @@ from nodejax.control import Gain, Integrator
 
 
 def Gaussian() -> Node:
-    """A node carrying behavior beyond apply: whiten as the mapping,
-    log_prob/sample as methods."""
+    """Builds a Gaussian whitening `Leaf` with `log_prob` and `sample` methods."""
     def param(mean, log_std):
         return Struct(mean=jnp.asarray(mean), log_std=jnp.asarray(log_std))
 
@@ -23,7 +22,7 @@ def Gaussian() -> Node:
         return -0.5 * z ** 2 - param.log_std - 0.5 * jnp.log(2 * jnp.pi)
 
     def sample(param, rng):
-        # rng is a channel, delivered as a KeyStream in every context
+        # `rng` arrives as a `KeyStream` in both direct and composite calls.
         return param.mean + jnp.exp(param.log_std) * jax.random.normal(rng.next())
 
     return Leaf(apply, param=param, name='gaussian',
@@ -35,22 +34,20 @@ def test_methods_bind_param():
 
     assert jnp.allclose(g.log_prob(0.0), -0.5 * jnp.log(2 * jnp.pi))
     key = jax.random.PRNGKey(0)
-    # rng is a channel: a bare node declares none, so the caller passes it
-    # by keyword, explicitly
+    # On a standalone bound node, `rng` is supplied by keyword.
     assert jnp.allclose(g.sample(rng=key), g.sample(rng=key))
 
-    # unbound access on the node: the raw function, channels and all
+    # Accessing a method on an unbound `Node` returns the raw function.
     raw = Gaussian().log_prob
     assert jnp.allclose(raw(g.param, 0.0), g.log_prob(0.0))
 
 
 def test_grad_through_method():
-    """The pytree is the object, methods included: grad of a method w.r.t.
-    the node flows into its params."""
+    """Verifies `jax.grad` differentiates method calls with respect to a bound `PNode`."""
     g = Gaussian().parameterize(mean=jnp.asarray(1.0), log_std=jnp.asarray(0.0))
     grads = jax.grad(lambda n: n.log_prob(2.0))(g)
     assert type(grads) is PNode
-    assert jnp.allclose(grads.param.mean, 1.0)  # d/dmean of -(x-mean)^2/2 at x=2
+    assert jnp.allclose(grads.param.mean, 1.0)
 
 
 def test_missing_method_error_lists_methods():
@@ -100,8 +97,8 @@ def test_derive_override_apply_can_call_a_closed_over_parent():
     node = Clipped.parameterize()
 
     final, outs = scan(node)(node.init(), jnp.ones(3))
-    assert jnp.allclose(outs, jnp.array([1.0, 1.0, 1.0]))  # output clipped...
-    assert jnp.allclose(final, 3.0)                        # ...state integrates on
+    assert jnp.allclose(outs, jnp.array([1.0, 1.0, 1.0]))
+    assert jnp.allclose(final, 3.0)
 
 
 def test_derive_can_add_state():
@@ -119,12 +116,12 @@ def test_derive_can_add_state():
     Smoothed = derive(gain, apply=apply, init=init, name='smoothed')
     assert type(Smoothed) is Node and Smoothed.cyclic and Smoothed.parametric
 
-    node = Smoothed.parameterize(scale=jnp.asarray(2.0))  # parent's param ctor inherited
+    node = Smoothed.parameterize(scale=jnp.asarray(2.0))
     s = node.init()
     s, out = node.apply(s, 1.0)
-    assert jnp.allclose(out, 1.0)   # 0.5*0 + 0.5*2
+    assert jnp.allclose(out, 1.0)
     s, out = node.apply(s, 1.0)
-    assert jnp.allclose(out, 1.5)   # 0.5*1 + 0.5*2
+    assert jnp.allclose(out, 1.5)
 
 
 def test_derive_merges_disjoint_parameter_fragments():
@@ -393,15 +390,15 @@ def test_derive_rejects_an_apply_role_without_an_effective_constructor():
 def test_derive_merges_methods():
     G = Gaussian()
     child = derive(G, name='gaussian2', methods=dict(
-        log_prob=lambda param, x: jnp.asarray(42.0),          # override
-        entropy=lambda param: param.log_std + 0.5 * jnp.log(2 * jnp.pi * jnp.e),  # add
+        log_prob=lambda param, x: jnp.asarray(42.0),
+        entropy=lambda param: param.log_std + 0.5 * jnp.log(2 * jnp.pi * jnp.e),
     ))
     node = child.parameterize(mean=jnp.asarray(0.0), log_std=jnp.asarray(0.0))
 
-    assert jnp.allclose(node.log_prob(0.0), 42.0)                       # child wins
+    assert jnp.allclose(node.log_prob(0.0), 42.0)
     assert jnp.allclose(node.entropy(), 0.5 * jnp.log(2 * jnp.pi * jnp.e))
     key = jax.random.PRNGKey(0)
-    assert jnp.allclose(node.sample(rng=key),                            # parent's kept
+    assert jnp.allclose(node.sample(rng=key),
                         G.parameterize(mean=0.0, log_std=0.0).sample(rng=key))
 
 
@@ -554,7 +551,7 @@ def test_derived_defs_stay_composable():
         gain=Struct(scale=3.0))
     s = pipe.init()
     s, out = pipe.apply(s, 1.0)
-    assert jnp.allclose(out, 1.0)  # 3.0 integrated once, clipped to 1
+    assert jnp.allclose(out, 1.0)
 
 
 def test_derived_apply_keeps_its_entropy_requirement():
@@ -585,10 +582,7 @@ def test_derive_inherits_boundary_actions():
 
 
 def test_method_channels_by_name():
-    """Reserved names in a method signature are injected by name: the
-    binding-stage prefix in binding order (self, node, param, state), the
-    call's own arguments after them, positional or keyword. state on a bare
-    node is the caller's to pass by keyword."""
+    """Verifies method signatures inject reserved `node`, `param`, and `state` prefixes in binding order."""
     def param(scale):
         return Struct(scale=jnp.asarray(scale))
 
@@ -604,20 +598,19 @@ def test_method_channels_by_name():
     acc = Leaf(apply, param=param, init=init, name='acc',
                    methods=dict(level=level)).parameterize(scale=2.0)
 
-    # binding order is validated at definition: bound names come first...
+    # Rejects method signatures where reserved prefixes appear after call arguments or out of order.
     with pytest.raises(TypeError, match='come first'):
         Leaf(apply, param=param, init=init, name='acc',
                  methods=dict(bad=lambda x, param: x))
-    # ...and keep their order among themselves
     with pytest.raises(TypeError, match='order'):
         Leaf(apply, param=param, init=init, name='acc',
                  methods=dict(bad=lambda state, param: state))
 
-    # bare node: param and node inject; state is passed explicitly
+    # On a standalone bound `PNode`, `node` and `param` inject while `state` passes by keyword.
     val, nm = acc.level(1.0, state=jnp.asarray(3.0))
     assert val == 8.0 and nm == 'acc'
 
-    # wired member: all channels live, state chained through the step
+    # Inside `Composite`, member views inject live `state` as well.
     from nodejax import Composite
 
     def wapply(self, input):
@@ -633,9 +626,7 @@ def test_method_channels_by_name():
 
 
 def test_method_rng_is_a_stream_everywhere():
-    """The rng slot arrives as a KeyStream in every context: the
-    boundary stream inside a wiring, a wrapped explicit key on a bare
-    node — one drawing idiom."""
+    """Verifies method `rng` parameters receive a `KeyStream` both directly and inside `Composite`."""
     def param(scale):
         return Struct(scale=jnp.asarray(scale))
 
@@ -647,10 +638,9 @@ def test_method_rng_is_a_stream_everywhere():
 
     key = jax.random.PRNGKey(0)
     a, b = g.draw(rng=key), g.draw(rng=key)
-    assert jnp.allclose(a, b)                      # explicit key: deterministic
+    assert jnp.allclose(a, b)
 
-    # in a wiring, the boundary stream feeds the method: the author
-    # declares rng at the composite boundary, the method draws from it
+    # Inside an authored `Composite`, the boundary PRNG stream feeds member method calls.
     from nodejax import Composite
 
     def wapply(self, x, rng):

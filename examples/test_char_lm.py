@@ -1,20 +1,17 @@
-"""A character-level language model on a small vendored corpus (4.4KB of
-public-domain English), end to end.
+"""Character-level language modeling and autoregressive sampling on a 4.4 KB English corpus.
 
-TIE — one embedding matrix serves both ends of the model. tie('embed',
-'unembed') reparameterizes the pipe so the composite param carries the
-matrix ONCE; the unembed slot is literally empty, and gradients from
-both uses accumulate through the expansion.
+`build` composes an embedding table, a residual RNN stack, a mixture-of-experts block, and an
+output projection inside an `ambient` scope supplying `vocab`, `hidden`, and `experts`, then ties
+input and output weights with `tie(pipe, 'embed', 'unembed')` so the embedding matrix is stored
+once at `param.embed` and accumulates gradients from both sites.
 
-AUX LOSS — the mixture-of-experts layer emits its load-balance statistic
-on the aux stream: (output, aux) from the block, diverted under the
-member's name by the pipe, stacked over time by scan, and supplied to the
-loss through its declared ``aux`` argument.
-
-GENERATION — sampling is a feedback loop: a cyclic node whose state
-carries (model state, last char, rng); each step feeds the model its own
-previous sample, the rng auto-advances, and scan rolls it out.
+During unrolled sequence training under `scanned`, the MoE layer emits load-balancing statistics via
+`Aux`, which `train_step` forwards to `lm_loss(..., *, aux)` alongside token cross-entropy.
+`Sampler` closes the autoregressive loop as a two-member `Composite` pairing the language model
+with a one-step `Delay` register and drawing categorical samples from the per-step `rng` stream.
 """
+
+from __future__ import annotations
 
 import os
 
@@ -23,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import (Aux, node, trained, Node, Leaf, Composite, serial, stack,
+from nodejax import (Aux, PNode, node, trained, Node, Leaf, Composite, serial, stack,
                      scan, scanned, residual, train_step, tie, split_aux,
                      ambient, nn)
 from nodejax.control import Delay
@@ -34,9 +31,8 @@ HIDDEN, LAYERS, EXPERTS = 48, 3, 4
 T, BATCH, STEPS = 32, 32, 1500
 
 
-# --- corpus ---
-
 def corpus() -> tuple[jax.Array, list[str]]:
+    """Loads the bundled corpus as integer character IDs and the sorted vocabulary list."""
     path = os.path.join(os.path.dirname(__file__), 'data', 'tiny_corpus.txt')
     text = open(path).read()
     chars = sorted(set(text))
@@ -45,9 +41,7 @@ def corpus() -> tuple[jax.Array, list[str]]:
 
 
 def build(vocab: int) -> Node:
-    """embed >> residual rnn stack >> MoE >> unembed, embeddings TIED.
-    Every block is stock nn; the shared design arguments flow through
-    ambient scope, so the members stay plain reusable factories."""
+    """Builds a character language model with tied input and output embeddings over an `ambient` scope."""
     with ambient(vocab=vocab, hidden=HIDDEN, experts=EXPERTS):
         pipe = serial(
             embed=nn.Embed(),
@@ -58,51 +52,38 @@ def build(vocab: int) -> Node:
     return tie(pipe, 'embed', 'unembed')
 
 
-# --- loss: cross-entropy + the aux load-balance term ---
-
 def lm_loss(logits: jax.Array, target: jax.Array, *, aux: Aux) -> jax.Array:
+    """Sums token cross-entropy with the scaled MoE load-balancing auxiliary penalty."""
     ce = jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits, target))
     return ce + 0.01 * jnp.mean(aux.moe.balance)
 
 
-# --- generation: sampling as the feedback loop ---
-
 @node
-def Sampler(lm: Node, temperature: float = 0.8) -> Node:
-    """Autoregressive sampling, spelled as what it is: the model and the
-    register it feeds itself through.
+def Sampler(lm: Node | PNode, temperature: float = 0.8) -> Node:
+    """Samples one autoregressive token per step by feeding the previous token from `Delay` into `lm`.
 
-    Each step reads the character emitted last, runs the model on it, and
-    draws the next. The register is the stock one-tick Delay, because that
-    is exactly what it is. The draw itself is arithmetic on logits and a
-    key, so it stays a function: a node owning neither params nor state
-    would add a member slot for nothing.
-
-    Nothing here unwraps an aux stream or threads a key. The wiring
-    diverts the model's sown losses and hands this apply clean logits, and
-    the boundary key arrives per STEP — scan splits it across time exactly
-    as a composite splits it across members."""
+    Composite wiring routes auxiliary MoE outputs away from `logits` and supplies a per-step `rng`
+    stream when unrolled with `scanned`.
+    """
     def apply(self, tick: jax.Array, rng) -> jax.Array:
         logits = self.lm(self.last.state)
         char = jax.random.categorical(rng.next(), logits / temperature, axis=-1)
-        self.last(char)                        # store it for the next step
+        # `self.last` records the sampled character in the one-step delay register for the next tick.
+        self.last(char)
         return char
 
     return Composite(lm=lm, last=Delay().with_input(jnp.zeros((1,), dtype=jnp.int32)))(apply, name=f'sample({lm.name})')
 
 
-# --- tests ---
-
-def test_tied_assembly():
-    """The tied pipe carries the embedding ONCE: unembed's param slot is
-    empty, and the model works end to end through both uses."""
+def test_tied_assembly() -> None:
+    """Verifies that `tie` stores the shared embedding weight once at `param.embed` and omits `param.unembed`."""
     ids, chars = corpus()
     lm = build(len(chars))
     model = lm.with_input(ids[:BATCH]).parameterize(
         rng=jax.random.PRNGKey(0))
 
     assert model.param.embed.weight.shape == (len(chars), HIDDEN)
-    assert 'unembed' not in model.param                          # tied away
+    assert 'unembed' not in model.param
 
     _, out = model.initialize()(ids[:BATCH])
     logits, aux = split_aux(out)
@@ -110,21 +91,19 @@ def test_tied_assembly():
     assert aux.moe.usage.shape == (EXPERTS,)
 
 
-def test_trains_generates():
-    """End to end on real text: loss falls far below the uniform floor,
-    the aux term keeps the experts from collapsing, and the trained model
-    GENERATES text through the feedback sampler."""
+def test_trains_generates() -> None:
+    """Trains the tied character language model with MoE load balancing and verifies keyed generation."""
     ids, chars = corpus()
     vocab = len(chars)
     lm = build(vocab)
 
-    # windows of the corpus: input chars and next-char targets
+    # `windows` indexes `(STEPS, T, BATCH)` character slices paired with `windows + 1` targets.
     rs = np.random.RandomState(0)
     starts = rs.randint(0, len(ids) - T - 1, size=(STEPS, BATCH))
-    offsets = np.arange(T)[None, :, None]                       # (1, T, 1)
-    windows = starts[:, None, :] + offsets                      # (S, T, B)
+    offsets = np.arange(T)[None, :, None]
+    windows = starts[:, None, :] + offsets
 
-    # the rollout eats (T, B) ids and emits per-step outputs
+    # `scanned(lm)` unrolls `lm` across `(T, BATCH)` token sequences inside `train_step`.
     trainer = train_step(
         scanned(lm).with_input(ids[windows[0]]).parameterize(
             rng=jax.random.PRNGKey(0)).initialize(),
@@ -132,31 +111,23 @@ def test_trains_generates():
     final, aux = trained(trainer).apply(input=ids[windows], target=ids[windows + 1])
 
     uniform = jnp.log(vocab)
-    # untrained logits carry the init scale, so CE starts at or above the
-    # uniform floor; training must fall far below that floor
+    # Cross-entropy starts near the uniform floor `log(vocab)` and drops well below it.
     assert aux.loss[0] > 0.9 * uniform
-    assert aux.loss[-1] < 0.7 * uniform, aux.loss[-1]               # learned real structure
+    assert aux.loss[-1] < 0.7 * uniform, aux.loss[-1]
 
-    # the aux loss did its job: no expert collapsed. `final` is the
-    # trained ROLLOUT, which eats a (T, B) sequence; this check wants one
-    # batch through the lm itself, and a wrapper's param IS the lm's, so
-    # binding the lm to it is exact rather than lucky
+    # `final.param` matches the unwrapped `lm` parameter tree for single-batch inspection.
     fitted = lm.bind(final.param)
     _, (_, report) = fitted.initialize(input=ids[:BATCH])(ids[:BATCH])
     assert jnp.max(report.moe.usage) < 0.7, report.moe.usage
 
-    # generation: the feedback loop, keyed through the explicit RNG channel.
-    # The TRAINED lm composes in as a bound member (the transport
-    # container), and the bare parameterize fills every slot from that
-    # storage, owing no key. The rollout emits (characters, aux); the
-    # MoE's load-balance term remains outside the sampler's primary output
+    # `Sampler(fitted)` embeds the bound language model so `parameterize()` needs no PRNG key.
     gen = scanned(Sampler(fitted)).parameterize()
     ticks = jnp.zeros(160)
     sample_a, _ = gen.apply(rng=jax.random.PRNGKey(7), tick=ticks)
     sample_b, _ = gen.apply(rng=jax.random.PRNGKey(7), tick=ticks)
     sample_c, _ = gen.apply(rng=jax.random.PRNGKey(8), tick=ticks)
 
-    assert jnp.all(sample_a == sample_b)                        # keyed determinism
+    assert jnp.all(sample_a == sample_b)
     assert not jnp.all(sample_a == sample_c)
     assert jnp.all((sample_a >= 0) & (sample_a < vocab))
 

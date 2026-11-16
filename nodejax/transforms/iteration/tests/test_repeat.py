@@ -1,4 +1,4 @@
-"""repeat: weight-tied depth — one param, applied n times in sequence."""
+"""Verifies weight-tied iteration transforms (`repeat`, `repeated`, and `iterated`)."""
 
 import jax
 import jax.numpy as jnp
@@ -8,28 +8,23 @@ from nodejax.control import Gain, Integrator
 
 
 def test_repeat():
-    """One param applied n times — vs stack's per-layer params — and
-    rebinding a bound PNode (param meaning unchanged)."""
+    """Verifies that `repeat` applies one unstacked parameter tree `n` times sequentially."""
     r = repeat(Gain(), n=3).parameterize(scale=jnp.array(2.0))
     assert jnp.allclose(r.apply(1.0), 8.0)
-    assert r.param.scale.shape == ()          # no layer axis, unlike stack
+    assert r.param.scale.shape == ()
 
     bound = Gain().parameterize(scale=jnp.array(3.0))
     assert jnp.allclose(repeat(bound, n=2).apply(1.0), 9.0)
 
 
 def test_repeat_cyclic():
-    """One state slot, threaded through the iterations exactly as through
-    calls: repeat is apply in a loop, and the state keeps the inner's own
-    shape."""
+    """Verifies that `repeat` threads one unstacked state slot across all `n` iterations."""
     r = repeat(Integrator(), n=2).parameterize()
     state = r.init()
-    assert jnp.shape(state) == ()          # no position axis: same node, looped
+    assert jnp.shape(state) == ()
     state, out = r.apply(state, 1.0)
-    # two iterations: 0+1 -> 1, then 1 plus the first iteration's output -> 2
     assert jnp.allclose(state, 2.0) and jnp.allclose(out, 2.0)
     state, out = r.apply(state, 1.0)
-    # the state carries into the next call: 2+1 -> 3, then 3+3 -> 6
     assert jnp.allclose(state, 6.0) and jnp.allclose(out, 6.0)
 
 
@@ -49,8 +44,7 @@ def test_repeat_allocates_one_apply_stream_per_step():
 
 
 def Register() -> Node:
-    """Primes its state from the first value it meets; apply increments the
-    signal and holds the primed value still."""
+    """Primes state from the initial input and increments subsequent inputs by one."""
     def init(input):
         return input
     def apply(state, input):
@@ -59,11 +53,7 @@ def Register() -> Node:
 
 
 def test_stack_init_walks_the_positions():
-    """stack's layers run in SEQUENCE, so a priming init at layer k boots
-    from the signal as it arrives there, not from the raw input n times: the
-    walk serial's init does, done with one node. ensemble legitimately primes
-    every member from the same input, which is what makes it the parallel
-    one, and repeat needs no walk at all: one state, primed once."""
+    """Verifies that `stack` primes each layer from the preceding layer's output while `repeat` primes once."""
     state = stack(Register().node, n=3).parameterize().init(input=jnp.array(1.0))
     assert jnp.allclose(state, jnp.array([1.0, 2.0, 3.0]))
 
@@ -72,8 +62,7 @@ def test_stack_init_walks_the_positions():
 
 
 def test_iterated_applies_one_node_to_the_same_input_n_times():
-    """Function iteration on the state: the input stays constant, unlike
-    repeat's output chaining. The last output returns; aux stacks."""
+    """Verifies that `iterated` threads state across `n` steps while holding the step input fixed."""
     from nodejax import iterated
 
     def Accumulator() -> Node:
@@ -86,8 +75,8 @@ def test_iterated_applies_one_node_to_the_same_input_n_times():
     threefold = iterated(Accumulator(), n=3).parameterize().initialize()
     threefold, output = threefold.apply(2.0)
 
-    assert output == 6.0                       # 0 + 2 + 2 + 2, last output
-    assert threefold.state == 6.0              # state threaded through
+    assert output == 6.0
+    assert threefold.state == 6.0
 
 
 def test_repeated_keeps_every_point() -> None:
@@ -99,8 +88,7 @@ def test_repeated_keeps_every_point() -> None:
 
 
 def test_repeated_runs_from_fresh_state_and_drops_it() -> None:
-    """The past-complete form of repeat: a cyclic step starts from fresh
-    state on every call and the result has no state slot."""
+    """Verifies that `repeated` initializes fresh state per call, stacks outputs, and discards final state."""
     from nodejax import Node, repeated
     from nodejax.control import Integrator
 

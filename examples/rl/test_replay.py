@@ -1,4 +1,4 @@
-"""Focused behavior checks for the replay Buffer."""
+"""Verifies ring-buffer wraparound, valid-row sampling, and same-step write visibility on `Buffer`."""
 
 import jax
 import jax.numpy as jnp
@@ -30,7 +30,7 @@ def test_buffer_wraps_and_samples_only_filled_rows() -> None:
 
 @node
 def InsertThenSample(buffer: Node, count: int) -> Node:
-    """Insert a segment and draw from the same Buffer in one apply."""
+    """Appends `segment` to `buffer` and immediately samples `count` rows within the same `apply` call."""
     members = Composite(buffer=buffer)
 
     def apply(self, segment, rng):

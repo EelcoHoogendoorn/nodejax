@@ -1,10 +1,10 @@
-"""Stacked ResNet example with per-layer auxiliary activation losses.
+"""Stacked residual network with per-layer `Aux` activation penalties.
 
-Demonstrates:
-1. Every layer in a residual block sows its L2 activation penalty on the aux stream.
-2. `residual(...)` preserves skip connections over the main data signal while passing `aux` through.
-3. `stack(...)` scans the residual block over depth=L, automatically stacking the sown `act_l2` into shape `(depth,)`.
-4. `train_step` trains the stacked ResNet with total loss = MSE(pred, target) + lambda * sum(aux.act_l2).
+Each `SownBlock` emits its mean squared activation in `Aux(act_l2=...)`.
+`residual` adds skip connections around the primary output while forwarding
+`Aux` unchanged, `stack` scans the residual block across `depth` layers so
+`aux.act_l2` acquires shape `(depth,)`, and `train_step` passes the accumulated
+`Aux` record into a loss function declaring keyword `aux`.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from examples.util import mse
 
 @node
 def SownBlock(dim: int) -> Node:
-    """A linear block that emits its L2 activation penalty as Aux."""
+    """Applies a GELU linear transformation of width `dim` and emits mean squared activation in `Aux`."""
     def apply(param, input):
         y = jax.nn.gelu(input @ param.w + param.b)
         return y, Aux(act_l2=jnp.mean(y ** 2))
@@ -36,12 +36,12 @@ def SownBlock(dim: int) -> Node:
 
 @node
 def StackedResNet(dim: int, depth: int) -> Node:
-    """A stacked ResNet: residual(SownBlock) stacked to depth L."""
+    """Stacks `depth` residual `SownBlock` layers of width `dim`."""
     return stack(residual(SownBlock(dim)), depth)
 
 
-def test_stacked_resnet_aux_accumulation():
-    """Verify that stacked ResNet emits main output cleanly while aux carries stacked (depth,) L2 penalties."""
+def test_stacked_resnet_aux_accumulation() -> None:
+    """Verifies that `StackedResNet` preserves feature width `dim` and stacks `act_l2` penalties to shape `(depth,)`."""
     depth = 4
     dim = 8
     model_def = StackedResNet(dim=dim, depth=depth)
@@ -50,14 +50,12 @@ def test_stacked_resnet_aux_accumulation():
     x = jnp.ones(dim)
     out, aux = model.apply(x)
 
-    # Output shape matches input dimension
     assert out.shape == (dim,)
-    # Aux carries per-layer L2 penalties stacked over depth
     assert aux.act_l2.shape == (depth,)
 
 
-def test_stacked_resnet_training_with_aux_loss():
-    """Train stacked ResNet where total loss includes per-layer sown activation penalties."""
+def test_stacked_resnet_training_with_aux_loss() -> None:
+    """Verifies that `train_step` minimizes MSE combined with summed per-layer `Aux` activation penalties."""
     depth = 3
     dim = 4
     model_def = StackedResNet(dim=dim, depth=depth)
@@ -66,7 +64,6 @@ def test_stacked_resnet_training_with_aux_loss():
         total_act_penalty = jnp.sum(aux.act_l2)
         return mse(output, target) + 0.01 * total_act_penalty
 
-    # the trainer takes the model FULLY BOUND, and trained() is the run
     trainer = train_step(
         model_def.parameterize(rng=jax.random.PRNGKey(42)).initialize(),
         loss_fn, optax.adam(1e-2))

@@ -1,4 +1,4 @@
-"""metasgd: finetune with per-parameter step sizes as meta-params."""
+"""Verifies `finetune` with `learned_sgd` optimizes both initial parameters and per-parameter learning rates."""
 
 import jax
 import jax.numpy as jnp
@@ -24,8 +24,7 @@ def mse(pred: jax.Array, target: jax.Array) -> jax.Array:
 
 
 def test_metasgd_learns_init_and_rates():
-    """Task family y = a*x: the meta-loop learns an init AND per-param
-    step sizes such that a few inner steps identify each task's a."""
+    """Verifies outer training learns initial parameters and step sizes that adapt to held-out linear tasks."""
     model = Scale().parameterize(rng=jax.random.PRNGKey(0)).initialize()
     adapt = finetune(train_step(model, mse, learned_sgd(0.1)))
     trainer = train_step(batch(adapt).initialize(), mse, optax.adam(0.05))
@@ -43,12 +42,12 @@ def test_metasgd_learns_init_and_rates():
     assert jnp.all(jnp.isfinite(aux.loss))
     assert jnp.mean(aux.loss[-20:]) < 0.1 * jnp.mean(aux.loss[:20])
 
-    # held-out task: k support points identify an unseen a
+    # Evaluates adaptation on a held-out slope.
     a_new = 1.3
     out = batch(adapt).node.bind(final.param).apply(
         support=Struct(input=jnp.ones((1, k)), target=jnp.full((1, k), a_new)),
         query=jnp.full((1,), 2.0))
     assert jnp.allclose(out, 2.0 * a_new, atol=0.1)
 
-    # the step sizes are meta-params and moved off their starting value
+    # Step sizes move away from their initial value.
     assert not jnp.allclose(final.param.opt.model.scale, 0.1)

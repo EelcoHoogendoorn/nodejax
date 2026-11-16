@@ -1,11 +1,8 @@
-"""The FOC actuator stack, assembled stock and run over a spinning
-mechanical state — the node-level composite port, kept runnable.
+"""Exercises the stock field-oriented control `ActuatorStack` over a spinning mechanical trajectory.
 
-Blocks arrive constructed at the factories (bound nodes as transport
-containers: stored construction values), one rng enters at init and
-splits toward the sensor members, per-member state shapes derive from
-the wiring by init discovery, and the stack's custom init runs the
-generated walk then patches the bus estimator's boot value.
+Collaborator `Node`s enter the composite already constructed, a single PRNG key splits across
+stochastic sensor members during `init`, per-member state shapes derive from the wiring walk, and
+`ActuatorStack` initializes its bus-voltage estimator from the sampled initial bus reading.
 """
 
 import jax
@@ -24,7 +21,7 @@ DT = 1e-3
 
 
 def stock_stack() -> Node:
-    """The full stack, member tree spelled once — at the factories."""
+    """Builds the stock `ActuatorStack` with default electrical, thermal, and control parameters."""
     motor = Electrical(DT)(
         resistance=0.24,
         inductance_d=2e-4,
@@ -58,24 +55,21 @@ def stock_stack() -> Node:
 
 def test_stack_runs_and_tracks():
     stack = stock_stack().parameterize()
-    # AT REST is a real initial condition, and supplying one is what lets the
-    # warm filters prime. A resolved shape alone will not do it: zeros are a
-    # spec, and a spec never enters an input slot (see test_priming)
+    # Warm EMA filters prime their initial state from a concrete at-rest input.
     at_rest = Struct(mechanical=Struct(position=0.0, velocity=0.0), command=0.0, bus_voltage=48.0)
     state = stack.init(rng=jax.random.PRNGKey(0), input=at_rest)
-    # booted at the SAMPLED bus: the walk carries that condition through, so
-    # the ema primes at 48 V through its own noisy sensor
+    # The wiring walk routes the noisy 48 V bus sample into the warm EMA initial state.
     assert jnp.abs(state.current_ctrl.bus_est.ema - 48.0) < 1.0
 
     n = 500
     t = jnp.arange(n) * DT
-    mech = Struct(position=jnp.mod(20.0 * t, 2 * jnp.pi),   # spinning at 20 rad/s
+    mech = Struct(position=jnp.mod(20.0 * t, 2 * jnp.pi),
                   velocity=jnp.full(n, 20.0))
     final, out = scan(stack)(state, mechanical=mech,
-                             command=jnp.full(n, 2.0),         # 2 Nm
-                             bus_voltage=jnp.full(n, 48.0))    # a stiff bus
+                             command=jnp.full(n, 2.0),
+                             bus_voltage=jnp.full(n, 48.0))
 
     assert jnp.all(jnp.isfinite(out.torque))
-    assert jnp.abs(jnp.mean(out.torque[n // 2:]) - 2.0) < 0.5  # tracks the command
-    assert jnp.mean(out.power[n // 2:]) > 0.0                  # power was drawn
-    assert final.motor_thermal > 25.0                          # windings warmed
+    assert jnp.abs(jnp.mean(out.torque[n // 2:]) - 2.0) < 0.5
+    assert jnp.mean(out.power[n // 2:]) > 0.0
+    assert final.motor_thermal > 25.0

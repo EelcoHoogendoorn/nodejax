@@ -1,4 +1,4 @@
-"""The construction ladder: statics, tree, input, params, then state."""
+"""Verifies static specialization, `map_members` tree replay, and generic argument overlays."""
 
 import jax.numpy as jnp
 

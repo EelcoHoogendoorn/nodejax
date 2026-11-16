@@ -1,9 +1,4 @@
-"""An init written against ``self``: member views over the init-time slots.
-``bind`` places a state, ``reset`` primes a member from an input the init
-computes, a read builds a member from its own bundle, and the composite's
-state is what the slots hold when the init returns. Binding the members'
-parameters and splitting their keys is the views' job, not the author's.
-"""
+"""Verifies `Composite` and `Wrapper` initializers authored against `self`."""
 
 import jax
 import jax.numpy as jnp
@@ -23,7 +18,7 @@ def Counter() -> Node:
 
 
 def Follower() -> Node:
-    """State primed from the first input's value, then tracking the input."""
+    """Builds a `Leaf` primed from its initial input and tracking one step behind."""
     return Leaf(
         lambda state, input: (input, state),
         init=lambda input: input * 2.0,
@@ -32,7 +27,7 @@ def Follower() -> Node:
 
 
 def Noisy() -> Node:
-    """State drawn at init: the members' keys are split by the views."""
+    """Builds a `Leaf` whose state is drawn from `rng` during initialization."""
     return Leaf(
         lambda state, input: (state, state + input),
         init=lambda rng: jax.random.normal(rng.next(), ()),
@@ -42,7 +37,7 @@ def Noisy() -> Node:
 
 @node
 def Pair() -> Node:
-    """A counter placed from the start and a follower primed off it."""
+    """Wires a `Counter` and `Follower` with an explicit `self`-based initializer."""
     members = Composite(count=Counter(), follow=Follower())
 
     def apply(self, input):
@@ -58,7 +53,7 @@ def Pair() -> Node:
 def test_bind_and_reset_through_self_are_the_composite_state():
     program = Pair().parameterize().initialize(start=jnp.asarray(3.0))
     assert program.state.count == 3.0
-    assert program.state.follow == 8.0  # (3 + 1) * 2, primed from what the init computed
+    assert program.state.follow == 8.0  # Primed as (3 + 1) * 2 from the computed count.
     advanced, out = program.apply(jnp.asarray(1.0))
     assert out == 8.0 and advanced.state.count == 4.0 and advanced.state.follow == 3.0
 

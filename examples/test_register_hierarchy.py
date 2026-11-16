@@ -1,33 +1,22 @@
-"""A register file over halving timescales: two writes per step.
+"""Multi-timescale register file updating two levels per step.
 
-One register per timescale octave. Level zero writes every step; a
-staggered binary-carry schedule wakes exactly one higher level beside
-it, level k at rate 1/2^k, so per-step compute is two updates at any
-number of levels while the held span doubles per level. Between its
-ticks a register holds bitwise: retention is the schedule's, not a
-gate's, and credit between distant steps climbs through the slow
-levels instead of crossing every transition.
+Each level `k` represents one timescale octave. Level zero updates every step,
+and a staggered binary-carry schedule activates one higher level alongside it at
+rate `1 / 2^k`, keeping per-step work at two register updates regardless of
+hierarchy depth while doubling retention span at each level. Between scheduled
+ticks, unscheduled registers remain bitwise unchanged so gradient credit
+propagates across long horizons through slower levels rather than traversing
+every intermediate transition.
 
-The update at a tick is a convex law written on the register: a gate
-conditioned on the drive and the next finer register mixes held
-content with a candidate of the same reads, so the transport of held
-is convex by construction and the candidate is centered on the drive
-(identity plus a zero-initialized correction). Neither the gate nor
-the candidate reads held.
+At a scheduled tick, `ConvexUpdate` mixes the level's held content with a
+drive-centered candidate via a gate conditioned only on the drive and the next
+finer level, making transport of `held` convex by construction.
 
-The output is a carried readout of the whole file: each level owns a
-bias-free output projection, and a write updates register and readout
-together by projecting the register's change. Two rows of work per
-step, every timescale in the output, and a slow register receives
-gradient once per tick as the accumulated signal of the steps its
-contribution sat frozen. Reading the whole file matters: with only
-the fast register exposed, recalling old content waits on trained
-descent hops, and the measured recall frontier sits octaves lower.
-
-The training test is recall: the class shows only in the first token,
-the readout answers at the last step, and the horizon exceeds every
-fast level's reach, so learning it at all means the gradient climbed
-the hierarchy.
+`SummaryRegisters` maintains a running linear readout across all levels in
+cyclic state: each level owns a bias-free output projection, and each register
+write adds the projected state difference to the carried readout. In the recall
+benchmark below, the target class appears in the first token alone and is
+predicted at the final step beyond the reach of fast levels.
 """
 
 import jax
@@ -35,8 +24,9 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from nodejax import (Composite, Leaf, Node, Struct, Wrapper, batch, control,
-                     ensemble, node, scanned, serial, train_step, trained, nn)
+from nodejax import (Composite, Leaf, Node, PNode, Struct, Wrapper, batch,
+                     control, ensemble, nn, node, scanned, serial, train_step,
+                     trained)
 from nodejax.transforms.transform import transform
 
 
@@ -48,10 +38,12 @@ BATCH, ROUNDS = 64, 600
 
 
 def active_levels(tick: jax.Array, levels: int) -> jax.Array:
-    """The two levels writing at ``tick``: level zero, and the higher
-    level whose phase-staggered counter bit flips; the flip belonging
-    above the truncated hierarchy goes to the top level, which then
-    ticks twice per period, in phase with the level below it."""
+    """Computes the two register indices scheduled to write at `tick`.
+
+    Level zero writes on every step alongside the lowest higher level whose
+    phase-staggered binary counter bit flips; carry overflows above the top
+    level wrap onto `levels - 1`.
+    """
     above = jnp.arange(1, levels)
     period = 2 ** above
     flips = (tick + period // 2) % period == period - 1
@@ -60,9 +52,8 @@ def active_levels(tick: jax.Array, levels: int) -> jax.Array:
 
 
 @node
-def Counter() -> Node:
-    """Counter whose initial value is a uniformly random phase, so
-    learned behavior cannot exploit alignment to the sequence start."""
+def Counter() -> PNode:
+    """Advances an integer step counter initialized to a uniformly random 32-bit phase."""
     def init(rng) -> jax.Array:
         bits = jax.random.bits(rng.next(), (), dtype=jnp.uint32)
         return jax.lax.bitcast_convert_type(bits, jnp.int32)
@@ -76,7 +67,7 @@ def Counter() -> Node:
 
 @transform(preserves='param,state')
 def indexed_apply(copies: Node) -> Node:
-    """Apply and update one dynamically selected ensemble member."""
+    """Applies and updates a single dynamically selected member of an `ensemble` Node."""
     def apply_fn(contract, param, state, input, rng):
         member = contract.members.copies.members.member
         level = input.level
@@ -101,14 +92,12 @@ def indexed_apply(copies: Node) -> Node:
 
 @node
 def ConvexUpdate(hidden: int) -> Node:
-    """The convex register law: (held, input, neighbor) to the new
-    held value. A gate conditioned on the input and neighbor reads
-    mixes held content with a candidate of the same reads, so
-    retention is one minus the write and the transport of held is
-    convex by construction: neither the gate nor the candidate ever
-    reads held. The candidate is centered on the drive with a
-    zero-initialized correction, so a chain of registers begins as a
-    pure identity and the corrections grow as they earn gradient."""
+    """Updates a register state via a convex combination of `held` and a gated candidate.
+
+    Both the sigmoid gate and the zero-initialized candidate residual read
+    `input` and `neighbor` without reading `held`, keeping transport with
+    respect to `held` convex and initializing the residual correction to zero.
+    """
     members = Composite(
         update=nn.Linear(hidden),
         candidate=nn.Linear(hidden, weight_init=jax.nn.initializers.zeros),
@@ -126,24 +115,14 @@ def ConvexUpdate(hidden: int) -> Node:
 @transform
 def SummaryRegisters(block: Node, levels: int, hidden: int,
                      out: int) -> Node:
-    """Upward registers carrying a readout of the file beside the file.
+    """Maintains a `levels`-octave register file and its incrementally projected readout.
 
-    ``block`` maps the named triple (held, input, neighbor) to a
-    level's new held value; each level draws its own params from the
-    one definition, and the scheduled pair applies theirs through
-    indexed_apply. Each level reads only the next finer level, so the
-    state conditioning is acyclic and, with a convex block, the system
-    Jacobian is block triangular with eigenvalues in [0, 1]. The input
-    is a full file, (levels, hidden), read per level; a caller wanting
-    the fast lane only zeroes every row above the bottom. The output
-    is both: Struct(readout, held).
-
-    The readout is the full-file projection maintained as state: each
-    level owns a bias-free output projection (an offset is meaningless
-    on a difference), and a write updates register and readout
-    together, projecting the register's change. The readout equals the
-    projection of the whole file at every step; both start at zero
-    together."""
+    `block` maps `Struct(held, input, neighbor)` to a level's updated register
+    vector, with independent parameters per level applied two at a time through
+    `indexed_apply`. Each level owns a bias-free linear projection into `out`,
+    and every scheduled write adds the projected state increment `value - held[level]`
+    to `readout`, emitting `Struct(readout, held)` from input `(levels, hidden)`.
+    """
     bank = ensemble(block.with_input(Struct(
         held=jnp.zeros(hidden), input=jnp.zeros(hidden),
         neighbor=jnp.zeros(hidden))), n=levels)
@@ -178,7 +157,7 @@ def SummaryRegisters(block: Node, levels: int, hidden: int,
 
 
 def recall_model(levels: int, hidden: int) -> Node:
-    """(steps, CLASSES) tokens -> (CLASSES,) logits at the last step."""
+    """Builds a sequence classifier that predicts the initial token class from the final register readout."""
     return serial(
         sequence=scanned(serial(
             embed=nn.Linear(hidden),
@@ -195,7 +174,7 @@ def recall_model(levels: int, hidden: int) -> Node:
 
 def recall_data(rng: np.random.RandomState,
                 rounds: int) -> tuple[jax.Array, jax.Array]:
-    """The class shows only in the first token; zeros ever after."""
+    """Generates one-hot recall episodes carrying the target class at step zero followed by zeros."""
     labels = rng.randint(0, CLASSES, size=(rounds, BATCH))
     token = np.zeros((rounds, BATCH, STEPS, CLASSES), dtype=np.float32)
     token[np.arange(rounds)[:, None], np.arange(BATCH), 0, labels] = 1.0
@@ -203,13 +182,13 @@ def recall_data(rng: np.random.RandomState,
 
 
 def xent(logits: jax.Array, target: jax.Array) -> jax.Array:
+    """Computes mean softmax cross-entropy loss against integer class labels."""
     return jnp.mean(
         optax.softmax_cross_entropy_with_integer_labels(logits, target))
 
 
 def test_registers_hold_and_carry_an_exact_readout() -> None:
-    """Unscheduled registers hold bitwise; the carried readout equals
-    the projection of the whole file at every step of a full period."""
+    """Verifies that at most two registers change per step and the carried readout matches full-file projection."""
     drive = jnp.ones((LEVELS, HIDDEN))
     model = SummaryRegisters(
         ConvexUpdate(HIDDEN), LEVELS, HIDDEN, out=CLASSES).with_input(
@@ -231,8 +210,7 @@ def test_registers_hold_and_carry_an_exact_readout() -> None:
 
 
 def test_recall_across_the_full_horizon() -> None:
-    """The class token at step zero outlives every fast level: recalling
-    it at the last step means the gradient climbed the hierarchy."""
+    """Verifies that training `recall_model` recovers step-zero class labels after `STEPS` steps with above 90% accuracy."""
     episodes, labels = recall_data(np.random.RandomState(0), ROUNDS)
     model = batch(recall_model(LEVELS, HIDDEN)).with_input(
         episodes[0]).parameterize(rng=jax.random.PRNGKey(0))

@@ -1,23 +1,18 @@
-"""A generic reverse denoiser applied to real handwritten digits.
+"""Deterministic DDIM reverse diffusion applied to handwritten digits.
 
-The reusable part is deliberately smaller than a diffusion model. ``Denoiser``
-knows how to apply one injected noise predictor repeatedly over a supplied
-cumulative-alpha schedule. It does not know the sample shape, the condition
-representation, the predictor architecture, or how the initial noisy sample
-was drawn.
+`Denoiser` iterates an injected noise predictor across a cumulative-alpha schedule without fixing
+the sample PyTree layout, conditioning representation, or network architecture.
 
-The digit experiment supplies those choices separately. A small MLP predicts
-noise from a corrupted 8 by 8 digit, its class, and Fourier features of the
-diffusion time. Training sees one randomly selected forward-noising time per
-example. Evaluation gives the learned predictor to ``Denoiser`` and reconstructs
-held-out digits from the noisiest point on the same schedule.
+`digit_predictor` pairs `DigitFeatures` with a two-hidden-layer MLP predicting Gaussian noise from
+a corrupted `8x8` digit, a one-hot class vector, and Fourier time features. Training samples one
+random forward-noising step per example, and evaluation binds the learned predictor into `Denoiser`
+to reconstruct held-out digits from the schedule endpoint.
 
-This is deterministic epsilon-prediction DDIM. It is a useful test of generic
-Node composition, not a claim to cover every diffusion parameterization or
-reverse solver. Running the file directly also trains a second predictor on
-a near-zero-floor schedule and samples every class from pure noise; the
-suite keeps to the cheap reconstruction demo.
+Running the module directly additionally trains a second predictor on a near-zero-floor schedule
+(`floor=0.02`) and generates class-conditioned digit samples from standard normal noise.
 """
+
+from __future__ import annotations
 
 import os
 
@@ -28,6 +23,7 @@ import optax
 from sklearn.datasets import load_digits
 
 from nodejax import (
+    Aux,
     Leaf,
     Node,
     PNode,
@@ -60,14 +56,14 @@ ALPHA_BAR = linear_alpha_bar(DIFFUSION_STEPS, floor=0.6)
 
 
 @node
-def PixelRange() -> Node:
-    """Keep clean digit estimates in the normalized pixel interval."""
+def PixelRange() -> PNode:
+    """Clips clean digit estimates to the normalized `[-1.0, 1.0]` pixel interval."""
     return Leaf(lambda input: jnp.clip(input, -1.0, 1.0))
 
 
 @node
-def DigitFeatures() -> Node:
-    """Flatten one noisy digit and append class and Fourier-time features."""
+def DigitFeatures() -> PNode:
+    """Flattens one noisy `8x8` digit and appends one-hot class and Fourier time features."""
     frequencies = 2.0 ** jnp.arange(FOURIER_FEATURES)
 
     def apply(input) -> jax.Array:
@@ -99,7 +95,7 @@ def DigitFeatures() -> Node:
 
 
 def digit_predictor() -> Node:
-    """The digit-specific predictor, separate from the reverse process."""
+    """Builds the digit noise-prediction MLP for injection into `Denoiser`."""
     return serial(
         features=DigitFeatures(),
         hidden1=nn.Linear(HIDDEN),
@@ -115,7 +111,7 @@ def digit_predictor() -> Node:
 
 
 def digit_data() -> Struct:
-    """Fixed train and held-out split of sklearn's bundled 8 by 8 digits."""
+    """Loads a deterministic train and test split of normalized `8x8` digits from `sklearn`."""
     digits = load_digits()
     images = jnp.asarray(digits.images / 8.0 - 1.0, dtype=jnp.float32)
     labels = jnp.asarray(digits.target, dtype=jnp.int32)
@@ -142,7 +138,7 @@ def forward_noise_data(
     rng: jax.Array,
     alpha_bar: tuple[float, ...] = ALPHA_BAR,
 ) -> Struct:
-    """Draw update-major epsilon-prediction batches from clean images."""
+    """Draws update-major epsilon-prediction training batches at random diffusion steps."""
     assert images.ndim == 3
     assert images.shape[1:] == (IMAGE, IMAGE)
     assert labels.shape == images.shape[:1]
@@ -186,10 +182,7 @@ def forward_noise_data(
 
 
 def noise_mse(prediction: jax.Array, target: jax.Array) -> jax.Array:
-    """Plain epsilon error, every diffusion time weighted equally: the
-    standard for full schedules, where a signal-to-noise weight would
-    concentrate the loss on the near-pure-noise times and starve the
-    mid-times that form structure."""
+    """Computes unweighted mean squared error between predicted and sampled Gaussian noise."""
     assert prediction.shape == target.shape
     return jnp.mean((prediction - target) ** 2)
 
@@ -197,8 +190,8 @@ def noise_mse(prediction: jax.Array, target: jax.Array) -> jax.Array:
 def trained_digit_predictor(
     updates: int = UPDATES,
     alpha_bar: tuple[float, ...] = ALPHA_BAR,
-) -> tuple[PNode, Struct]:
-    """Train one batched predictor on random diffusion times."""
+) -> tuple[PNode, Aux]:
+    """Trains a batched digit noise predictor across random diffusion steps."""
     data = digit_data()
     training = forward_noise_data(
         data.train.images,
@@ -225,7 +218,7 @@ def held_out_denoising(
     rng: jax.Array,
     alpha_bar: tuple[float, ...] = ALPHA_BAR,
 ) -> Struct:
-    """Corrupt and reconstruct a fixed held-out set with fixed noise."""
+    """Corrupts held-out digits to the schedule endpoint and reconstructs them with `Denoiser`."""
     data = digit_data()
     labels = data.test.labels[:TEST_IMAGES]
     clean = data.test.images[:TEST_IMAGES]
@@ -274,12 +267,11 @@ def generated_digits(
     alpha_bar: tuple[float, ...],
     per_class: int = 1,
 ) -> jax.Array:
-    """Sample ``per_class`` digits of every class from pure noise, the
-    classes cycling fastest so the first ten rows cover them all.
+    """Generates `per_class` digit samples per class from standard normal noise using `Denoiser`.
 
-    The predictor must have trained on the same near-zero-floor
-    schedule; the reverse process starts from a standard normal sample,
-    which is what the forward process reaches at that floor."""
+    Requires a predictor trained on the same near-zero-floor `alpha_bar` schedule so the forward
+    process endpoint matches the standard normal prior.
+    """
     labels = jnp.tile(jnp.arange(CLASSES), per_class)
     condition = jax.nn.one_hot(labels, CLASSES)
     noise = jax.random.normal(rng, (per_class * CLASSES, IMAGE, IMAGE))
@@ -296,9 +288,9 @@ def generated_digits(
     return samples
 
 
-def render_digits(history: Struct, evaluation: Struct,
+def render_digits(history: Aux, evaluation: Struct,
                   generated: jax.Array) -> str:
-    """Render one held-out reconstruction for every digit class."""
+    """Renders clean, corrupted, class-mean, denoised, and generated digits to a PNG grid."""
     import matplotlib
 
     matplotlib.use('Agg')
@@ -346,7 +338,7 @@ def render_digits(history: Struct, evaluation: Struct,
 
 
 def test_denoiser_is_generic_over_sample_pytrees() -> None:
-    """The reverse process preserves arbitrary sample structure and shapes."""
+    """Verifies that `Denoiser` preserves arbitrary sample PyTree structure and leaf shapes."""
     predictor = Leaf(
         lambda input: jax.tree.map(jnp.zeros_like, input.sample),
         name='zero_noise',
@@ -367,7 +359,7 @@ def test_denoiser_is_generic_over_sample_pytrees() -> None:
 
 
 def test_digit_predictor_has_a_separate_visible_network() -> None:
-    """The digit adapter and injected MLP stay visible in the Node tree."""
+    """Verifies that `digit_predictor` parameters remain addressable inside `Denoiser`."""
     input = Struct(
         condition=jax.nn.one_hot(3, CLASSES),
         sample=jnp.zeros((IMAGE, IMAGE)),
@@ -401,7 +393,7 @@ def test_digit_predictor_has_a_separate_visible_network() -> None:
 
 
 def test_denoises_held_out_digits() -> None:
-    """Noise prediction learns and DDIM improves unseen corrupted images."""
+    """Trains `digit_predictor` and verifies held-out DDIM reconstruction MSE and pixel bounds."""
     predictor, history = trained_digit_predictor()
     evaluation = held_out_denoising(
         predictor,
@@ -423,13 +415,8 @@ if __name__ == '__main__':
         jax.random.PRNGKey(2),
     )
 
-    # generation trains its own predictor on a near-zero floor, where
-    # the forward process reaches the noise the sampler starts from.
-    # both refinements of this schedule measured WORSE with this small
-    # predictor: the cosine schedule's deeper floor rails the sampler
-    # (the clean-estimate division amplifies error 22-fold into the
-    # clip), and doubling the steps compounds the per-step clip
-    # nonlinearity (50% class match at 30 steps, 12% at 60)
+    # Pure-noise generation trains a dedicated predictor on a near-zero alpha floor (`0.02`)
+    # matching the standard normal prior without over-amplifying small-alpha prediction error.
     full_schedule = linear_alpha_bar(DIFFUSION_STEPS, floor=0.02)
     generative, generative_history = trained_digit_predictor(
         updates=20 * UPDATES,

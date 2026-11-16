@@ -1,10 +1,7 @@
-"""remat: invisible to the caller, visible in the jaxpr.
+"""Verifies activation checkpointing via `remat` across stacked and scanned Nodes.
 
-The claim a rematerialization transform has to make is that it changes
-nothing a caller can observe — outputs, gradients, params, state — while
-changing what the backward pass keeps. The first half is asserted
-directly; the second is read off the jaxpr, since a wrapper that silently
-did nothing would pass every value check.
+`remat` preserves outputs, gradients, parameter structure, and state structure
+while inserting `jax.checkpoint` into the backward jaxpr at the wrapped boundary.
 """
 
 import jax
@@ -30,7 +27,7 @@ def _loss(model) -> jax.Array:
 
 
 def test_remat_changes_nothing_the_caller_can_see():
-    """Same output and same gradients, to the last bit the check allows."""
+    """Verifies that `remat` preserves forward outputs, parameter gradients, and parameter PyTree structure."""
     plain, remade = _tower(_layer()), _tower(remat(_layer()))
 
     assert jnp.allclose(plain.apply(X), remade.apply(X))
@@ -41,15 +38,11 @@ def test_remat_changes_nothing_the_caller_can_see():
     for a, b in zip(g_plain, g_remat):
         assert jnp.allclose(a, b, atol=1e-5)
 
-    # and the param tree is untouched: remat preserves what param means,
-    # so a bound node goes in and a bound node comes out
     assert jax.tree.structure(plain.param) == jax.tree.structure(remade.param)
 
 
 def test_the_recomputation_is_actually_there():
-    """A no-op wrapper would satisfy every value assertion above, so read
-    the backward pass itself: the remat primitive is in the jaxpr of the
-    rematerialized tower and absent from the plain one."""
+    """Verifies that `remat` emits the `remat` primitive in the backward jaxpr."""
     plain = str(jax.make_jaxpr(jax.grad(_loss))(_tower(_layer())))
     remade = str(jax.make_jaxpr(jax.grad(_loss))(_tower(remat(_layer()))))
 
@@ -58,8 +51,7 @@ def test_the_recomputation_is_actually_there():
 
 
 def test_remat_composes_where_depth_is_spelled():
-    """The case it exists for: one block written once, stacked, batched,
-    trained. remat sits at the layer, inside the stack that makes depth."""
+    """Verifies that `remat` composes inside `batch(stack(...))` under `train_step`."""
     layer = remat(_layer())
     model = _tower(layer, n=6).initialize()
     trainer = train_step(
@@ -76,25 +68,18 @@ def test_remat_composes_where_depth_is_spelled():
 
 
 def test_remat_is_a_wrapper_like_any_other():
-    """Its recorded construction retains the wrapped node, so a structural
-    rewrite reaches through it rather than stopping at the transform."""
+    """Verifies that `tree_freeze` traverses through `remat` to freeze stateful inner members."""
     pipe = (nn.Linear(4) >> nn.EMA(0.1)).node
     model = batch(remat(pipe)).with_input(jnp.ones((3, 4))).parameterize(
         rng=jax.random.PRNGKey(0))
 
-    state = model.init(input=jnp.ones((3, 4)))      # the EMA primes from a value
+    state = model.init(input=jnp.ones((3, 4)))
     frozen = tree_freeze(model, tree_filter(state, 'ema'))
-    assert not frozen.cyclic                    # the only stateful member froze
+    assert not frozen.cyclic
 
 
 def test_where_it_sits_is_the_granularity():
-    """Being a node transform means PLACEMENT chooses what gets recomputed.
-    Around a scan there are two useful answers and they are not the same
-    trade: inside, the backward pass recomputes one step at a time and
-    keeps the per-step boundaries; outside, it keeps only the sequence and
-    recomputes the entire rollout. Both are exact — the gradients agree
-    with the unrematerialized tower — so the choice is memory against
-    recompute, nothing else."""
+    """Verifies that `scanned(remat(cell))` and `remat(scanned(cell))` both match exact uncheckpointed gradients."""
     seq = jnp.ones((16, 4))
 
     def grads(node):
@@ -104,8 +89,8 @@ def test_where_it_sits_is_the_granularity():
                 'remat' in str(jax.make_jaxpr(jax.grad(loss))(model)))
 
     plain, plain_has = grads(scanned(nn.RNN(4)))
-    per_step, step_has = grads(scanned(remat(nn.RNN(4))))     # a step at a time
-    rollout, roll_has = grads(remat(scanned(nn.RNN(4))))      # the whole sequence
+    per_step, step_has = grads(scanned(remat(nn.RNN(4))))
+    rollout, roll_has = grads(remat(scanned(nn.RNN(4))))
 
     assert not plain_has and step_has and roll_has
     for a, b, c in zip(plain, per_step, rollout):
@@ -114,10 +99,7 @@ def test_where_it_sits_is_the_granularity():
 
 
 def test_a_substituted_member_reaches_the_apply():
-    """The impl takes the wrapped def from the seam rather than closing over
-    it, so swapping the member changes what runs. An impl closing over its
-    def would keep running the original here, silently, and only look right
-    because rebuild happens to re-run the transform."""
+    """Verifies that `remat` reads its wrapped member from `contract.members` when `map_members` substitutes it."""
     from nodejax import Leaf, map_members
 
     def Scale(k):

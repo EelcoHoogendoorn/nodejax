@@ -1,4 +1,4 @@
-"""Focused behavior checks for the runnable Pendulum SHAC assembly."""
+"""Verifies feedforward and recurrent policy lifecycles, ensembles, and `shac_training` on `Pendulum`."""
 
 import jax
 import jax.numpy as jnp
@@ -36,7 +36,7 @@ from examples.rl.shac_pendulum import (
 
 
 def single_pendulum_critic() -> Node:
-    """Build one unensembled terminal critic."""
+    """Builds a single unensembled `PendulumCritic` initialized against the `Pendulum` state spec."""
     return PendulumCritic(ScalarMLP(hidden=HIDDEN)).with_input(
         Pendulum().initialize().state,
     )

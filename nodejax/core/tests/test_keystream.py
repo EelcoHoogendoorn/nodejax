@@ -1,4 +1,4 @@
-"""Narrow authored RNG streams and compositional transform capabilities."""
+"""Verifies `KeyStream` drawing order and `MaybeKeyStream` child, axis, and PyTree behavior."""
 
 import jax
 import jax.numpy as jnp

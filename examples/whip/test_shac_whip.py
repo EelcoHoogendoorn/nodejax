@@ -1,4 +1,4 @@
-"""SHAC on the whip: one program from one key, through motor and rope."""
+"""Verifies single-program SHAC training and structural inspection on the whip plant."""
 
 import jax
 import jax.numpy as jnp
@@ -15,14 +15,13 @@ def test_shac_trains_the_whip_as_one_program() -> None:
         n_episodes=2, n_worlds=4, n_chunks_per_episode=2, n_steps_per_chunk=10,
     )
     cost = result.history.mean_cost
-    assert cost.shape == (2,)  # one entry per episode
+    assert cost.shape == (2,)
     assert jnp.all(jnp.isfinite(cost))
     assert result.policy.cyclic
 
 
 def test_program_listing_prints_the_whole_tree() -> None:
-    """Run with ``-s`` to read the program: the node tree with each node's
-    statics, then the parameter tree with shapes."""
+    """Verifies that `tree_view` and `describe` report the whip training `Node` hierarchy, statics, and parameter shapes."""
     plant = whip_plant().parameterize()
     program = whip_training_program(
         WhipMean(WhipFeatures(tip_sensor=False), nn.GRU(MEMORY), HIDDEN), whip_critic(plant), plant, N_EPISODES)

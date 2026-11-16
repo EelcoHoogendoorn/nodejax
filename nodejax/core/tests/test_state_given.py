@@ -1,8 +1,9 @@
-"""State supplied by bound members.
+"""Verifies state capture, explicit state replacement, and PRNG re-keying on `PSNode` members.
 
-A state-bound member contributes finished state to a composition. An
-explicit value for that member replaces the stored state; it does not reopen
-the member's initializer. Stored keys rekey from the enclosing boundary.
+A state-bound member contributes its captured state to an enclosing
+composition. Passing an explicit state value for that member replaces the
+captured state without re-running `init`, while stored `rng` state re-keys
+from the enclosing boundary.
 """
 
 import jax
@@ -47,7 +48,7 @@ def test_finished_state_replaces_the_store_without_reopening_init():
 
 
 def test_all_state_bound_composes_state_bound():
-    """>> over state-bound members returns a state-bound composite."""
+    """Verifies `>>` over `PSNode` members returns a state-bound `PSNode` composite."""
     a = Integrator().parameterize().bind(state=jnp.asarray(0.0))
     b = Integrator().parameterize().bind(state=jnp.asarray(10.0))
     snp = a >> b
@@ -58,16 +59,13 @@ def test_all_state_bound_composes_state_bound():
 
 
 def test_stored_entropy_never_replays():
-    """A stored rng stream re-keys from the boundary: the composite owes
-    a key, the fresh stream differs from the stored one, and omitting
-    the key is a named refusal rather than a silent replay."""
+    """Verifies stored `rng` state re-keys from the enclosing boundary and refuses missing keys."""
     k0 = jax.random.PRNGKey(7)
     bound = Streamy().parameterize().bind(state=Struct(rng=k0))
     node = serial(s=bound, g=Gain()).parameterize(g=Struct(scale=1.0))
     state = node.init(rng=jax.random.PRNGKey(1))
     assert not jnp.allclose(state.s.rng, k0)
-    # the derived spec already demands the key (the stored stream keeps
-    # rng REQUIRED); _rekeyed's never-replays refusal is the deep guard
+    # the derived spec demands the key (`REQUIRED`); `_rekeyed` also guards against replay
     with pytest.raises(TypeError, match='rng'):
         node.init()
 

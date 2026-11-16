@@ -1,4 +1,4 @@
-"""Functional replacement and reconstruction of bound nodes."""
+"""Verifies functional replacement and PyTree reconstruction of `PNode` and `PSNode`."""
 
 import jax
 import jax.numpy as jnp

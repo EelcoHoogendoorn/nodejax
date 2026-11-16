@@ -1,4 +1,4 @@
-"""The actuator tuner: a genome read off the plant, written back, scored, and evolved."""
+"""Verifies parameter extraction, log-space write-back, and evolutionary tuning on the whip actuator."""
 
 import jax.numpy as jnp
 

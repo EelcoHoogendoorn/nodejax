@@ -1,12 +1,4 @@
-"""ttt: the wrapped node's params as gradient-adapted state, and the
-marker that names that reading of a trainer in the graph.
-
-Every pin here runs the inner loop BARE: no train-time training anywhere,
-the init and rates drawn once at parameterize and never optimized, which
-is classic online learning, prequential gradient descent from a random
-start. The same cells become the inner loop of meta-learning when an
-outer train_step wraps them (the flagship row is exactly that), and no
-line in them changes: nothing in a cell knows which level it serves."""
+"""Verifies test-time training (`ttt`, `supervised_ttt`, `reconstruction_ttt`, and `next_step_ttt`)."""
 
 import jax
 import jax.numpy as jnp
@@ -35,52 +27,45 @@ def Scale() -> Node:
 
 
 def sample(x: jax.Array):
-    """Reconstruction self-supervision, assembled as data: the target
-    IS the input."""
+    """Builds a self-supervised `(input, target)` pair where `target` equals `input`."""
     return Struct(input=jnp.asarray(x), target=jnp.asarray(x))
 
 
 def test_ttt_adapts_toward_self_supervision():
-    """Reconstruction drives the wrapped gain toward identity, one
-    step per sample, weights carried as state."""
+    """Verifies reconstruction updates drive the carried gain parameter toward `1.0` across steps."""
     trainer = train_step(Scale().parameterize().initialize(), mse, learned_sgd(0.1))
     assert trainer.param.objective.model.scale == 0.0
-    assert trainer.param.opt.model.scale == 0.1           # per-leaf learned rates
+    assert trainer.param.opt.model.scale == 0.1
 
     _, (outs, aux) = scan(trainer, record=True).apply(bundle=tile(sample(1.0), 50))
-    scales = aux.state.opt.params.model.scale            # the recorded trajectory
-    assert outs[0] == 0.0                                # first prediction: untrained
-    assert scales[0] > 0.0                               # ...and the update landed
+    scales = aux.state.opt.params.model.scale
+    assert outs[0] == 0.0
+    assert scales[0] > 0.0
     assert bool(jnp.all(jnp.diff(scales) >= 0))
-    assert abs(float(scales[-1]) - 1.0) < 1e-2           # converged to reconstruction
+    assert abs(float(scales[-1]) - 1.0) < 1e-2
 
 
 def test_ttt_predicts_then_updates():
-    """Prequential order: the output comes from the incoming weights
-    — a prediction those weights never trained on — and the update
-    lands after, ready for the next step."""
+    """Verifies `train_step` predicts with incoming weights before applying the gradient update."""
     trainer = train_step(Scale().parameterize().initialize(), mse, learned_sgd(0.5))
     successor, (out, _) = trainer.apply(bundle=sample(1.0))
-    assert jnp.allclose(out, 0.0)                        # predicted at scale 0
-    # -lr * d/ds (s-1)^2 at s=0
+    assert jnp.allclose(out, 0.0)
+    # Evaluates -lr * d/ds (s - 1)^2 at s = 0.
     assert jnp.allclose(successor.state.opt.params.model.scale, 1.0)
 
 
 def test_ttt_under_scan_resets_per_sequence():
-    """The binding is the anchor: a run advances a SUCCESSOR and never
-    the trainer itself, so each call starts from the meta-init.
-    Adaptation is per sequence, carried within."""
+    """Verifies `scan` starts each sequence from the bound initial weights while adapting within the sequence."""
     rollout = scan(train_step(Scale().parameterize().initialize(), mse, learned_sgd(0.1)))
     sequence = tile(sample(1.0), 20)
     _, (ys1, _) = rollout.apply(bundle=sequence)
     _, (ys2, _) = rollout.apply(bundle=sequence)
-    assert jnp.allclose(ys1, ys2)                        # fresh start both times
-    assert ys1[-1] > ys1[0]                              # adapted within the sequence
+    assert jnp.allclose(ys1, ys2)
+    assert ys1[-1] > ys1[0]
 
 
 def test_ttt_marker_is_the_trainer_named():
-    """The marker changes nothing: same predictions, same aux; the name and
-    the trainer-shape check are the whole of it."""
+    """Verifies `ttt` and `supervised_ttt` preserve predictions and `Aux` while renaming and validating the trainer."""
     trainer = train_step(Scale().parameterize().initialize(), mse, learned_sgd(0.1))
     sequence = tile(sample(1.0), 8)
     _, (preds_a, aux_a) = scan(trainer).apply(bundle=sequence)
@@ -88,7 +73,7 @@ def test_ttt_marker_is_the_trainer_named():
     assert jnp.allclose(preds_a, preds_b)
     assert jnp.allclose(aux_a.loss, aux_b.loss)
     assert ttt(trainer).name == f'ttt({trainer.name})'
-    assert ttt(trainer).cyclic         # the fast weights ARE carried state
+    assert ttt(trainer).cyclic
 
 
 def test_ttt_marker_refuses_a_bare_model():
@@ -97,11 +82,7 @@ def test_ttt_marker_refuses_a_bare_model():
 
 
 def test_ttt_interior_to_a_pipe():
-    """No final-layer assumption: reconstruction assembles the flowing
-    signal into the element pair, so a ttt layer sits mid-pipe, its fast
-    weights riding the pipe's state like any member state.
-    test_motor_control.py::test_ttt_in_the_loop runs the full-size
-    version, inside a closed loop, an ensemble and an outer trainer."""
+    """Verifies `reconstruction_ttt` adapts its carried weights when composed inside a `serial` pipeline."""
     layer = reconstruction_ttt(train_step(Scale().parameterize().initialize(),
                                           mse, learned_sgd(0.1)))
     model = Leaf(lambda input: 2.0 * input, name='pre') >> layer
@@ -109,13 +90,13 @@ def test_ttt_interior_to_a_pipe():
 
     _, (ys, aux) = rollout.apply(jnp.ones(20))
     losses = jax.tree.leaves(aux)[0]
-    assert ys[0] == 0.0                      # first prediction: untrained
-    assert losses[-1] < losses[0]            # the interior learner adapts
-    assert abs(ys[-1] - 2.0) < abs(ys[0] - 2.0)   # toward reconstructing the signal
+    assert ys[0] == 0.0
+    assert losses[-1] < losses[0]
+    assert abs(ys[-1] - 2.0) < abs(ys[0] - 2.0)
 
 
 def Lin() -> Node:
-    """A stackable scalar cell: rng-built weight, input-shaped output."""
+    """Builds a scalar linear `Leaf` with PRNG-initialized weight."""
     def param(rng: KeyStream) -> Struct:
         return Struct(w=0.5 + 0.1 * jax.random.normal(rng.next(), ()))
 
@@ -126,8 +107,7 @@ def Lin() -> Node:
 
 
 def RNNCell() -> Node:
-    """A stackable recurrent cell: hidden state carrying beneath whatever
-    adapts above it, scalar signal in and out."""
+    """Builds a scalar-input recurrent `Leaf` with hidden vector state."""
     def param(rng: KeyStream) -> Struct:
         return Struct(wx=0.5 * jax.random.normal(rng.next(), (4,)),
                       wh=0.3 * jax.random.normal(rng.next(), (4, 4)) / 2.0,
@@ -144,24 +124,11 @@ def RNNCell() -> Node:
 
 
 def test_both_deep_compositions_just_work():
-    """The deep stress test with a REAL RNN, both readings one line each:
-    every layer carries two memories at two speeds, fast weights adapting
-    per step and hidden state carrying beneath them, and the stack routes
-    both.
-
-    Both readings are the SAME flavor on the same signal, differing by one
-    placement of stack. ONE HEAD LOSS THROUGH THE STACK: the whole deep
-    net is one next-step learner, every layer's weights per-step state
-    updated by backprop through the layers above. INDEPENDENT WEIGHT
-    LAYERS: each layer its own next-step learner on its own signal, the
-    losses arriving per (step, layer). And the fused phrase
-    ttt(stack(...)) is refused, which is the trainer check forcing
-    exactly this choice."""
-    # Leave enough online steps for independently initialized deeper cells to
-    # settle; their early target moves while the preceding cell is learning.
+    """Verifies `next_step_ttt` composes both outside `stack` (single head loss) and inside `stack` (per-layer losses)."""
+    # Uses 200 online steps so deeper cells settle after upstream weights stabilize.
     data = (jnp.arange(200) % 2).astype(jnp.float32)
 
-    # one head loss, backpropped through the whole stack
+    # Single head loss backpropagated through the stacked RNN.
     deep = stack(RNNCell(), n=2).parameterize(
         rng=jax.random.PRNGKey(0)).initialize()
     node = next_step_ttt(train_step(deep, mse, learned_sgd(0.1)))
@@ -169,40 +136,27 @@ def test_both_deep_compositions_just_work():
     state, out = scan(node.pnode).apply(node.state, data)
     _, aux = out
     losses = aux.ttt_train_step_stack_rnn.loss
-    assert losses[-1] < 0.3 * losses[1]                       # the head learns the shift
+    assert losses[-1] < 0.3 * losses[1]
     fast = state.ttt_train_step_stack_rnn
     drift = jnp.max(jnp.abs(
         fast.opt.params.model.wx
         - node.param.ttt_train_step_stack_rnn.objective.model.wx), axis=1)
-    assert drift.shape == (2,) and bool(jnp.all(drift > 0))   # every layer's weights moved
-    assert fast.objective.model.shape == (2, 4)               # ...the hidden carrying beneath
+    assert drift.shape == (2,) and bool(jnp.all(drift > 0))
+    assert fast.objective.model.shape == (2, 4)
     assert bool(jnp.any(fast.objective.model != 0))
 
-    # independent weight layers, each predicting its own signal's next
-    # value: construct the cell unbound so stack parameterizes every layer
-    # independently. Composing a bound trainer would deliberately capture it.
+    # Independent per-layer learners, constructed unbound so `stack` parameterizes each layer separately.
     cell = next_step_ttt(train_step(RNNCell(), mse, learned_sgd(0.1)))
     rollout = scanned(stack(cell, n=2)).parameterize(
         rng=jax.random.PRNGKey(0))
     ys, aux = rollout.apply(data)
     losses = jax.tree.leaves(aux)[0]
-    assert ys.shape == (200,) and losses.shape == (200, 2)    # one loss per (step, layer)
-    # EVERY layer converges, the deeper one included: its signal stabilizes
-    # as the layer beneath learns, and its task turns stationary
+    assert ys.shape == (200,) and losses.shape == (200, 2)
     assert bool(jnp.all(jnp.mean(losses[-15:], axis=0) < 0.01))
 
 
 def test_next_step_ttt_learns_the_shift():
-    """The temporal-shift flavor is nondegenerate: on an alternating signal
-    the learner must map each value to its NEGATION, so the fast weight
-    leaves identity and heads for -1, a task same-step reconstruction can
-    never pose. The register primes from the first value, so the first
-    pair is reconstruction-shaped and the shift engages at the second.
-
-    A STATELESS learner under ttt is nonetheless a sequence model, which
-    is the TTT-layers thesis: the weight is the recurrent state, each
-    prediction depending on the whole history through it. Here the
-    memoryless scale REMEMBERS the alternation rule as w -> -1."""
+    """Verifies `next_step_ttt` drives a stateless gain toward `-1.0` on an alternating sequence."""
     cell = next_step_ttt(train_step(Scale().parameterize().initialize(),
                                     mse, learned_sgd(0.2)))
     signal = jnp.tile(jnp.array([-1.0, 1.0]), 10)
@@ -212,13 +166,7 @@ def test_next_step_ttt_learns_the_shift():
 
 
 def test_next_step_deep_compositions_just_work():
-    """next_step's register is cyclic, so the deep forms exercise the
-    walked init too: under stack, every layer's register primes from the
-    signal as it arrives at that depth. On an alternating signal, ONE DEEP
-    NET under the head loss splits the negation across its layers however
-    backprop lands it, the PRODUCT of weights reaching -1; a STACK OF
-    LOCAL LEARNERS drives every weight to -1 individually, each layer
-    negating its own signal."""
+    """Verifies `next_step_ttt` primes cyclic registers across stacked linear layers under both head-loss and per-layer compositions."""
     signal = jnp.tile(jnp.array([-1.0, 1.0]), 30)
 
     deep = next_step_ttt(train_step(

@@ -1,4 +1,4 @@
-"""Focused integration checks for the Pendulum MPPI example."""
+"""Verifies open-loop plan refinement and critic training on the `Pendulum` MPPI assembly."""
 
 import jax
 import jax.numpy as jnp
@@ -34,13 +34,11 @@ def open_loop_trajectory(
     starts: Struct,
     plant: BaseNode,
 ) -> Struct:
-    """Roll out one control plan per world from each matching start.
+    """Rolls out one control sequence per world from its matching initial state.
 
-    ``controls`` has shape ``[world, time]`` and every leaf in ``starts`` has
-    leading shape ``[world]``. The rollout is ``batch(scanned(step))``: batch
-    consumes the world axis and scan the time axis. The starts are the
-    step's state input, given once. Pendulum has no disturbance in this
-    check, but its step contract still requires the field.
+    `controls` has shape `[world, time]` and every leaf in `starts` has leading shape `[world]`.
+    `batch(scanned(OpenLoopStep(plant)))` maps across worlds and scans across time from `starts`,
+    supplying zero disturbances to satisfy the `Pendulum` step contract.
     """
     rollout = batch(scanned(OpenLoopStep(plant)), n=tree_len(starts)).parameterize()
     return drop_aux(rollout.apply(
@@ -70,7 +68,7 @@ def test_gaussian_refinement_improves_the_plan() -> None:
     )
 
     def zero_terminal_value(terminal_state):
-        """Assign no cost beyond the sampled trajectory."""
+        """Returns a zero terminal cost estimate for every candidate rollout."""
         return jnp.zeros_like(terminal_state.angle)
 
     zero_value = Leaf(zero_terminal_value, name='zero_terminal_value')

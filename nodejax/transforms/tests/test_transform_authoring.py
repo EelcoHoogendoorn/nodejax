@@ -1,4 +1,4 @@
-"""A transform authored entirely through the supported Tier-3 surface."""
+"""Verifies authoring custom transforms through the Tier-3 `Contract` and `Wrapper` surface."""
 
 import jax.numpy as jnp
 import pytest

@@ -1,5 +1,4 @@
-"""taps: observe every wire of a composite — capture_intermediates as a
-transform, riding the ordinary aux stream."""
+"""Verifies `taps` recording intermediate member outputs of a serial pipe into `Aux`."""
 
 import pytest
 import jax

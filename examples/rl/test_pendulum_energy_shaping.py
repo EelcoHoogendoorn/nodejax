@@ -1,14 +1,12 @@
-"""Analytic energy shaping for the shared weak pendulum.
+"""Swings up and stabilizes `Pendulum` with a parameter-free analytic energy-shaping `Node`.
 
-This controller uses the mechanics that a learned policy must discover. The
-swing phase regulates total energy toward the upright orbit. Once the pendulum
-enters a small neighborhood of upright, a local proportional-derivative law
-takes over. Persistent direction gives the exact hanging equilibrium a
-deterministic kick, and a wider release band prevents repeated handoffs.
+The swing phase regulates mechanical energy toward the homoclinic upright orbit, and a local
+proportional-derivative controller takes over inside a capture band around upright. Persistent
+kick direction breaks symmetry at the hanging equilibrium while a wider release band prevents
+chattering handoffs.
 
-There are no learned parameters. The controller is still a real cyclic Node,
-the plant is the same stateful Node used by SHAC and PPO, and ``scanned`` plus
-``batch`` provide fresh state and independent rollouts.
+`PendulumEnergyController` carries discrete mode state as a cyclic `Node` without learned
+parameters, composing with `Pendulum` through `scanned` and `batch` for parallel rollouts.
 """
 
 import jax
@@ -41,7 +39,7 @@ def PendulumEnergyController(
     release_angle: float = 0.32,
     release_velocity: float = 1.0,
 ) -> Node:
-    """Energy pumping with a hysteretic local balance mode."""
+    """Pumps pendulum energy toward the upright orbit and switches to PD balance with hysteresis."""
 
     def init(input):
         return Struct(
@@ -75,7 +73,7 @@ def PendulumEnergyController(
 
 
 def energy_shaping_program(worlds: int) -> PNode:
-    """Build fresh parallel rollouts of the analytic controller."""
+    """Builds `worlds` parallel closed-loop rollouts of `PendulumEnergyController` on `Pendulum`."""
     world = ControlledStep(PendulumEnergyController(), Pendulum())
     return batch(scanned(world), n=worlds)
 
@@ -84,7 +82,7 @@ def energy_trajectory(
     initial_plant_state: Struct,
     steps: int = STEPS,
 ) -> Struct:
-    """Run deterministic closed-loop trajectories from supplied states."""
+    """Runs `steps`-step deterministic closed-loop trajectories from `initial_plant_state`."""
     worlds = initial_plant_state.angle.shape[0]
     input = Struct(
         disturbance=jnp.zeros((worlds, steps)),
@@ -94,7 +92,7 @@ def energy_trajectory(
 
 
 def plot_phase_space(trajectory: Struct) -> str:
-    """Render real closed-loop rollouts from sampled phase states."""
+    """Renders closed-loop phase-space trajectories overlaid on the `Pendulum` vector field."""
     import os
     import matplotlib
 

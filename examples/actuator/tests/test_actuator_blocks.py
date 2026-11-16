@@ -1,6 +1,4 @@
-"""Block-level tests for the actuator package: the pipeline PID, DQ
-signal polymorphism, and the bench motor (the electrical/mechanical
-composition at full fidelity: cogging, stiction, hysteresis)."""
+"""Verifies individual actuator `Node`s including sensor calibration, `FET` dissipation, pipeline `PID` stages, `DQ` signal polymorphism, and `BenchMotor` stiction."""
 
 import jax
 import jax.numpy as jnp
@@ -63,9 +61,7 @@ def test_fet_derivation_keeps_flat_params_and_dispatches_dissipation():
 
 
 def test_pid_is_a_pipeline():
-    """Optional PID behavior is a pipe stage you include or don't — and
-    each stage is independently a node (the rate limiter carries its own
-    state)."""
+    """Verifies that rate limiting and clamping compose with `PID` as independent `Node` stages."""
     bare = PID(DT).with_input(jnp.asarray(0.0)).parameterize(
         kp=2.0, ki=0.0)
     assert bare.apply(bare.init(), 1.0)[1] == 2.0
@@ -73,23 +69,22 @@ def test_pid_is_a_pipeline():
     full = (wrap() >> PID(DT) >> RateLimit(DT) >> Clamp()).with_input(
         jnp.asarray(0.0)).parameterize(
             pid=Struct(kp=2.0, ki=0.0),
-            rate_limit=Struct(max_rate=5000.0),    # units per second
+            rate_limit=Struct(max_rate=5000.0),
             clamp=Struct(limit=1.5))
     s = full.init()
+    # Rate limiting caps the first step to 5000 * dt = 0.5, and clamping caps later steps at 1.5.
     s, out = full.apply(s, 1.0)
-    assert jnp.allclose(out, 0.5)               # slew-limited: 5000 * dt
+    assert jnp.allclose(out, 0.5)
     s, out = full.apply(s, 1.0)
     assert jnp.allclose(out, 1.0)
     s, out = full.apply(s, 1.0)
-    assert jnp.allclose(out, 1.5)               # clamp takes over
+    assert jnp.allclose(out, 1.5)
     s, out = full.apply(s, 1.0)
     assert jnp.allclose(out, 1.5)
 
 
 def test_pid_core_is_signal_polymorphic():
-    """The SAME pid def runs scalars or DQ pairs: its state derives from
-    the init input value — signal type is decided at init, not by
-    subclassing."""
+    """Verifies that `PID` derives `DQ` integrator state directly from a `DQ` input prototype."""
     pid = PID(DT).with_input(DQ()).parameterize(kp=2.0, ki=0.0)
 
     s = pid.init()
@@ -100,8 +95,7 @@ def test_pid_core_is_signal_polymorphic():
 
 
 def test_stiction_holds_the_rotor():
-    """Bench fidelity: below the mechanism's static-torque threshold the
-    rotor sticks; zero the threshold and the same drive spins it."""
+    """Verifies that `BenchMotor` remains stationary below its static-torque threshold and spins when that threshold is zero."""
     drive = Struct(voltage=DQ(jnp.zeros(400), jnp.full(400, 0.1)), load=jnp.zeros(400))
 
     def bench(torque_static):
@@ -115,16 +109,13 @@ def test_stiction_holds_the_rotor():
 
 
 def test_recorded_rollout():
-    """scanned(record=True): the trajectory is SOWN, so the output is still
-    the output and the states arrive on the aux stream. Observing a rollout
-    does not change what it computes, which is what lets the recorded node go
-    on composing as the node it was."""
+    """Verifies that `scanned(..., record=True)` preserves the primary output trajectory while emitting per-step states on `Aux`."""
     seq = scanned(BenchMotor(DT), record=True).parameterize(
         electrical=BENCH_ELECTRICAL,
         mechanical=Struct(inertia=0.1, friction=1e-3))
     outs, aux = seq.apply(voltage=DQ(jnp.zeros(300), jnp.full(300, 1.0)),
                           load=jnp.zeros(300))
 
-    assert outs.position.shape == (300,)                 # unchanged by recording
+    assert outs.position.shape == (300,)
     assert aux.state.mechanical.velocity.shape == (300,)
     assert aux.state.mechanical.velocity[-1] > 0.0

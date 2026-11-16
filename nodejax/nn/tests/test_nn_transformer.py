@@ -1,4 +1,4 @@
-"""Transformer primitives under ordinary NodeJAX binding and transforms."""
+"""Verifies transformer primitives under NodeJAX binding and transforms."""
 
 import jax
 import jax.numpy as jnp

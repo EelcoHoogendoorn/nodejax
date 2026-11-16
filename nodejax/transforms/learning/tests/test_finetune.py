@@ -1,16 +1,4 @@
-"""Meta-learning as composition.
-
-finetune() is a transform, so MAML is one line:
-train_step(batch(finetune(train_step(model, loss, sgd)))) — learning an init that finetunes well.
-finetune extends this to optimizer hyperparameters: meta-learning X means
-promoting X from a static capture to a component of param.
-
-Task family: y = a * x, model y = scale * x, inner SGD with lr 0.1 on mse.
-One inner step contracts the error (scale - a) by (1 - 2*lr), so k support
-points contract it by 0.8^k at lr=0.1. Everything below is checked against
-that closed form — including the second-order gradients through the inner
-optimization that convergence requires.
-"""
+"""Verifies `finetune` episodes, MAML outer optimization, and Meta-SGD step sizes."""
 
 import jax.numpy as jnp
 import optax
@@ -29,9 +17,7 @@ def mse(prediction, target):
 from nodejax import Wrapper, serial, nn, map_members, tree_detach
 
 def test_finetune_single_task():
-    """finetune() alone: k inner steps from the given param, then query.
-    The model's binding rides in through the trainer and comes out
-    PROMOTED: the episode node is a PNode on the trainer's own tree."""
+    """Verifies `finetune` runs support steps from the bound parameter and evaluates the query."""
     model = Gain().parameterize(scale=jnp.array(1.0)).initialize()
     tuned = finetune(train_step(model, mse, optax.sgd(0.1)))
     assert type(tuned) is PNode and not tuned.cyclic
@@ -41,7 +27,7 @@ def test_finetune_single_task():
         query=jnp.array(1.0),
     )
     pred = tuned.apply(bundle=task)
-    # scale: 1 -> 5 - 0.8^3 * (5 - 1) = 2.952
+    # Closed-form scale after 3 support steps: 5 - 0.8^3 * (5 - 1) = 2.952.
     assert jnp.allclose(pred, 2.952, atol=1e-5)
 
 
@@ -62,16 +48,10 @@ def test_finetune_resolves_the_optimizer_member():
 
 
 def test_finetune_metasgd_ttt_wrapper_rebuild():
-    """A rewrite reaches the model through whatever each transform is built
-    of, at whatever depth that puts it. finetune is trained(train_step(...))
-    now, so its model sits three members down instead of one, and the walk
-    does not care: that is the point of declaring members rather than closing
-    over them."""
+    """Verifies `map_members` and `tree_detach` reach the inner model across `finetune`, Meta-SGD, and TTT trees."""
 
     def member_named(node, key):
-        """the node under `key`, wherever in the tree it sits: the three
-        transforms are built of different things and put it at different
-        depths, and a rewrite is supposed not to care"""
+        """Finds the member registered under `key` at any depth in `node`."""
         if key in node.members:
             return getattr(node.members, key)
         for m in node.members:
@@ -119,14 +99,7 @@ def test_finetune_metasgd_ttt_wrapper_rebuild():
 
 
 def test_maml_convergence():
-    """MAML as pure composition: train_step(batch(finetune(train_step(model, loss, sgd)))).
-
-    Two tasks a in {2, 4}. Post-adaptation meta-loss is
-    0.8^6 * ((theta-3)^2 + 1) = 0.2621 * ((theta-3)^2 + 1),
-    minimized at theta = 3 with value 0.2621 — asserted exactly.
-    Converging here requires gradients THROUGH the inner SGD loop
-    (second-order), which the purity of the contract form gives for free.
-    """
+    """Verifies MAML outer optimization converges to the closed-form meta-initialization and loss floor."""
     model = Gain().parameterize(scale=jnp.array(0.0)).initialize()
     maml = batch(finetune(train_step(model, mse, optax.sgd(0.1))))
     trainer = train_step(maml.initialize(), mse, optax.adam(0.1))
@@ -145,21 +118,20 @@ def test_maml_convergence():
         target=tile(a, steps),
     )
 
-    # meta-init converges to the analytic optimum: the task mean
+    # Meta-initialization converges to the task mean 3.0.
     assert jnp.allclose(
         final.state.opt.params.model.objective.model.scale,
         3.0,
         atol=0.05,
     )
-    # and the meta-loss to its analytic floor 0.8^(2k) = 0.2621
+    # Meta-loss converges to 0.8^(2k) = 0.2621.
     assert jnp.allclose(aux.loss[-1], 0.8 ** (2 * k), atol=0.02)
-    # starting loss, for reference: 0.2621 * ((0-3)^2 + 1) = 2.621
+    # Initial meta-loss equals 0.2621 * ((0 - 3)^2 + 1) = 2.621.
     assert jnp.allclose(aux.loss[0], 0.8 ** (2 * k) * 10.0, atol=0.05)
 
 
 def test_maml_finetunes_to_unseen_task():
-    """The meta-learned init finetunes to a task outside the training pair
-    better than a naive init does."""
+    """Verifies the meta-learned initialization adapts to an unseen task with lower query error than zero initialization."""
     k = 3
 
     def query_error(init_scale, a):
@@ -171,24 +143,21 @@ def test_maml_finetunes_to_unseen_task():
         )
         return jnp.abs(tuned.apply(bundle=task) - a)
 
-    # meta-optimal init (3.0) vs naive init (0.0) on an unseen task a=3.5
+    # Compares the meta-optimal initialization (3.0) against zero initialization on unseen a = 3.5.
     assert query_error(3.0, 3.5) < query_error(0.0, 3.5)
-    # closed form: error = 0.8^k * |init - a|
+    # Closed-form query error equals 0.8^k * |init - a|.
     assert jnp.allclose(query_error(3.0, 3.5), 0.8 ** k * 0.5, atol=1e-5)
 
 
 def test_meta_sgd_learns_newton_step():
-    """Meta-learning the inner lr. For the quadratic gain task, one inner
-    step contracts the error by (1 - 2*lr), so the optimal one-step lr is
-    the Newton step 0.5 — at which ANY task is solved in a single inner
-    step. The meta-learner should discover it."""
+    """Verifies outer optimization over `learned_sgd` converges to the quadratic Newton step size `0.5`."""
     model = Gain().parameterize(scale=jnp.array(0.0)).initialize()
     single = finetune(train_step(model, mse, learned_sgd(0.1)))
     trainer = train_step(batch(single).initialize(), mse, optax.adam(0.05))
 
     a = jnp.array([2.0, 4.0])
     task_batch = Struct(
-        support=Struct(input=jnp.ones((2, 1)), target=a[:, None]),  # ONE support point
+        support=Struct(input=jnp.ones((2, 1)), target=a[:, None]),
         query=jnp.ones(2),
     )
     steps = 800
@@ -198,9 +167,9 @@ def test_meta_sgd_learns_newton_step():
         target=tile(a, steps),
     )
 
-    # analytic initial meta-loss: (1 - 2*0.1)^2 * ((0-3)^2 + 1) = 6.4
+    # Analytic initial meta-loss equals (1 - 2 * 0.1)^2 * ((0 - 3)^2 + 1) = 6.4.
     assert jnp.allclose(aux.loss[0], 6.4, atol=0.01)
-    # the learned lr is the Newton step for this quadratic
+    # Learned step size reaches the Newton step 0.5.
     assert jnp.allclose(
         final.state.opt.params.model.opt.model.scale,
         0.5,
@@ -208,8 +177,7 @@ def test_meta_sgd_learns_newton_step():
     )
     assert aux.loss[-1] < 1e-2
 
-    # with the learned lr, one inner step nails a task far outside the
-    # training pair (a=7 vs training a in {2, 4})
+    # One inner step with the learned rate adapts to unseen task a = 7.
     solo = single.node.bind(final.state.opt.params.model)
     task = Struct(support=Struct(input=jnp.ones(1), target=jnp.full(1, 7.0)),
                   query=jnp.array(1.0))

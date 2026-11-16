@@ -1,4 +1,4 @@
-"""Pure stock activation and encoding blocks."""
+"""Verifies stock activation and encoding Nodes."""
 
 import jax
 import jax.numpy as jnp

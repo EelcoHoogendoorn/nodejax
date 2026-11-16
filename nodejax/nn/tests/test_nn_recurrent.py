@@ -1,4 +1,4 @@
-"""Stock recurrent cells under the ordinary NodeJAX transforms."""
+"""Verifies stock recurrent cells under standard NodeJAX transforms."""
 
 import jax
 import jax.numpy as jnp
@@ -66,8 +66,7 @@ def test_recurrent_cells_scan_batch_and_differentiate() -> None:
 
 
 def test_mingru_transport_is_linear_diagonal_and_contractive() -> None:
-    """The state transition is diag(1 - update): independent of the state,
-    with every factor inside (0, 1)."""
+    """Verifies that the `MinGRU` state Jacobian equals `diag(1 - update)` with entries in `(0, 1)`."""
     input = jnp.array([0.3, -0.8, 0.5])
     cell = nn.MinGRU(5).with_input(input).parameterize(rng=KEY)
     assert cell.param.update_weight.shape == (3, 5)

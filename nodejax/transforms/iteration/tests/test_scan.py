@@ -1,9 +1,4 @@
-"""scan: apply a step over a sequence while keeping its carry external.
-
-Each apply is one sequence run. With boundary=, scan tags the start of that
-call, and nodes beneath it that declared the same tag decide what to do there.
-Nothing here decides for them.
-"""
+"""Verifies sequence transforms (`scan`, `scanned`, and `carried`) over cyclic and acyclic steps."""
 
 import jax
 import jax.numpy as jnp
@@ -16,7 +11,7 @@ from nodejax.control import Integrator
 
 
 def test_scan_transform():
-    """PCN -> PN: sequence-level node with internalized state."""
+    """Verifies that `scanned` internalizes step state and produces an acyclic sequence Node."""
     seq = scanned(Integrator())
     assert type(seq) is Node and not seq.cyclic
     node = seq.parameterize()
@@ -25,7 +20,7 @@ def test_scan_transform():
 
 
 def test_scanned_maps_an_acyclic_stochastic_step():
-    """Unit state needs no special topology: scanned is the sequence map."""
+    """Verifies that `scanned` maps an acyclic stochastic step across a sequence with per-step PRNG draws."""
     def Draw():
         def apply(input, rng):
             return input + jax.random.normal(rng.next())
@@ -53,7 +48,7 @@ def test_scanned_maps_an_empty_acyclic_sequence():
 
 
 def test_scanned_apply_reads_the_current_step_member():
-    """Replacing the wrapped step changes the sequence execution."""
+    """Verifies that `map_members` substituting the wrapped step updates `scanned` execution."""
     def Counter(scale):
         def init():
             return jnp.zeros(())
@@ -78,9 +73,7 @@ def test_scanned_apply_reads_the_current_step_member():
 
 
 def test_scan_contract_reads_the_substituted_step_member():
-    """A resolved scan does not reconstruct on a call, so this pins all three
-    custom calls to the member seam: param construction, fresh state,
-    and the step body must each consult the substituted step."""
+    """Verifies that `scan` delegates `param`, `init`, and `apply` to a substituted `step` member."""
     def Counter(scale):
         def param():
             return jnp.asarray(scale)
@@ -112,10 +105,7 @@ def test_scan_contract_reads_the_substituted_step_member():
 
 
 def test_a_declared_member_resets_and_the_rest_carries():
-    """A member declared state_reinit re-initializes at every episode start; an
-    ordinary one carries. Two lifetimes means two nodes: the declaration is
-    per node, so the slot that departs is its own member rather than a name
-    spelled at the scan."""
+    """Verifies that `scan(..., boundary=...)` reinitializes `state_reinit` members while carrying sibling state."""
     def Counter():
         def init():
             return jnp.zeros(())
@@ -143,20 +133,18 @@ def test_a_declared_member_resets_and_the_rest_carries():
         return Composite(count=Counter(), register=state_reinit(Register()))(apply, name='counted')
 
     seq = scan(counted(), boundary='episode')
-    assert seq.cyclic                             # the carry lives outside, as ever
+    assert seq.cyclic
 
     s1, _ = seq.apply(seq.init(), jnp.ones(5))
     assert s1.count == 5.0 and s1.register == 5.0
 
     s2, _ = seq.apply(s1, jnp.ones(5))
-    assert s2.count == 10.0                       # undeclared: kept counting
-    assert s2.register == 5.0                     # declared state_reinit: fresh each episode
+    assert s2.count == 10.0
+    assert s2.register == 5.0
 
 
 def test_a_boundary_nobody_claims_does_not_exist():
-    """state_reinit declares a tag; if no enclosing scan claims it, no walk runs and
-    the declaration does nothing. Here that is visible twice over, since
-    scanned builds its state afresh every call regardless."""
+    """Verifies that an unclaimed `state_reinit` tag leaves `scanned` behavior unchanged."""
     def Counter():
         def init():
             return jnp.zeros(())
@@ -172,10 +160,7 @@ def test_a_boundary_nobody_claims_does_not_exist():
 
 
 def test_apply_rng_nodes_are_scannable():
-    """A node that draws at APPLY is scannable: the one boundary key splits
-    per STEP, the time-axis twin of a composite splitting toward members.
-    Before this, scan handed the key to init only, and a node whose
-    state carried no RNG key simply refused it."""
+    """Verifies that `scanned` splits one boundary `apply` PRNG key into distinct per-step subkeys."""
     def Draw():
         def init():
             return jnp.zeros(())
@@ -193,14 +178,13 @@ def test_apply_rng_nodes_are_scannable():
     c = rolled.apply(rng=jax.random.PRNGKey(1), x=jnp.zeros(5))
 
     assert a.shape == (5,)
-    assert jnp.all(a == b)                       # one key, one rollout
+    assert jnp.all(a == b)
     assert not jnp.all(a == c)
-    assert len({float(v) for v in a}) == 5        # and no two steps share a draw
+    assert len({float(v) for v in a}) == 5
 
 
 def test_both_homes_of_entropy_under_one_scan():
-    """A node carrying rng as state AND drawing at apply gets both served
-    from the one key, without either taking the other's stream."""
+    """Verifies that `scanned` serves both `state.rng` initialization and per-step `apply` PRNG draws."""
     def Both():
         def init(rng):
             return Struct(rng=rng, n=jnp.zeros(()))
@@ -216,17 +200,11 @@ def test_both_homes_of_entropy_under_one_scan():
     assert rolled.contract.apply_takes_rng
     out = rolled.apply(rng=jax.random.PRNGKey(0), x=jnp.zeros(4))
     assert out.shape == (4,)
-    assert len({float(v) for v in out}) == 4      # the per-step draw varies
+    assert len({float(v) for v in out}) == 4
 
 
 def test_recording_does_not_change_what_the_node_is():
-    """record= sows the trajectory instead of wrapping the output, and this is
-    what that buys: a recorded scan still composes.
-
-    It used to return Struct(state=..., output=...), which made the recorded
-    node a DIFFERENT node to everything downstream. Anything reading its
-    output had to learn that it had been observed, which is the opposite of
-    what an observation should cost."""
+    """Verifies that `record=True` emits the state trajectory in `Aux` without altering primary outputs."""
     def Accum():
         def apply(state, input):
             new = state + input
@@ -240,17 +218,15 @@ def test_recording_does_not_change_what_the_node_is():
 
     outs = plain.apply(xs)
     recorded, aux = watched.apply(xs)
-    assert jnp.allclose(recorded, outs)                  # the output is untouched
+    assert jnp.allclose(recorded, outs)
     assert jnp.allclose(aux.state, jnp.array([1.0, 2.0, 3.0, 4.0]))
 
-    # and dropping the aux from runtime output leaves exactly the unrecorded output
     assert jnp.allclose(drop_aux(scanned(Accum(), record=True).parameterize().apply(xs)),
                         outs)
 
 
 def test_recording_over_a_node_that_already_sows_is_refused():
-    """The trajectory joins what a node sows rather than replacing it, so a
-    node already sowing `state` is a collision, and a named one."""
+    """Verifies that `record=True` raises `TypeError` when the step Node already emits `Aux(state=...)`."""
     def Sower():
         def apply(state, input):
             return state + input, (input, Aux(state=input * 2))
@@ -263,41 +239,26 @@ def test_recording_over_a_node_that_already_sows_is_refused():
 
 
 def test_a_nested_scan_still_draws():
-    """A scan carries its inner's rng declaration, and has to: an enclosing
-    scan can only route a key to a node that says it wants one.
-
-    scan used to set apply_input_spec=None whatever it wrapped, which threw
-    the declaration away. One scan over a drawing node worked, because that
-    scan reads the INNER's spec to route. Two scans did not: the outer read
-    the inner scan's own spec, saw nothing, split nothing, and the run died on
-    a field lookup rather than anything that named the problem.
-
-    A marker spec transfers because it names fields and carries no shapes, and
-    the sequence's fields are the step's fields; a resolved step transfers
-    as its element under the map."""
+    """Verifies that nested `scanned(scan(...))` propagates `apply_takes_rng` and splits keys across all steps."""
     def Draws():
         def apply(state, x, rng):
             return state, jax.random.normal(rng.next(), ())
 
         return Leaf(apply, init=lambda: jnp.zeros(()), name='draws').node
 
-    assert scan(Draws()).contract.apply_takes_rng                  # the declaration survives
+    assert scan(Draws()).contract.apply_takes_rng
     assert scan(Draws()).contract.apply_fields == ('x',)
 
     outs = scanned(scan(Draws())).parameterize().apply(
         x=jnp.zeros((3, 4)), rng=jax.random.PRNGKey(0))
 
     flat = [float(v) for v in outs.ravel()]
-    assert len(set(flat)) == 12                          # no step shares a draw
+    assert len(set(flat)) == 12
     assert outs.shape == (3, 4)
 
 
 def test_a_resolved_step_transfers_under_the_map():
-    """The other half of the rule. A resolved spec describes ONE step and
-    the sequence is many of them, so scan cannot claim it as its own flat
-    shape; it publishes the step's element under the map instead, the
-    length unknown until a binding supplies it. Recalibrated from
-    'publishes nothing', which erased a fully known element."""
+    """Verifies that `scan` over an input-resolved step publishes an `AxisSpec` with unknown sequence count."""
     from nodejax.core.binding import (AxisSpec)
     from nodejax.core.spec import element_spec
 
@@ -315,10 +276,7 @@ def test_a_resolved_step_transfers_under_the_map():
 
 
 def test_scan_of_an_acyclic_step_is_its_sequence_map():
-    """An acyclic step has unit carry, so scanning it runs it per element,
-    the same rule scanned already follows. A claimed boundary stays loud,
-    since nothing beneath declares one, and carried keeps refusing: a final
-    empty state is a caller mistake worth catching."""
+    """Verifies that `scan` maps an acyclic step across a sequence while rejecting `boundary=` and `carried`."""
     def Double() -> Node:
         return Leaf(lambda input: 2.0 * input, name='double').node
 
@@ -348,14 +306,12 @@ def test_carried_returns_the_step_bound_to_its_final_state():
     done = program.apply(jnp.ones(3))
 
     assert done.state.count == 6.0
-    # a transparent wrapper's member is reached without naming it
     assert done.count.state == 6.0
     assert done.count.step.state == 6.0
 
 
 def test_internalized_runs_start_from_a_bound_state():
-    """A state-bound step is scanned from its bound state: the same run as
-    scan from that state, the state internalized and the params kept."""
+    """Verifies that `scanned` and `carried` over a `PSNode` start from its bound state."""
     from nodejax import PNode, carried, nn
 
     features = 2
@@ -387,7 +343,7 @@ def test_internalized_runs_start_from_a_bound_state():
 
 
 def test_an_internalized_run_takes_the_step_state_inputs_beside_the_sequence():
-    """A step declaring init(initial) is scanned from that start, given once."""
+    """Verifies that `scanned` accepts step state-initialization fields alongside the sequence input."""
     counter = Leaf(
         lambda state, input: (state + input, state),
         init=lambda initial: initial,

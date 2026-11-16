@@ -1,12 +1,9 @@
-"""Layer 2: declare the input, derive the rest.
+"""Verifies input spec propagation across `Leaf`, `Composite`, `batch`, and `scanned` initializers.
 
-- the input slot: init receives input=<example> and rng=<key> from
-  services (initialize, composite init, scan, batch), takes what it declares
-- composite init threads the value member-to-member: input-shaped state and
-  rng keys reach every pipe member, and shape mismatches surface at init
-  time with the member named
-- the friction this dissolves, now asserted: state-from-input (tree-EMA),
-  pd/plant without shape statics, batch init without n
+Initializers reading `node.input` derive state structure and shapes from a
+bound `spec` or concrete sample, composite pipes propagate intermediate output
+shapes member-to-member while splitting PRNG keys, and `batch` / `scanned`
+derive element shapes directly from batched or sequential inputs.
 """
 
 import jax
@@ -31,8 +28,7 @@ def Plant(dt: float=0.01, spring_k: float=1.0, damping_c: float=0.1) -> Node:
 
 
 def TreeEMA() -> Node:
-    """The rewrite.md tree-EMA case: state whose STRUCTURE copies the input,
-    derived from the init input value — no declaration possible upfront."""
+    """Builds an exponential moving average leaf whose state tree mirrors `node.input`."""
     def param(alpha):
         return Struct(alpha=jnp.asarray(alpha))
 
@@ -47,8 +43,7 @@ def TreeEMA() -> Node:
 
 
 def test_state_structure_from_input():
-    """State structure copies the input structure (tree-EMA): the bound
-    spec shapes what init builds."""
+    """Verifies `TreeEMA` derives its state pytree structure from `with_input`."""
     ema = TreeEMA().parameterize(alpha=0.5)
 
     state = ema.with_input(spec(3)).bind(ema.param).init()
@@ -65,20 +60,17 @@ def test_state_structure_from_input():
 
 
 def test_pipe_init_propagates_input():
-    """Composite init hands each member ITS OWN input, threaded through the
-    preceding members — pd and plant carry no shape statics at all."""
+    """Verifies composite `init` threads each member's output shape to the next member."""
     pipe = PD(0.1) >> Plant(0.1, 1.0, 0.3).node
     bound = pipe.parameterize(pd=Struct(kp=jnp.array(1.0), kd=jnp.array(0.0)))
 
     state = bound.with_input(spec(2)).bind(bound.param).init()
     assert state.pd.shape == (2,)          # previous error, shaped by the signal
-    assert state.plant.pos.shape == (2,)   # shaped by pd's OUTPUT, one hop downstream
+    assert state.plant.pos.shape == (2,)   # shaped by pd's output, one hop downstream
 
 
 def DeclaredLinear(n_in: int, n_out: int) -> Node:
-    """A layer whose fan-in is DECLARED rather than read from the resolved input spec,
-    so a pipe can be wired with members that disagree. nn.Linear sizes
-    itself from what it is handed and therefore cannot be mismatched."""
+    """Builds a linear leaf with explicit `n_in` and `n_out` dimensions."""
     def param(weight, bias):
         return Struct(weight=jnp.asarray(weight), bias=jnp.asarray(bias))
 
@@ -89,11 +81,7 @@ def DeclaredLinear(n_in: int, n_out: int) -> Node:
 
 
 def test_pipe_shape_error_names_member():
-    """Shape mismatches between members surface where shapes are actually
-    walked: resolving a parameter-bound pipe names the offender. The init
-    of an all-acyclic pipe builds only empty slots and probes nothing, so
-    it is no longer that place (recalibrated when the init walk learned to
-    skip acyclic members)."""
+    """Verifies resolving a pipe with incompatible member shapes names the failing member."""
     pipe = DeclaredLinear(4, 3) >> DeclaredLinear(5, 2)  # 3 -> 5: incompatible
     with pytest.raises(TypeError, match='linear5x2'):
         pipe.with_input(spec(4)).parameterize(
@@ -103,8 +91,7 @@ def test_pipe_shape_error_names_member():
 
 
 def test_pipe_init_routes_rng():
-    """Composite init splits rng per member: stochastic members mid-pipe get
-    independent keys — the gap explicit-state rng couldn't cover."""
+    """Verifies composite `init` splits `rng` keys independently across stochastic pipe members."""
     pipe = Walker() >> Walker()
     bound = pipe.parameterize(walker=Struct(sigma=jnp.asarray(1.0)),
                               walker_2=Struct(sigma=jnp.asarray(1.0)))
@@ -120,8 +107,7 @@ def test_pipe_init_routes_rng():
 
 
 def test_batch_init_from_input():
-    """batch(...).init derives n and the per-element input from a batched
-    spec or example — no explicit n."""
+    """Verifies `batch(...).init` derives batch size `n` and per-element input from `with_input`."""
     b = batch(Integrator()).parameterize()
     state = b.with_input(spec(5)).bind(b.param).init()
     assert state.shape == (5,)
@@ -135,8 +121,7 @@ def test_batch_init_from_input():
 
 
 def test_scan_resolves_from_first_element():
-    """scan internalizes init with the first sequence element as its input, so
-    input-shaped state derives from the sequence itself."""
+    """Verifies `scanned` initializes step state from the sequence's leading element shape."""
     seq = scanned(TreeEMA()).parameterize(alpha=jnp.asarray(0.5))
     outs = seq.apply(jnp.ones((10, 3)))
     assert outs.shape == (10, 3)
@@ -152,10 +137,7 @@ def test_materialize_and_spec_of_roundtrip():
 
 
 def test_declared_input_starts_init():
-    """Leaf(input=...) doubles as the init's fallback input: when no
-    caller passes a value, the declared spec materializes instead — the
-    derivation lives on the node, and the init cannot tell which it
-    received. A real value always wins."""
+    """Verifies `Leaf(..., apply_input_spec=...)` supplies fallback shape evidence to `init`."""
     def init(node):
         return jnp.zeros_like(node.input)
 
