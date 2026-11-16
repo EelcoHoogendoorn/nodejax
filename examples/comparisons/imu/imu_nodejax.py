@@ -8,7 +8,7 @@ Run directly with `python -m examples.comparisons.imu.imu_nodejax`.
 import jax
 import jax.numpy as jnp
 
-from nodejax import KeyStream, Leaf, Node, Struct, node
+from nodejax import KeyStream, Leaf, Node, PNode, Struct, node
 from nodejax.control import Quantize
 
 from examples.comparisons.imu.imu_common import (
@@ -17,8 +17,8 @@ from examples.comparisons.imu.imu_common import (
 
 
 @node
-def Derivative(dt: float) -> Node:
-    """Discrete time derivative primed from the initial input sample."""
+def Derivative(dt: float) -> PNode:
+    """Computes a discrete time derivative primed from the initial input sample."""
     def init(input) -> jax.Array:
         return jnp.asarray(input)
 
@@ -30,7 +30,7 @@ def Derivative(dt: float) -> Node:
 
 @node
 def Noise() -> Node:
-    """Additive Gaussian white noise with trainable spectral density."""
+    """Adds Gaussian white noise scaled by a trainable spectral density."""
     def param(density: float) -> Struct:
         return Struct(density=jnp.asarray(density))
 
@@ -42,7 +42,7 @@ def Noise() -> Node:
 
 @node
 def Drift(dt: float) -> Node:
-    """Additive Ornstein-Uhlenbeck bias with carried bias state and call-time RNG."""
+    """Adds Ornstein-Uhlenbeck bias with carried bias state and call-time RNG."""
     def param(density: float, tau: float) -> Struct:
         return Struct(density=jnp.asarray(density), tau=jnp.asarray(tau))
 
@@ -60,7 +60,7 @@ def Drift(dt: float) -> Node:
 
 def make_imu(density: float = DENSITY, tau: float = TAU,
              drift_density: float = DRIFT_DENSITY) -> Node:
-    """Build the five-stage IMU sensor pipeline."""
+    """Builds the five-stage IMU sensor pipeline."""
     return (Derivative(DT)
             >> Derivative(DT)
             >> Noise()(density=density)
@@ -69,7 +69,7 @@ def make_imu(density: float = DENSITY, tau: float = TAU,
 
 
 def run(imu: Node, positions: jax.Array, seed: int = 0) -> jax.Array:
-    """Initialize `imu` from `positions[0]` and scan across `positions`."""
+    """Initializes the pipeline from `positions[0]` and scans across `positions`."""
     sensor = imu.with_input(positions[0]).parameterize().initialize(input=positions[0])
     _, accel = sensor.scan(positions, rng=jax.random.PRNGKey(seed))
     return accel

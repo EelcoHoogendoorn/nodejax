@@ -1,10 +1,9 @@
-"""Path-based parameter sharing.
+"""Member-level parameter sharing (`tie`) across composite definitions.
 
-`tie` is not a fully compositional Node transform. It rewrites an assembled
-member tree, then reconstructs prior sharing and repairs the sparse parameter
-layout itself. Parameter identity should instead be declared as definition
-data. It remains open whether sharing should then survive every structural
-transform or be consumed once at an explicit lowering boundary.
+`tie` aliases one or more sibling member names to a canonical `source` member so
+the sparse `.param` tree stores `source`'s weights once while `init` and `apply`
+expand `source` into every aliased member slot and sum gradients across shared
+uses automatically under JAX differentiation.
 """
 
 from __future__ import annotations
@@ -13,15 +12,14 @@ from nodejax.core.ambient import node
 from nodejax.core.compose import _probe_rng, _step_spec, param_call
 from nodejax.core.contract import ContractCalls
 from nodejax.core.definition import Captures, Def, Layout
-from nodejax.frozendict import frozendict
 from nodejax.core.generic import Generic
 from nodejax.core.node import BaseNode, Node
 from nodejax.core.spec import materialize
+from nodejax.frozendict import frozendict
 from nodejax.struct import Struct
 
 
 def _parameter_sources(definition: Def) -> frozendict:
-    """Map aliases in nested tie definitions to their active param member."""
     if definition.layout.kind != 'tie':
         return frozendict()
     arguments = definition.construction.arguments
@@ -186,6 +184,13 @@ def _tie(pipe: Node, source: str, aliases: tuple[str, ...]) -> Node:
 
 def tie(pipe: BaseNode | Generic, source: str,
         *aliases: str) -> BaseNode | Generic:
+    """Shares `source`'s parameter subtree across sibling `aliases` on `pipe`.
+
+    Removes `aliases` from the sparse `.param` tree while keeping independent
+    per-member state slots on cyclic aliases; accepts unbound `Node`, bound
+    `PNode` or `PSNode` (dropping `aliases` from `.param`), and open `Generic`
+    builders.
+    """
     aliases = tuple(aliases)
     if pipe.generic:
         return _tie(pipe, source, aliases)

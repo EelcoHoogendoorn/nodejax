@@ -2,33 +2,33 @@
 
 Same task, same numbers, same references as `chunk_nodejax.py`. hk.scan over
 chunks of hk.scan over steps, so what the comparison shows is what the
-spelling cost.
+formulation cost.
 
-Haiku is the design the others are not: state and entropy are AMBIENT inside a
-transformed function, reached by name rather than passed. `hk.get_state` and
+Haiku differs structurally from the others: state and entropy are ambient inside
+a transformed function, reached by name rather than passed. `hk.get_state` and
 `hk.next_rng_key` take no argument saying where they come from, and the
 plumbing that makes them work is entirely in `hk.transform_with_state` and the
 lifted `hk.scan`.
 
-WHAT THAT BUYS, and it is the shortest answer in the table on both counts:
+What that buys, and it is the shortest answer in the table on both counts:
 
-1. THE STATISTICS CROSS EVERYTHING BY SAYING NOTHING. There is no annotation
-   at either scan, no collection named at any level, no path built by hand.
-   hk.scan threads whatever the body touched.
+1. Statistics cross everything without extra annotations. Neither scan needs a
+   collection flag or a manual path: `hk.scan` threads whatever state its body
+   touched.
 
-2. THE DRAW NEEDS NO FLAG. `hk.next_rng_key()` inside an hk.scan gives a
-   different key per iteration on its own. flax needs `split_rngs={'carry':
+2. Per-step draws need no flag. `hk.next_rng_key()` inside an `hk.scan` gives a
+   different key per iteration on its own. Flax Linen needs `split_rngs={'carry':
    True}` at the lift, three lines from the draw and joined to it by a string,
    and silently repeats the same carry if you forget.
 
-WHAT IT COSTS, and it is one thing said three ways:
+What it costs:
 
-1. THE FUNCTION IS NOT A FUNCTION until it is transformed. `step_fn` cannot be
+1. Functions are not callable until transformed. `step` cannot be
    called, tested, or composed on its own; outside a transform it raises. What
    the other four files hand around as ordinary values, this one can only
    reach inside a context.
 
-2. WHICH STATE IS WHICH IS A STRING. `hk.get_state('mean')` is matched by
+2. State identity is an unchecked string. `hk.get_state('mean')` is matched by
    name, under a module path haiku assigns. Nothing checks that the name at
    the read is the name at the write, and nothing relates either to the
    lifetime it is supposed to have.
@@ -46,8 +46,7 @@ from examples.comparisons.chunk import chunk_common as task
 
 
 def norm(x: jax.Array):
-    """Running per-feature normalizer. Its statistics are AMBIENT state,
-    reached by name."""
+    """Normalizes `x` using ambient running statistics reached by string name."""
     mean = hk.get_state('mean', (task.W,), init=jnp.zeros)
     var = hk.get_state('var', (task.W,), init=jnp.ones)
     out = task.normalize(x, mean, var)
@@ -57,17 +56,17 @@ def norm(x: jax.Array):
     return out
 
 
-def rnn(hidden: int, x: jax.Array):
-    """The recurrent cell, with WEIGHTS. Its hidden state is an ORDINARY
-    VALUE, in and out, because hk.scan carries it. Two kinds of state in one
+def rnn(hidden: jax.Array, x: jax.Array):
+    """Applies the recurrent cell with `hk.get_parameter` weights while taking
+    `hidden` as an explicit `hk.scan` carry. Two kinds of state live in one
     model, and which kind a piece goes in is decided by whether the scan
     carries it.
 
-    The weights are hk.get_parameter, ambient exactly as the statistics are
-    and reached the same way, and NOTHING at either scan mentions them. That
-    is the same trick as the statistics crossing by saying nothing, applied to
-    the other channel: transform_with_state already returns the pair, and the
-    lifted scan already threads whatever the body touched."""
+    The weights use `hk.get_parameter`, ambient just like the statistics and
+    reached the same way, and nothing at either scan mentions them. That
+    applies the same implicit threading to parameters because
+    `transform_with_state` already returns the pair and the lifted scan
+    already threads whatever the body touched."""
     def drawn(i):
         return lambda shape, dtype: task.weights()[i]
 
@@ -77,19 +76,19 @@ def rnn(hidden: int, x: jax.Array):
     return task.cell(hidden, x, wx, wh, b)
 
 
-def step(hidden: int, x: jax.Array):
-    """The two composed, the ordinary way: one function calling the other.
+def step(hidden: jax.Array, x: jax.Array):
+    """Composes `norm` and `rnn` by plain function call inside the transform.
 
-    Composing costs nothing visible here, which is haiku's real trick and its
-    real cost at once. `norm` reaches its statistics by name under a path
-    haiku assigns from the CALL STACK, so nesting it renames its state without
-    a line changing: the slot moves because the caller moved."""
+    Composing requires no explicit state plumbing here, which is both haiku's
+    main convenience and its main cost. `norm` reaches its statistics by name
+    under a path haiku assigns from the call stack, so nesting it renames its
+    state without a line changing: the slot moves because the caller moved."""
     h = rnn(hidden, norm(x))
     return h, h                                   # a scan body: carry, output
 
 
 def _chunked(seq: jax.Array):
-    """chunks of steps. The carry is drawn once, at the top."""
+    """Scans chunks of steps after drawing the initial carry once at the top."""
     def chunk(hidden, xs):
         return hk.scan(step, hidden, xs)
 
@@ -99,7 +98,7 @@ def _chunked(seq: jax.Array):
 
 
 def _recordings(seq: jax.Array):
-    """recordings of chunks of steps, and the boundary is a line in a body.
+    """Scans recordings of chunks of steps with an in-body carry reset.
 
     The recording boundary is the `carry_init` inside the recording body, and
     it draws a fresh key per recording because hk.next_rng_key inside an
@@ -110,7 +109,7 @@ def _recordings(seq: jax.Array):
         return hk.scan(step, hidden, xs)
 
     def recording(_, chunks):
-        hidden = task.carry_init(hk.next_rng_key())      # the RECORDING boundary
+        hidden = task.carry_init(hk.next_rng_key())      # the recording boundary
         _, outs = hk.scan(chunk, hidden, chunks)
         return None, outs
 
@@ -119,38 +118,35 @@ def _recordings(seq: jax.Array):
 
 
 def _run(fn: Callable, *args):
-    """init to build the state, then apply. Both take a key, because entropy
-    enters the transform and nothing inside it names one."""
+    """Initializes and applies a transformed Haiku function with `INIT_KEY`."""
     f = hk.transform_with_state(fn)
     params, state = f.init(task.INIT_KEY, *args)
     out, _ = f.apply(params, state, task.INIT_KEY, *args)
     return out
 
 
-def run(seq: jax.Array=task.SEQ):
+def run(seq: jax.Array = task.SEQ):
     return _run(_chunked, seq)
 
 
-def run_recordings(seq: jax.Array=task.SEQ):
+def run_recordings(seq: jax.Array = task.SEQ):
     return _run(_recordings, seq)
 
 
-def train(rollout=_chunked, seq: jax.Array=task.SEQ):
-    """FOURTH question: train the weights through the chunked rollout.
+def train(rollout=_chunked, seq: jax.Array = task.SEQ):
+    """Trains the weights through `rollout` by plain SGD over `params`.
 
-    Haiku's cleanest moment, and for the same reason as its awkward ones.
-    transform_with_state hands back (params, state) as two separate trees, so
-    differentiating with respect to the first cannot reach the second and
+    `transform_with_state` hands back `(params, state)` as two separate trees,
+    so differentiating with respect to the first cannot reach the second and
     nothing has to say which is which. The split that made the model a
-    non-function is the split that makes this free.
+    non-function is the split that makes parameter gradients isolated here.
 
-    The optimizer state is a third thing the caller holds, OUTSIDE the
-    transform. Ambient buys nothing here: hk.get_state is for what the model
-    owns, and the optimizer is not the model's.
+    The optimizer state is a third tree the caller holds outside the
+    transform. Ambient state buys nothing here: `hk.get_state` is for what the
+    model owns, and the optimizer is not the model's.
 
-    FIFTH AND SIXTH: the same loop over a different rollout. The lifetimes are
-    lines in bodies, so training them costs nothing extra here, which is the
-    other side of them costing a line each to write in the first place."""
+    Passing `_recordings` reuses the same training loop over the two-boundary
+    rollout because the lifetime resets live inside the rollout bodies."""
     f = hk.transform_with_state(rollout)
     params, state = f.init(task.INIT_KEY, seq)
 
@@ -163,7 +159,7 @@ def train(rollout=_chunked, seq: jax.Array=task.SEQ):
     # Python loop over jax code is not something a real user would put up with
     def step(params, _):
         loss, grads = jax.value_and_grad(loss_fn)(params, state)
-        # HAND-ROLLED SGD: these frameworks own no optimizer, optax being
+        # hand-rolled SGD: these frameworks own no optimizer, optax being
         # the ecosystem's, and this loop owns its own arithmetic instead
         return jax.tree.map(lambda w, g: w - task.LR * g, params, grads), loss
 
@@ -173,7 +169,7 @@ def train(rollout=_chunked, seq: jax.Array=task.SEQ):
 
 
 def train_sessions():
-    """FIFTH question: recording and session in one scan nest.
+    """Trains across recording and session boundaries in three nested scans.
 
     The caller owns all three loops as lax.scans, and each lifetime is which
     scan's top its reset sits at: the cold state enters at the session scan,
@@ -196,7 +192,7 @@ def train_sessions():
             return jnp.mean((outs - t) ** 2), (h2, s2)
 
         (loss, (h2, s2)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
-        # HAND-ROLLED MOMENTUM, same note: the velocity is the caller's
+        # hand-rolled momentum, same note: the velocity is the caller's
         # pytree because nothing in the framework owns the training loop
         vel = jax.tree.map(lambda v, g: task.MU * v + g, vel, grads)
         params = jax.tree.map(lambda w, v: w - task.LR * v, params, vel)
@@ -205,13 +201,13 @@ def train_sessions():
     def over_recordings(carry, xt):
         params, vel, state = carry
         (params, vel, state, _), losses = jax.lax.scan(
-            over_chunks, (params, vel, state, hidden0), xt)   # RECORDING: hidden dies
+            over_chunks, (params, vel, state, hidden0), xt)   # recording: hidden dies
         return (params, vel, state), losses
 
     def over_sessions(params, xt):
-        vel0 = jax.tree.map(jnp.zeros_like, params)   # SESSION: momentum restarts
+        vel0 = jax.tree.map(jnp.zeros_like, params)   # session: momentum restarts
         (params, _, _), losses = jax.lax.scan(
-            over_recordings, (params, vel0, state0), xt)       # SESSION: recalibrated
+            over_recordings, (params, vel0, state0), xt)       # session: recalibrated
         return params, losses
 
     _, losses = jax.lax.scan(over_sessions, params0,

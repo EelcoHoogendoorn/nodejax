@@ -1,4 +1,4 @@
-"""Recurrent neural network cell blocks."""
+"""Defines recurrent single-step cell factories (`RNN`, `GRU`, `MinGRU`, `LSTM`)."""
 
 from __future__ import annotations
 
@@ -13,11 +13,7 @@ from nodejax.core.authoring import Leaf
 
 @node
 def RNN(hidden: int) -> Node:
-    """Elman cell with a hidden-width carry.
-
-    The input width comes from the resolved input spec. The hidden width is a
-    design choice and may differ from it.
-    """
+    """Advances an Elman `tanh` cell with carry width `hidden` and input width inferred from `node.input.shape[-1]`."""
     def param(node, rng) -> Struct:
         input_width = node.input.shape[-1]
         return Struct(
@@ -40,10 +36,9 @@ def RNN(hidden: int) -> Node:
 
 @node
 def GRU(hidden: int) -> Node:
-    """Gated recurrent unit with an inferred input width.
+    """Advances a gated recurrent unit with carry and output width `hidden`.
 
-    The update and reset gates see both the current input and previous hidden
-    value. State and output both have the requested hidden width.
+    Infers the input width from `node.input.shape[-1]` and computes update and reset gates from the concatenation of `input` and `state`.
     """
     def param(node, rng) -> Struct:
         input_width = node.input.shape[-1]
@@ -84,14 +79,9 @@ def GRU(hidden: int) -> Node:
 
 @node
 def MinGRU(hidden: int) -> Node:
-    """Minimal gated recurrent unit (Feng et al. 2024) with an inferred
-    input width.
+    """Advances a minimal gated recurrent unit (Feng et al., 2024) with carry width `hidden`.
 
-    Both the update gate and the candidate read only the current input,
-    never the state, so the state transition is linear and diagonal with
-    decay factors sigmoid-bounded inside (0, 1): transport along time is
-    contractive at any horizon. Curvature must come from blocks placed
-    around the cell.
+    Computes both the sigmoid update gate and the linear candidate from `input` alone (`node.input.shape[-1]` inferred), making the state transition `(1 - update) * state + update * candidate` diagonal and linear in `state`.
     """
     def param(node, rng) -> Struct:
         input_width = node.input.shape[-1]
@@ -124,10 +114,9 @@ def MinGRU(hidden: int) -> Node:
 
 @node
 def LSTM(hidden: int) -> Node:
-    """Long short-term memory cell with hidden and cell state.
+    """Advances a long short-term memory cell carrying `Struct(hidden=..., cell=...)` of width `hidden`.
 
-    The four gates share one affine projection. The forget-gate bias starts at
-    one, while the other gate biases start at zero.
+    Projects `(input, state.hidden)` once to `4 * hidden` for the input, forget, candidate, and output gates, initializing the forget-gate bias to ones and the remaining gate biases to zeros.
     """
     def param(node, rng) -> Struct:
         input_width = node.input.shape[-1]

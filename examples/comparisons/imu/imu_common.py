@@ -10,14 +10,15 @@ DRIFT_DENSITY = 0.2
 
 
 def trajectory() -> tuple[np.ndarray, np.ndarray]:
-    """Generate timestamps and offset sinusoidal positions (`x[0] == 2.0`)."""
+    """Generates timestamps and offset sinusoidal positions (`x[0] == 2.0`)."""
     t = np.arange(0.0, 2.0 * np.pi, DT)
     positions = (np.sin(t) + 2.0).astype(np.float32)
     return t, positions
 
 
-def verify_imu(name: str, positions, accel, accel_quiet) -> None:
-    """Assert priming, quantization grid, acceleration tracking, and quiet-mode parity."""
+def verify_imu(name: str, positions: np.ndarray, accel: np.ndarray,
+               accel_quiet: np.ndarray) -> None:
+    """Asserts priming, quantization grid, acceleration tracking, and quiet-mode parity."""
     pos = np.asarray(positions)
     acc = np.asarray(accel)
     quiet = np.asarray(accel_quiet)

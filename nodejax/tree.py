@@ -1,4 +1,4 @@
-"""Generic operations over plain pytrees."""
+"""Axis slicing, reshaping, broadcasting, and gradient helpers over JAX PyTrees."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ from nodejax.core.types import PyTree
 
 
 def tile(tree: PyTree, n: int) -> PyTree:
-    """Tile a pytree along a new leading axis: the spelling for scanning
-    a fixed batch n times."""
+    """Broadcasts every leaf of `tree` along a new leading axis of length `n`."""
     return jax.tree.map(
         lambda leaf: jnp.broadcast_to(leaf, (n,) + jnp.shape(leaf)),
         tree,
@@ -18,27 +17,26 @@ def tile(tree: PyTree, n: int) -> PyTree:
 
 
 def _along(axis: int, index) -> tuple:
-    """A leaf index applying ``index`` along one non-negative ``axis``."""
     return (slice(None),) * axis + (index,)
 
 
 def tree_first(tree: PyTree, axis: int = 0) -> PyTree:
-    """Take the first element along one axis of every pytree leaf."""
+    """Selects index `0` along `axis` on every leaf of `tree`."""
     return jax.tree.map(lambda leaf: leaf[_along(axis, 0)], tree)
 
 
 def tree_last(tree: PyTree, axis: int = 0) -> PyTree:
-    """Take the last element along one axis of every pytree leaf."""
+    """Selects index `-1` along `axis` on every leaf of `tree`."""
     return jax.tree.map(lambda leaf: leaf[_along(axis, -1)], tree)
 
 
 def tree_tail(tree: PyTree, axis: int = 0) -> PyTree:
-    """Drop the first element along one axis of every leaf."""
+    """Slices `1:` along `axis` on every leaf of `tree`."""
     return jax.tree.map(lambda leaf: leaf[_along(axis, slice(1, None))], tree)
 
 
 def tree_len(tree: PyTree) -> int:
-    """Return the common leading-axis length of a non-empty pytree."""
+    """Returns the shared leading-axis length across all leaves of `tree`."""
     leaves = jax.tree.leaves(tree)
     if not leaves:
         raise ValueError('tree_len needs at least one leaf')
@@ -52,7 +50,7 @@ def tree_len(tree: PyTree) -> int:
 
 
 def tree_reshape(tree: PyTree, shape: tuple, axes: int = 1) -> PyTree:
-    """Replace the first ``axes`` leading axes of every leaf with ``shape``."""
+    """Reshapes the first `axes` leading dimensions of every leaf to `shape`."""
     return jax.tree.map(
         lambda leaf: leaf.reshape(shape + jnp.shape(leaf)[axes:]),
         tree,
@@ -60,7 +58,7 @@ def tree_reshape(tree: PyTree, shape: tuple, axes: int = 1) -> PyTree:
 
 
 def tree_swap_axes(tree: PyTree, axis_a: int, axis_b: int) -> PyTree:
-    """Swap two axes of every leaf."""
+    """Swaps `axis_a` and `axis_b` on every leaf of `tree`."""
     return jax.tree.map(
         lambda leaf: jnp.swapaxes(leaf, axis_a, axis_b),
         tree,
@@ -68,12 +66,12 @@ def tree_swap_axes(tree: PyTree, axis_a: int, axis_b: int) -> PyTree:
 
 
 def tree_take(tree: PyTree, indices) -> PyTree:
-    """Gather rows of every leaf's leading axis by an index array."""
+    """Gathers entries along the leading axis of every leaf by `indices`."""
     return jax.tree.map(lambda leaf: leaf[indices], tree)
 
 
 def tree_broadcast_axis(tree: PyTree, count: int, axis: int) -> PyTree:
-    """Broadcast a pytree over one new axis."""
+    """Inserts and broadcasts a new axis of length `count` at `axis` on every leaf."""
     def broadcast(leaf):
         shape = jnp.shape(leaf)
         normalized_axis = axis if axis >= 0 else len(shape) + axis + 1
@@ -85,5 +83,5 @@ def tree_broadcast_axis(tree: PyTree, count: int, axis: int) -> PyTree:
 
 
 def tree_stop_gradient(tree: PyTree) -> PyTree:
-    """Preserve a pytree's values while stopping every leaf's gradient."""
+    """Stops gradients across every leaf of `tree` while preserving values."""
     return jax.lax.stop_gradient(tree)

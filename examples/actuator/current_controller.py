@@ -1,40 +1,23 @@
-"""Current controller: target current + measurements in, PWM out.
-
-Composes a model-based estimator, one DQ PID, the motor member (the
-controller's model of the plant: the same motor def the plant runs,
-here consulted through its methods and params), the power
-stage's own thermal (fets), the per-term feedforward weighting (ff) and
-a norm-clamp current limiter (limit), a one-tick memory (previous pwm,
-feeding the estimator's model) and a difference node (d_dt, the
-reference derivative driving the inductive feedforward). Output is a PWM command —
-voltage normalized by the ESTIMATED bus voltage, norm-clamped to 1.
-The fets heat on their own conduction losses (read-then-step) and
-derate the target; derating for components this controller does NOT
-own (the motor windings) happens upstream, where those thermals live.
-"""
+"""Defines `CurrentController`, per-term voltage `Feedforward`, and outer torque or velocity command Nodes."""
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax import Node, node, ambient, Leaf, Composite
+from nodejax import BaseNode, Node, PNode, PyTree, node, Leaf, Composite
 
 from examples.actuator.dq import DQ
 from nodejax.control import ClampNorm, Delay, Diff
-from examples.actuator.motor import current_model, voltage_terms
+from examples.actuator.motor import current_model
 
 
 @node
-def foc_current_model(dt: float):
-    """Predict the current the previously commanded modulated voltage
-    implies, with di/dt taken filtered-vs-previous — the physics as
-    plain functions on plain param data. The model bundle carries:
-    motor (the model params), mod_v (the controller's account of the
-    voltage applied last step: its commanded pwm times its bus
-    estimate), est_velocity (the estimated mechanical velocity) — every
-    model input is an estimate; only the plant sees truth."""
-    def model_fn(filtered, previous, model):
+def foc_current_model(dt: float) -> Callable[[DQ, DQ, Struct], DQ]:
+    """Returns a current-prediction function using the controller's estimated bus voltage, velocity, and motor parameters."""
+    def model_fn(filtered: DQ, previous: DQ, model: Struct) -> DQ:
         di_dt = (filtered - previous) / dt
         return current_model(model.motor, model.mod_v, di_dt, model.est_velocity)
     return model_fn
@@ -42,13 +25,11 @@ def foc_current_model(dt: float):
 
 @node(name='ff')
 def Feedforward() -> Node:
-    """Per-term feedforward: the model's voltage terms weighted by the
-    trust placed in each (resistive/bemf/inductive gains), summed. A
-    leaf node — the terms its input, the gains its params."""
-    def param(r, bemf, l):
+    """Sums resistive, back-EMF, and inductive voltage terms weighted by per-term gains `(r, bemf, l)`."""
+    def param(r: PyTree, bemf: PyTree, l: PyTree) -> Struct:
         return Struct(r=r, bemf=bemf, l=l)
 
-    def apply(param, resistive, bemf, inductive):
+    def apply(param, resistive: DQ, bemf: DQ, inductive: DQ) -> DQ:
         return (resistive * param.r + bemf * param.bemf
                 + inductive * param.l)
 
@@ -56,38 +37,25 @@ def Feedforward() -> Node:
 
 
 @node
-def CurrentController(dt: float, motor: Node, estimator: Node, controller: Node, fets: Node, bus_est: Node) -> Node:
-    """Target current + measurements in, PWM out.
+def CurrentController(
+        dt: float, motor: BaseNode, estimator: BaseNode,
+        controller: BaseNode, fets: BaseNode, bus_est: BaseNode,
+) -> Node | PNode:
+    """Closes the `DQ`-axis current loop and outputs a norm-clamped PWM duty vector.
 
-    input fields, declared by the apply signature: true_i (true DQ
-    current), est_velocity (the observer's estimated mechanical
-    velocity; every velocity this controller sees is an estimate),
-    true_v (the true bus voltage; the controller senses it through its
-    own bus_est member, as it senses current through the estimator's),
-    target_i (DQ current target). The target arrives PRE-DERATED for anything this controller does
-    not own (the motor's thermal rollback happens where the motor
-    thermal lives — at the stack). The factory argument list is the
-    member list; ff (per-term feedforward weighting) and limit (a
-    norm-clamp on the target current) are leaf-node members like the
-    rest."""
+    Senses `true_v` through `bus_est`, clamps `target_i` by norm (`limit`) and power-stage temperature (`fets.derate`), estimates `DQ` current via `estimator` using the previous commanded PWM duty and `est_v`, adds feedback (`controller`) to reference-derivative voltage feedforward (`motor.voltage_terms` weighted by `ff`), divides by `max(est_v, 1e-3)`, and steps `fets` and `pwm_prev`.
+    """
     members = Composite(motor=motor, estimator=estimator, controller=controller,
-                   fets=fets, bus_est=bus_est,
-                   ff=Feedforward(), limit=ClampNorm(),
-                   pwm_prev=Delay().with_input(DQ()), d_dt=Diff(dt))
+                        fets=fets, bus_est=bus_est,
+                        ff=Feedforward(), limit=ClampNorm(),
+                        pwm_prev=Delay().with_input(DQ()), d_dt=Diff(dt))
 
-    def apply(self, true_i, est_velocity, true_v, target_i):
-        # the controller owns its ADCs: the TRUE bus voltage arrives and
-        # is sensed here, exactly as the current is sensed inside the
-        # estimator member; everything past this line is an estimate —
-        # physics runs real, the controller runs on estimations
+    def apply(self, true_i: DQ, est_velocity, true_v, target_i: DQ) -> DQ:
         est_v = self.bus_est(true_v)
         target_i = self.limit(target_i)
-        # the power stage derates by its own temperature (read-then-step)
         target_i = self.fets.derate(target_i)
 
-        # model-based estimation: the model sees the controller's own
-        # account of the voltage applied last step (its commanded pwm
-        # times its bus estimate — the true bus is not its to know)
+        # Predict current from the controller's previous PWM command and estimated bus voltage.
         est_i = self.estimator(
             value=true_i,
             model=Struct(motor=self.motor.param,
@@ -95,45 +63,34 @@ def CurrentController(dt: float, motor: Node, estimator: Node, controller: Node,
                          est_velocity=est_velocity))
 
         fb_v = self.controller(target_i - est_i)
-        # feedforward with PER-TERM trust weights: resistive and
-        # speed-voltage terms at the target operating point, and the
-        # inductive term driven by the REFERENCE derivative — an
-        # error-driven di/dt is a hidden P-gain of L/dt on measurement
-        # noise (measured: tracking flat, jitter x4)
+        # Drive inductive feedforward from the reference derivative d(target_i)/dt rather than noisy current error.
         terms = self.motor.voltage_terms(target_i, self.d_dt(target_i), est_velocity)
-        v = fb_v + self.ff(bundle=terms)
+        voltage = fb_v + self.ff(bundle=terms)
 
-        # guard: an estimator still converging from zero must not produce
-        # NaN pwm; the norm clamp bounds the result either way
-        pwm = (v / jnp.maximum(est_v, 1e-3)).clamp_norm(1.0)
+        pwm = (voltage / jnp.maximum(est_v, 1e-3)).clamp_norm(1.0)
 
         self.fets(est_i.norm2())                  # fets own r_dson: amps^2 in
         self.pwm_prev(pwm)
         return pwm
 
-    # the signature declares the spec, exactly as at a leaf
     return members(apply)
 
 
-# --- command controllers: command -> current target ---
-
 @node
-def torque_command():
-    """Torque command -> DQ current target (id = 0)."""
-    def apply(command, motor):
+def torque_command() -> PNode:
+    """Converts a scalar shaft-torque command into a quadrature-only `DQ(d=0, q=command / motor.kt)` current target."""
+    def apply(command, motor: Struct) -> DQ:
         iq = command / motor.kt
         return DQ(d=jnp.zeros_like(iq), q=iq)
     return Leaf(apply)
 
 
 @node
-def VelocityCommand(velocity_ctrl: Node) -> Node:
-    """Velocity command -> torque (via the velocity PID member) ->
-    DQ current target. Runs on ESTIMATED mechanicals: the observer's
-    output, not the true state."""
+def VelocityCommand(velocity_ctrl: BaseNode) -> Node | PNode:
+    """Maps a velocity setpoint and estimated mechanical state to a quadrature `DQ` current target via `velocity_ctrl`."""
     members = Composite(velocity_ctrl=velocity_ctrl)
 
-    def apply(self, command, est_mechanical, motor):
+    def apply(self, command, est_mechanical: Struct, motor: Struct) -> DQ:
         torque = self.velocity_ctrl(command - est_mechanical.velocity)
         iq = torque / motor.kt
         return DQ(d=jnp.zeros_like(iq), q=iq)

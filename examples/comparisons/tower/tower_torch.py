@@ -5,7 +5,7 @@ gradient boundaries.
 
 Same model, task, and budget. The module half is torch at its most
 comfortable: Parameters as attributes, a ModuleList per axis of
-structure, time and depth as python loops whose rebound locals ARE the
+structure, time and depth as python loops whose rebound locals are the
 state routing, autograd recording the unrolled tape. The census: the
 time loop rebinds (per-layer hiddens, norm stats) by hand; the depth
 loop rebinds the signal; the committee is a ModuleList whose stacked
@@ -13,7 +13,7 @@ view is hand arithmetic, torch.stack over aligned named_parameters,
 differentiable so the meta gradient reaches every member.
 
 The meta level is where eager objects stop being enough. Adaptation
-must produce NEW weights while gradients still flow to the originals,
+must produce new weights while gradients still flow to the originals,
 and torch.optim advances Parameters in place, so no stock optimizer
 can be the inner loop: the fast weights leave the object and ride as
 name->tensor dicts, functional_call applies a member at those values,
@@ -22,21 +22,18 @@ torch.func.vmap runs the member and task axes over modules that store
 exactly one net. The outer loop is idiomatic torch again, python steps
 around loss.backward() and Adam.
 
-THE 60 SECONDS ARE STRUCTURAL, and torch.compile does not buy them
-back at this budget (measured, torch 2.13): the whole meta_loss
-compiles fullgraph, torch.func stack included, and the per-step cost
-drops 123 ms to 4 ms, competitive with the jax columns. But tracing
-charges by the op, the python loops ARE the ops, and the unrolled
-tape (time x depth x members x inner steps) takes 266 s to compile:
-worse than just running eager for anything under ~2000 meta steps.
-The jax files pay tracing per scan BODY, once, which is why their
-whole run jits in seconds. torch does ship a lax.scan-shaped
-prototype, torch._higher_order_ops.scan, measured here against this
-tower's composition: forward eager runs, torch.func.grad through it
-fails on compile-machinery internals, and vmap over it has no
-batching rule, while the meta level here is grad inside vmap through
-the scan. No usable scan, no small graph; the file stays eager, which
-is the honest spelling of that.
+Unrolled eager loops are structural here, and torch.compile does not
+replace a closed-form scan on nested higher-order loops: tracing
+charges per unrolled op, the python loops are the ops, and the unrolled
+tape spans time x depth x members x inner steps on a single graph.
+The jax files trace each scan body once instead of unrolling the
+entire rollout tape. torch also ships a lax.scan-shaped prototype,
+torch._higher_order_ops.scan, checked against this tower's
+composition: forward eager runs, torch.func.grad through it fails on
+compile-machinery internals, and vmap over it has no batching rule,
+while the meta level here differentiates inside vmap through the
+rollout. With no composable scan primitive, the file stays eager,
+which is the direct PyTorch formulation of the task.
 
 torch, like flax, is a reference-exhibit dependency: the file runs in
 any environment with torch installed.
@@ -59,10 +56,10 @@ from torch.func import functional_call, grad, vmap
 from examples.comparisons.tower.tower_common import (
     HIDDEN, LAYERS, MEMBERS, META_STEPS, INNER_LR, OUTER_LR, MOMENTUM,
     make_tasks)
-from typing import Any as PyTree
+PyTree = object
 
 
-def norm_step(stats: PyTree, x: jax.Array):
+def norm_step(stats: PyTree, x: torch.Tensor):
     m1, var = stats
     out = (x - m1) / torch.sqrt(var + 1e-5)
     new_m1 = (1 - MOMENTUM) * m1 + MOMENTUM * x

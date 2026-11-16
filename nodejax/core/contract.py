@@ -1,21 +1,26 @@
-"""Canonical T4 calls and the T3 view over them.
+"""Canonical T4 call records and the T3 `Contract` surface projected from `Def`.
 
-Authoring syntax is lowered into :class:`ContractCalls`. Those records are
-definition data: fixed framework calls plus the facts needed to invoke them.
-The :class:`Contract` view is the narrower surface used by transforms and
-composition.
+Authoring helpers compile Python functions into `ContractCalls` (`ParamCall`,
+`InitCall`, `ApplyCall`) whose implementations operate on closed `Struct` call
+bundles, dense member-shaped parameter and state trees, and `MaybeKeyStream`
+capabilities. `Contract` projects those records into the narrower T3 interface
+consumed by `@transform` implementations and composite wiring.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import inspect
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Callable
 
 from nodejax.frozendict import frozendict
 from nodejax.core.rng import MaybeKeyStream
 from nodejax.struct import Struct
-from nodejax.core.types import PyTree
+from nodejax.core.types import Output, PyTree
+
+if TYPE_CHECKING:
+    from nodejax.core.definition import Def
+    from nodejax.core.node import BaseNode
 
 
 _KEEP = object()
@@ -23,53 +28,51 @@ _KEEP = object()
 
 @dataclass(eq=False, frozen=True)
 class CallField:
-    """One field in a canonical T4 call form.
+    """Describes one field in a canonical `CallForm` as either complete or nested.
 
-    A complete field carries one value wholesale, even when that value is a
-    ``Struct`` or ``None``. A nested field carries another ``CallForm`` whose
-    fields are constructed independently. The explicit variant is the
-    semantic fact; the Python type of ``content`` never selects it.
+    A complete field carries one value whole even when that value is a `Struct`
+    or `None`. A nested field carries another `CallForm` whose fields are
+    constructed independently.
     """
 
     is_nested: bool
-    content: Any
+    content: PyTree
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if type(self.is_nested) is not bool:
             raise TypeError('CallField.is_nested must be a bool')
         if self.is_nested and type(self.content) is not CallForm:
             raise TypeError('a nested CallField must contain a CallForm')
 
     @classmethod
-    def complete(cls, default: Any) -> 'CallField':
-        """Declare one complete value with ``default`` as its fallback."""
+    def complete(cls, default: PyTree) -> CallField:
+        """Creates a complete field with `default` as its fallback value."""
         return cls(False, default)
 
     @classmethod
-    def nested(cls, form: 'CallForm') -> 'CallField':
-        """Declare a recursively constructed field described by ``form``."""
+    def nested(cls, form: CallForm) -> CallField:
+        """Creates a nested field backed by `form`."""
         return cls(True, form)
 
     @property
-    def declaration(self) -> Any:
-        """Project this field into the lossy public Struct declaration."""
+    def declaration(self) -> PyTree:
+        """Projects this field into a public `Struct` declaration value."""
         return self.content.declaration if self.is_nested else self.content
 
 
 @dataclass(eq=False)
 class CallForm:
-    """Canonical T4 structure for one role's ordered call fields.
+    """Defines the ordered call fields and open-bundle policy for one contract role.
 
-    ``fields`` records complete-versus-nested semantics explicitly. ``open``
-    permits additional complete fields while retaining validation and default
-    formation for the declared fields. Public contract specs are projections
-    of this form and are never used to reconstruct it.
+    `fields` stores `CallField` records distinguishing complete values from nested
+    construction sub-forms, while `open` permits undeclared extra fields to pass
+    through alongside declared fields.
     """
 
     fields: Struct
     open: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if type(self.fields) is not Struct:
             raise TypeError('CallForm.fields must be a Struct')
         if not all(type(field) is CallField for field in self.fields):
@@ -79,8 +82,8 @@ class CallForm:
 
     @classmethod
     def from_values(cls, declaration: Struct, *,
-                    open: bool = False) -> 'CallForm':
-        """Treat every field in a public declaration as one complete value."""
+                    open: bool = False) -> CallForm:
+        """Builds a `CallForm` that treats every field in `declaration` as complete."""
         if type(declaration) is not Struct:
             raise TypeError('CallForm declaration must be a Struct')
         return cls(Struct(**{
@@ -90,17 +93,17 @@ class CallForm:
 
     @property
     def declaration(self) -> Struct:
-        """Project the canonical form to its public Struct declaration."""
+        """Projects the form to its public `Struct` declaration."""
         return Struct(**{
             name: field.declaration for name, field in self.fields.__items__
         })
 
-    def without(self, *names: str) -> 'CallForm':
-        """Return the same form without the named top-level fields."""
+    def without(self, *names: str) -> CallForm:
+        """Returns a copy of this form with `names` removed from its top-level fields."""
         return type(self)(self.fields.without(*names), open=self.open)
 
-    def feed(self, value: Any) -> Struct:
-        """Form one computed wire for this call."""
+    def feed(self, value: PyTree) -> Struct:
+        """Packs a single-input wire or multi-field `Struct` into a call bundle."""
         if self.open:
             return self.feed_bundle(value)
         names = self.fields.__keys__
@@ -113,13 +116,13 @@ class CallForm:
         return value
 
     def feed_bundle(self, bundle: Struct) -> Struct:
-        """Accept one explicitly formed call bundle without adaptation."""
+        """Validates that `bundle` is already a formed `Struct` call bundle."""
         if not issubclass(type(bundle), Struct):
             raise TypeError('a formed call bundle must be a Struct')
         return bundle
 
-    def intake(self, bundle: Struct) -> Any:
-        """Recover the wire represented by one explicitly formed bundle."""
+    def intake(self, bundle: Struct) -> PyTree:
+        """Unpacks a single-field closed call `bundle` to its wire or returns `bundle`."""
         if not issubclass(type(bundle), Struct):
             raise TypeError('a formed call bundle must be a Struct')
         names = self.fields.__keys__
@@ -130,31 +133,29 @@ class CallForm:
 
 @dataclass(eq=False)
 class ParamCall:
-    """``impl(definition, formed_input, rng) -> param``."""
+    """Stores the canonical parameter constructor `impl(definition, formed_input, rng) -> param`."""
 
     impl: Callable
     form: CallForm
     takes_rng: bool = False
     reads_def: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         _check_call(self.impl, self.form, self.takes_rng, 'ParamCall')
         if self.form.open:
             raise TypeError('ParamCall form cannot be open')
 
-    def copy(self, **changes) -> 'ParamCall':
+    def copy(self, **changes) -> ParamCall:
         return replace(self, **changes)
 
 
 @dataclass(eq=False)
 class InitCall:
-    """Canonical state construction, with a distinct priming form.
+    """Stores the canonical state constructor, distinguishing cold `init` from `prime`.
 
-    Non-priming implementations have signature
-    ``impl(definition, param, formed_input, rng) -> state``. Priming
-    implementations have signature
-    ``impl(definition, param, formed_input, input, rng) -> state``. Runtime
-    input is never nullable inside the canonical contract.
+    Cold initializers run `impl(definition, param, formed_input, rng) -> state`,
+    whereas priming initializers (`requires_input=True`) run
+    `impl(definition, param, formed_input, input, rng) -> state`.
     """
 
     impl: Callable
@@ -163,20 +164,20 @@ class InitCall:
     requires_input: bool = False
     reads_def: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         _check_call(self.impl, self.form, self.takes_rng, 'InitCall')
         if self.form.open:
             raise TypeError('InitCall form cannot be open')
         if type(self.requires_input) is not bool:
             raise TypeError('InitCall.requires_input must be a bool')
 
-    def copy(self, **changes) -> 'InitCall':
+    def copy(self, **changes) -> InitCall:
         return replace(self, **changes)
 
 
 @dataclass(eq=False)
 class ApplyCall:
-    """``impl(definition, param, state, formed_input, rng) -> (state, output)``."""
+    """Stores the canonical step `impl(definition, param, state, formed_input, rng) -> (state, output)`."""
 
     impl: Callable
     form: CallForm
@@ -184,7 +185,7 @@ class ApplyCall:
     takes_rng: bool = False
     reads_def: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         _check_call(self.impl, self.form, self.takes_rng, 'ApplyCall')
         from nodejax.core.binding import REQUIRED
         defaulted = [
@@ -196,19 +197,19 @@ class ApplyCall:
                 'ApplyCall inputs are always required; defaults declared '
                 f'for {defaulted}')
 
-    def copy(self, **changes) -> 'ApplyCall':
+    def copy(self, **changes) -> ApplyCall:
         return replace(self, **changes)
 
 
 @dataclass(eq=False)
 class ContractCalls:
-    """All canonical executable roles stored by a definition."""
+    """Groups the executable `apply`, `param`, and `init` records of a `Def`."""
 
     apply: ApplyCall
     param: ParamCall | None = None
     init: InitCall | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if type(self.apply) is not ApplyCall:
             raise TypeError('ContractCalls.apply must be an ApplyCall')
         if self.param is not None and type(self.param) is not ParamCall:
@@ -224,20 +225,20 @@ class ContractCalls:
     def cyclic(self) -> bool:
         return self.init is not None
 
-    def copy(self, **changes) -> 'ContractCalls':
+    def copy(self, **changes) -> ContractCalls:
         return replace(self, **changes)
 
-    def with_param(self, **changes) -> 'ContractCalls':
+    def with_param(self, **changes) -> ContractCalls:
         if self.param is None:
             return self
         return replace(self, param=replace(self.param, **changes))
 
-    def with_init(self, **changes) -> 'ContractCalls':
+    def with_init(self, **changes) -> ContractCalls:
         if self.init is None:
             return self
         return replace(self, init=replace(self.init, **changes))
 
-    def with_apply(self, **changes) -> 'ContractCalls':
+    def with_apply(self, **changes) -> ContractCalls:
         return replace(self, apply=replace(self.apply, **changes))
 
 
@@ -251,7 +252,7 @@ def _check_call(impl: Callable, form: CallForm,
         raise TypeError(f'{owner}.takes_rng must be a bool')
 
 
-def _empty(value: Any) -> bool:
+def _empty(value: PyTree) -> bool:
     return type(value) is tuple and not value
 
 
@@ -259,13 +260,7 @@ _MISSING_SLOT = object()
 
 
 def _form_bundle(form: CallForm, supplied: Struct, where: str) -> Struct:
-    """Materialize one closed call record from its declaration.
-
-    Public binding reports the friendly argument errors.  This second check is
-    the canonical boundary: defaults become explicit fields, including inside
-    definition-shaped construction records, so implementations never inspect
-    a sparse call bundle.
-    """
+    """Materializes a closed `Struct` call record with defaults filled recursively."""
     from nodejax.core.binding import REQUIRED
 
     if not issubclass(type(supplied), Struct):
@@ -299,11 +294,11 @@ def _form_call(call, supplied: Struct, where: str) -> Struct:
     return _form_bundle(call.form, supplied, where)
 
 
-def _definition_slots(definition, value: Any, role: str, *,
+def _definition_slots(definition: Def, value: PyTree, role: str, *,
                       project: bool, path: str = '',
                       externalized_param_paths: frozenset[str] = (
-                          frozenset())) -> Any:
-    """Convert between sparse public values and dense T4 value trees."""
+                          frozenset())) -> PyTree:
+    """Converts between sparse public parameter/state trees and dense T4 trees."""
     if role == 'param' and definition.layout.externalized_param_paths:
         externalized_param_paths = externalized_param_paths | frozenset(
             f'{path}.{member}' if path else member
@@ -318,8 +313,8 @@ def _definition_slots(definition, value: Any, role: str, *,
     if value is _MISSING_SLOT:
         raise TypeError(f'{path or definition.name}: missing {role} value')
 
-    # A transparent wrapper is transparent for a role only when its member
-    # holds that role; a wrapper cyclic over an acyclic member owns its state.
+    # A transparent wrapper delegates a role only when its inner member owns
+    # that role; a cyclic wrapper over an acyclic member owns its state directly.
     transparent = definition.layout.transparent_member
     if transparent is not None:
         member = getattr(definition.members, transparent)
@@ -340,9 +335,8 @@ def _definition_slots(definition, value: Any, role: str, *,
         raise TypeError(
             f'{path or definition.name}: composite {role} must be a Struct')
 
-    # An overcomplete record binds: the definition selects the members it
-    # names and extra record members fall away. A misnamed member still
-    # fails loudly, through the missing slot it leaves behind.
+    # Overcomplete Struct records bind by selecting declared member names; a
+    # misspelled member still raises through the missing slot it leaves behind.
     values = {}
     param_members = definition.layout.param_members
     for name, member in definition.members.__items__:
@@ -369,8 +363,7 @@ def _definition_slots(definition, value: Any, role: str, *,
     return Struct(**values)
 
 
-def _state_tree(definition, fn: Callable) -> Any:
-    """Map cyclic leaves into the definition's dense state layout."""
+def _state_tree(definition: Def, fn: Callable) -> PyTree:
     if not definition.cyclic:
         return ()
     transparent = definition.layout.transparent_member
@@ -385,8 +378,7 @@ def _state_tree(definition, fn: Callable) -> Any:
     return fn(definition.contract)
 
 
-def _map_state(definition, state, fn: Callable) -> Any:
-    """Map dense state leaves together with their Contract views."""
+def _map_state(definition: Def, state, fn: Callable) -> PyTree:
     if not definition.cyclic:
         return ()
     transparent = definition.layout.transparent_member
@@ -402,16 +394,15 @@ def _map_state(definition, state, fn: Callable) -> Any:
     return fn(definition.contract, state)
 
 
-def _boundary_names(definition) -> frozenset[str]:
+def _boundary_names(definition: Def) -> frozenset[str]:
     names = set(definition.boundaries)
     for _, member in definition.members.__items__:
         names.update(_boundary_names(member))
     return frozenset(names)
 
 
-def _merge_boundary(definition, carried, initialized,
+def _merge_boundary(definition: Def, carried: PyTree, initialized: PyTree,
                     tag: str) -> PyTree:
-    """Apply one declared boundary action over a dense state tree."""
     if not definition.cyclic:
         return ()
     transparent = definition.layout.transparent_member
@@ -433,7 +424,7 @@ def _merge_boundary(definition, carried, initialized,
             action(carried, initialized, decided))
 
 
-def _role_signature(fn: Callable, role: str):
+def _role_signature(fn: Callable, role: str) -> inspect.Signature:
     signature = inspect.signature(fn)
     if any(parameter.kind in (
             inspect.Parameter.POSITIONAL_ONLY,
@@ -445,7 +436,8 @@ def _role_signature(fn: Callable, role: str):
     return signature
 
 
-def _role_arguments(signature, *, definition, formed_input,
+def _role_arguments(signature: inspect.Signature, *, definition: Def,
+                    formed_input: Struct,
                     channels: dict, aggregate: str) -> frozendict:
     available = {
         'contract': definition.contract,
@@ -515,9 +507,7 @@ def _lower_apply(fn: Callable, source: ApplyCall) -> ApplyCall:
         impl=impl, reads_def='contract' in signature.parameters)
 
 
-def _required_field(field) -> bool:
-    """Whether a call field must be supplied: a complete field without a
-    default, or a nested form with such a field inside."""
+def _required_field(field: CallField) -> bool:
     from nodejax.core.binding import REQUIRED
     if field.is_nested:
         return any(_required_field(inner) for inner in field.content.fields)
@@ -525,9 +515,14 @@ def _required_field(field) -> bool:
 
 
 class Contract:
-    """T3 contract operations projected from one complete definition."""
+    """Projects the uniform T3 contract (`param`, `init`, `prime`, `apply`) of a `Def`.
 
-    def __init__(self, definition):
+    Transforms and composite wiring call `Contract` methods with formed `Struct`
+    bundles and `MaybeKeyStream` capabilities rather than branching on whether a
+    Node is parametric, cyclic, priming, or stochastic.
+    """
+
+    def __init__(self, definition: Def) -> None:
         from nodejax.core.definition import Def
 
         if type(definition) is not Def:
@@ -548,7 +543,7 @@ class Contract:
 
     @property
     def members(self) -> Struct:
-        """The member contracts, preserving the definition's Struct shape."""
+        """Returns a `Struct` mapping each immediate member name to its `Contract`."""
         return Struct(**{
             name: member.contract
             for name, member in self._def.members.__items__
@@ -559,26 +554,20 @@ class Contract:
         return self._def.tags
 
     def _roles(self, *, param=None, init=None, prime=None, apply=None,
-               requires_input=None, state_fields: tuple[str, ...] = (),
-               param_takes_rng=None, init_takes_rng=None,
-               apply_takes_rng=None, input_spec=_KEEP,
-               apply_fields=None, open: bool = False):
-        """Lower ordinary Python role functions over this contract.
+               requires_input: bool | None = None,
+               state_fields: tuple[str, ...] = (),
+               param_takes_rng: bool | None = None,
+               init_takes_rng: bool | None = None,
+               apply_takes_rng: bool | None = None,
+               input_spec: PyTree = _KEEP,
+               apply_fields: tuple[str, ...] | None = None,
+               open: bool = False) -> ContractCalls:
+        """Compiles transform role overrides over this contract into `ContractCalls`.
 
-        Functions name only the channels they use. ``contract`` receives the
-        current contract; ``param_input`` and ``state_input`` receive formed
-        constructor records; apply receives the complete formed call bundle
-        as ``input``. Prime receives the real runtime value under the same
-        name. This contract decides which roles exist, whether init or prime
-        applies, their call forms, and their public RNG requirements.
-        ``requires_input`` may explicitly switch an existing initializer
-        between those forms when the corresponding replacement is supplied.
-        ``init=`` over a member without an init gives the result state of
-        its own, taking the state inputs named by ``state_fields``.
-        ``init=False`` removes state from the result and ``param=False``
-        removes parameters. ``apply_fields``
-        declares a replacement required-field form; ``open`` also permits
-        undeclared side fields.
+        Role callables declare only the named arguments they read (`contract`,
+        `param_input`, `state_input`, `param`, `state`, `input`, `rng`). Passing
+        `param=False` or `init=False` removes that role, whereas `state_fields`
+        equips an acyclic inner contract with wrapper-owned state.
         """
         calls = self._def.calls
         if requires_input is not None:
@@ -598,8 +587,6 @@ class Contract:
                     'requires_input=')
             calls = calls.copy(init=None)
         elif calls.init is None and state_fields:
-            # The result owns state its member does not have: init is the
-            # only role, taking the declared state inputs.
             if init is None or prime is not None or requires_input is not None:
                 raise TypeError(
                     'state_fields declares an owned init: supply init= and '
@@ -691,14 +678,14 @@ class Contract:
         return self._apply_form.open or bool(self.apply_fields)
 
     @property
-    def input_spec(self):
+    def input_spec(self) -> PyTree:
         from nodejax.core.binding import _spec_resolved
 
         spec = self._def.calls.apply.input_spec
         return spec if _spec_resolved(spec) else None
 
-    def input_spec_for(self, field: str):
-        """Resolved input evidence for one call field, or ``None``."""
+    def input_spec_for(self, field: str) -> PyTree:
+        """Returns the resolved input spec for `field`, or `None` when unresolved."""
         spec = self.input_spec
         return None if spec is None else spec[field]
 
@@ -719,16 +706,15 @@ class Contract:
 
     @property
     def state_input_fields(self) -> tuple[str, ...]:
-        """The init's state-input fields a caller must supply."""
+        """Returns the required `init` argument names that have no default."""
         call = self._def.calls.init
         if call is None:
             return ()
         return tuple(name for name, field in call.form.fields.__items__
                      if _required_field(field))
 
-    def _resolve_def(self, input_spec, *, replace_evidence: bool = False,
-                     bundled: bool = False):
-        """Resolve one wire, or an explicitly formed bundle when requested."""
+    def _resolve_def(self, input_spec: PyTree, *, replace_evidence: bool = False,
+                     bundled: bool = False) -> Def:
         from nodejax.core.binding import (
             _bind_axis, _contains_axis, _counts_unknown, _validate_spec,
             validate_input_spec,
@@ -752,56 +738,52 @@ class Contract:
         return self._def.copy(
             calls=self._def.calls.with_apply(input_spec=resolved))
 
-    def _resolve(self, input_spec, *, replace_evidence: bool):
+    def _resolve(self, input_spec: PyTree, *, replace_evidence: bool) -> BaseNode:
         from nodejax.core.node import _view
 
         return _view(self._resolve_def(
             input_spec, replace_evidence=replace_evidence))
 
-    def with_input(self, input_spec):
-        """Replace this definition's input-shape evidence."""
+    def with_input(self, input_spec: PyTree) -> BaseNode:
+        """Returns a Node view whose input-shape evidence is replaced by `input_spec`."""
         return self._resolve(input_spec, replace_evidence=True)
 
-    def resolve(self, input_spec):
-        """Bind missing input evidence or validate existing evidence."""
+    def resolve(self, input_spec: PyTree) -> BaseNode:
+        """Binds missing input-shape evidence or validates existing evidence against `input_spec`."""
         return self._resolve(input_spec, replace_evidence=False)
 
-    def for_input(self, input_spec) -> 'Contract':
-        """Use this contract with optional input-shape evidence."""
+    def for_input(self, input_spec: PyTree) -> Contract:
+        """Returns a `Contract` resolved against `input_spec` when `input_spec` is provided."""
         return (self if input_spec is None else
                 self._resolve_def(input_spec).contract)
 
-    def feed(self, value: PyTree) -> PyTree:
-        """Format one computed value for this contract's apply call."""
+    def feed(self, value: PyTree) -> Struct:
+        """Packs `value` into this contract's `apply` call bundle."""
         return self._apply_form.feed(value)
 
-    def feed_bundle(self, value: PyTree) -> Struct:
-        """Accept one explicitly formed call bundle without adaptation."""
+    def feed_bundle(self, value: Struct) -> Struct:
+        """Validates an already-formed `Struct` bundle for this contract's `apply` call."""
         return self._apply_form.feed_bundle(value)
 
     def intake(self, value: Struct) -> PyTree:
-        """Recover this contract's wire from one formed apply bundle."""
+        """Unpacks a single-field closed `apply` bundle to its wire or returns `value`."""
         return self._apply_form.intake(value)
 
-    def _dense_param(self, value):
-        """Form this definition's fixed T4 parameter tree."""
+    def _dense_param(self, value: PyTree) -> PyTree:
         return _definition_slots(self._def, value, 'param', project=False)
 
-    def _sparse_param(self, value):
-        """Project a canonical parameter tree for a public Node view."""
+    def _sparse_param(self, value: PyTree) -> PyTree:
         return _definition_slots(self._def, value, 'param', project=True)
 
-    def _dense_state(self, value):
-        """Form this definition's fixed T4 state tree."""
+    def _dense_state(self, value: PyTree) -> PyTree:
         return _definition_slots(self._def, value, 'state', project=False)
 
-    def _sparse_state(self, value):
-        """Project a canonical state tree for a public Node view."""
+    def _sparse_state(self, value: PyTree) -> PyTree:
         return _definition_slots(self._def, value, 'state', project=True)
 
-    def member_param(self, name: str, formed_input, rng: MaybeKeyStream, *,
-                     input_spec=None):
-        """Construct one member parameter slot, honoring bound captures."""
+    def member_param(self, name: str, formed_input: PyTree, rng: MaybeKeyStream, *,
+                     input_spec: PyTree = None) -> PyTree:
+        """Constructs member `name`'s parameter tree, reusing captured values when present."""
         if name not in self._def.members:
             raise TypeError(f'{self.name}: no member {name!r}')
         member = getattr(self._def.members, name)
@@ -813,10 +795,10 @@ class Contract:
         return child.param(
             formed_input, rng.child(child.param_takes_rng))
 
-    def member_init(self, name: str, param, formed_input,
+    def member_init(self, name: str, param, formed_input: PyTree,
                     rng: MaybeKeyStream, *, input=_KEEP,
-                    input_spec=None):
-        """Construct one member state slot, honoring bound captures."""
+                    input_spec: PyTree = None) -> PyTree:
+        """Constructs member `name`'s state tree, reusing or rekeying captured state when present."""
         if name not in self._def.members:
             raise TypeError(f'{self.name}: no member {name!r}')
         member = getattr(self._def.members, name)
@@ -838,21 +820,21 @@ class Contract:
         return child.prime(
             member_param, formed_input, input, child_rng)
 
-    def state_tree(self, fn: Callable) -> Any:
-        """Map a value over cyclic leaves in the canonical state layout."""
+    def state_tree(self, fn: Callable) -> PyTree:
+        """Evaluates `fn(leaf_contract)` at every cyclic leaf in dense state layout."""
         return _state_tree(self._def, fn)
 
-    def map_state(self, state, fn: Callable) -> Any:
-        """Map ``fn(contract, value)`` over canonical state leaves."""
+    def map_state(self, state, fn: Callable) -> PyTree:
+        """Maps `fn(leaf_contract, leaf_state)` across every cyclic leaf in `state`."""
         return _map_state(self._def, self._dense_state(state), fn)
 
     @property
     def boundary_names(self) -> frozenset[str]:
-        """Boundary names declared by this definition or its members."""
+        """Returns all boundary tags declared on this definition or its descendants."""
         return _boundary_names(self._def)
 
-    def merge_boundary(self, carried, initialized, tag: str):
-        """Apply matching boundary actions to canonical state trees."""
+    def merge_boundary(self, carried: PyTree, initialized: PyTree, tag: str) -> PyTree:
+        """Merges `carried` and `initialized` dense state trees using boundary actions matching `tag`."""
         return _merge_boundary(
             self._def,
             self._dense_state(carried),
@@ -869,7 +851,8 @@ class Contract:
             raise TypeError(
                 f'contract.{role} expects a {expected} MaybeKeyStream')
 
-    def param(self, formed_input: Struct, rng: MaybeKeyStream):
+    def param(self, formed_input: Struct, rng: MaybeKeyStream) -> PyTree:
+        """Executes the canonical parameter constructor and returns a dense parameter tree."""
         if not issubclass(type(formed_input), Struct):
             raise TypeError('contract.param expects a formed Struct')
         call = self._def.calls.param
@@ -881,7 +864,8 @@ class Contract:
             call, formed_input, f'{self._def.name}.param')
         return self._dense_param(call.impl(self._def, formed_input, rng))
 
-    def init(self, param, formed_input: Struct, rng: MaybeKeyStream):
+    def init(self, param, formed_input: Struct, rng: MaybeKeyStream) -> PyTree:
+        """Executes cold state construction and returns a dense state tree."""
         if not issubclass(type(formed_input), Struct):
             raise TypeError('contract.init expects a formed Struct')
         call = self._def.calls.init
@@ -900,7 +884,8 @@ class Contract:
             call.impl(self._def, param, formed_input, rng))
 
     def prime(self, param, formed_input: Struct,
-              input, rng: MaybeKeyStream):
+              input, rng: MaybeKeyStream) -> PyTree:
+        """Executes state construction with sample `input` and returns a dense state tree."""
         if not issubclass(type(formed_input), Struct):
             raise TypeError('contract.prime expects a formed Struct')
         definition = self._resolve_def(input)
@@ -921,7 +906,8 @@ class Contract:
         return contract._dense_state(state)
 
     def apply(self, param, state, formed_input: Struct,
-              rng: MaybeKeyStream):
+              rng: MaybeKeyStream) -> tuple[PyTree, Output]:
+        """Executes one canonical step and returns `(dense_next_state, output)`."""
         if not issubclass(type(formed_input), Struct):
             raise TypeError('contract.apply expects a formed Struct')
         call = self._def.calls.apply

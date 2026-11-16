@@ -1,14 +1,14 @@
 """NodeJAX's stock residual under the unary-signal wrapper contract.
 
-The whole transform is six lines in ``nodejax/transforms/wiring/residual.py``. Those
+The whole transform is six lines in `nodejax/transforms/wiring/residual.py`. Those
 lines do not mention params, state construction, priming, entropy, aux, or
-member methods. ``self.body(input)`` is a member call, so the common Def
+member methods. `self.body(input)` is a member call, so the common Def
 contract carries those facts through the wrapper. Deferred construction also
 survives, so the result can still be specialized before it is bound.
 
 The apply form itself is an honest limit of this particular transform. Its
-authored apply declares one field named ``input``. A body with another runtime
-argument works directly but that argument is not published by ``residual``.
+authored apply declares one field named `input`. A body with another runtime
+argument works directly but that argument is not published by `residual`.
 The framework can represent and route such calls, but this six-line residual
 does not claim semantics for which argument is the signal and which ones are
 merely forwarded. The probes below report that boundary rather than hiding it.
@@ -42,8 +42,8 @@ from examples.comparisons.residual.residual_common import (
 
 @node
 def NoisyStatefulBody():
-    """One member carrying every fact a wrapper has to forward: a parameter,
-    running state, apply-time entropy, and an auxiliary output."""
+    """Combines a parameter, running state, apply-time RNG, and auxiliary
+    output on one leaf body."""
     def param(rng):
         return Struct(
             weight=0.25 + jax.random.normal(rng.next(), (WIDTH,)) / WIDTH)
@@ -63,7 +63,7 @@ def NoisyStatefulBody():
 
 @node
 def BareBody():
-    """A deterministic member with no state and no aux."""
+    """Scales its input deterministically without state or auxiliary output."""
     def param(rng):
         return Struct(
             weight=0.9 + 0.01 * jax.random.normal(rng.next(), (WIDTH,)))
@@ -79,8 +79,8 @@ def _build(body, key):
 
 
 def _nests(key, apply_key) -> bool:
-    """A residual around a residual, deterministic member and stochastic
-    member alike: the product is a member like any other."""
+    """Checks whether `residual` composes with itself around deterministic and
+    stochastic bodies alike."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     try:
         residual(residual(BareBody())).parameterize(rng=key).apply(inputs)
@@ -92,9 +92,9 @@ def _nests(key, apply_key) -> bool:
 
 
 def _state_gets_gradient(param_key, apply_key) -> bool:
-    """Whether a gradient reaches the member\'s running statistic.
+    """Checks whether a gradient reaches the member's running statistic.
 
-    It cannot. ``param`` and ``state`` are separate trees, so a gradient
+    It cannot. `param` and `state` are separate trees, so a gradient
     taken against the parameters has nowhere to put one for state.
     """
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
@@ -110,7 +110,7 @@ def _state_gets_gradient(param_key, apply_key) -> bool:
 
 
 def _preserves_priming() -> bool:
-    """Whether a body can still initialize state from its first real input."""
+    """Checks whether a body still initializes state from its first real input."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
 
     def init(input):
@@ -125,7 +125,7 @@ def _preserves_priming() -> bool:
 
 
 def _preserves_methods() -> bool:
-    """Whether methods declared by the body remain available on the result."""
+    """Checks whether body methods remain callable on the wrapped result."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
 
     def doubled(input):
@@ -136,7 +136,7 @@ def _preserves_methods() -> bool:
 
 
 def _forwards_extra_arguments() -> bool:
-    """Whether this unary transform republishes additional body arguments."""
+    """Checks whether this unary transform republishes extra body arguments."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     scale = jnp.asarray(2.0)
     body = Leaf(lambda input, scale: scale * input, name='scaled')

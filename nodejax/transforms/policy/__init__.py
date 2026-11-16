@@ -1,4 +1,4 @@
-"""Execution-policy transforms."""
+"""Re-exports gradient, checkpointing, state-retention, and observation policy transforms."""
 
 from nodejax.transforms.policy.boundary import state_reinit
 from nodejax.transforms.policy.detach import detach, tree_detach

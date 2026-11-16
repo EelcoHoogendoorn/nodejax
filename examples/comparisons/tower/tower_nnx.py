@@ -13,7 +13,7 @@ from flax import nnx
 from examples.comparisons.tower.tower_common import (
     HIDDEN, LAYERS, MEMBERS, META_STEPS, INNER_LR, OUTER_LR, MOMENTUM,
     make_tasks)
-from typing import Any as PyTree
+PyTree = object
 
 
 # The running statistics are ordinary values in the rollout carry. NNX can

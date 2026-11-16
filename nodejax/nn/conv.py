@@ -1,4 +1,4 @@
-"""Convolutional layer blocks."""
+"""Defines 2D convolution and transposed-convolution Leaf factories."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from nodejax.core.authoring import Leaf
 
 @node
 def Conv(features: int, kernel: int = 3, stride: int = 1) -> Node:
-    """SAME convolution over one (H, W, C) map; in-channels from the
-    resolved input spec. lax demands a batch dim, so a unit one is added and
-    stripped; under batch() the vmap fuses it into a real batched
-    conv."""
+    """Applies a 2D `SAME`-padded convolution over one `(H, W, C)` feature map.
+
+    Infers the input channel count from `node.input.shape[-1]`. Inserts and strips a leading unit batch axis around `jax.lax.conv_general_dilated`, which fuses into a batched convolution under `batch`.
+    """
     def param(node, rng) -> Struct:
         c_in = node.input.shape[-1]
         k = jax.random.normal(rng.next(), (kernel, kernel, c_in, features))
@@ -34,10 +34,9 @@ def Conv(features: int, kernel: int = 3, stride: int = 1) -> Node:
 
 @node
 def ConvTranspose(features: int, kernel: int = 3, stride: int = 2) -> Node:
-    """SAME transposed convolution over one feature map.
+    """Applies a 2D `SAME`-padded transposed convolution over one `(H, W, C)` feature map.
 
-    Input channels come from the resolved input spec. A stride greater than
-    one expands the spatial axes by that factor.
+    Infers the input channel count from `node.input.shape[-1]`. A `stride` greater than one expands both spatial axes by `stride`.
     """
     def param(node, rng) -> Struct:
         input_channels = node.input.shape[-1]

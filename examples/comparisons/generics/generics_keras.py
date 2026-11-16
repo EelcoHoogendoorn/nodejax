@@ -1,25 +1,25 @@
 """Configuring a deep composition with Keras 3 on the JAX backend.
 
-Keras gets input-derived construction right. ``keras.Input`` carries shape
-through the Functional graph, and ``Block.build(input_shape)`` creates its
+Keras gets input-derived construction right. `keras.Input` carries shape
+through the Functional graph, and `Block.build(input_shape)` creates its
 square weights from the signal that reaches it. The input width is stated once
 at the graph boundary and never forwarded through a constructor.
 
-The remaining configuration has a different lifetime. ``depth``, ``members``
-and ``temperature`` decide which Python layer graph to construct, so they must
-be known when ``committee`` runs. Before that, Keras has a reusable Python
+The remaining configuration has a different lifetime. `depth`, `members`
+and `temperature` decide which Python layer graph to construct, so they must
+be known when `committee` runs. Before that, Keras has a reusable Python
 builder; it does not have an unresolved Model that can itself be composed and
 specialized later. This column is therefore both a genuine Keras win and a
 useful boundary on what NodeJAX's Generics add beyond shape inference.
 
 Keras also has a real configuration data model. Retempering uses the standard
-``clone_model`` hook to rebuild every Block at the new static value, then
-``set_weights`` transfers the trained values after Keras has checked their
+`clone_model` hook to rebuild every Block at the new static value, then
+`set_weights` transfers the trained values after Keras has checked their
 shapes. No mutable flag or private model surgery is needed.
 
-The committee is a real JAX ``vmap``, not a Python loop over calls.
-``Ensemble`` stacks corresponding variables from independently initialized
-member Models and maps one member's pure ``stateless_call``. Keras supplies
+The committee is a real JAX `vmap`, not a Python loop over calls.
+`Ensemble` stacks corresponding variables from independently initialized
+member Models and maps one member's pure `stateless_call`. Keras supplies
 both halves of that implementation; what it does not supply is the small
 Model-to-Model lift that puts them together and reconnects updated state.
 This is enough for the generics experiment; the separate lift comparison is
@@ -51,7 +51,7 @@ if keras.backend.backend() != 'jax':
 
 @keras.saving.register_keras_serializable(package='nodejax_comparison')
 class Block(keras.layers.Layer):
-    """A same-width linear whose fan-in and fan-out come from its input."""
+    """Applies a same-width linear layer whose fan-in comes from its input."""
 
     def __init__(self, temperature: float, **kwargs):
         super().__init__(**kwargs)
@@ -74,7 +74,7 @@ class Block(keras.layers.Layer):
 
 
 def tower(width: int, depth: int, temperature: float, *, name: str):
-    """entry -> depth same-width blocks -> readout."""
+    """Builds a sequential `entry -> depth blocks -> readout` tower."""
     return keras.Sequential([
         keras.layers.Dense(width),
         *[Block(temperature) for _ in range(depth)],
@@ -84,7 +84,7 @@ def tower(width: int, depth: int, temperature: float, *, name: str):
 
 @keras.saving.register_keras_serializable(package='nodejax_comparison')
 class Ensemble(keras.layers.Layer):
-    """Map one Model over independently initialized params and state."""
+    """Maps one Model over independently initialized params and state."""
 
     def __init__(self, members, **kwargs):
         super().__init__(**kwargs)
@@ -145,7 +145,7 @@ class Ensemble(keras.layers.Layer):
 
 
 def committee(width: int, depth: int, members: int, temperature: float):
-    """Build the Functional graph; input shape reaches every tower itself."""
+    """Builds the Functional graph so input shape reaches every tower directly."""
     rows = keras.Input(shape=(IN_DIM,), name='rows')
     towers = [tower(width, depth, temperature, name=f'tower_{i}')
               for i in range(members)]
@@ -160,14 +160,14 @@ THREADING_TAX = 4
 
 
 def configured(config: dict, seed: int):
-    """Exercise 1: build one closed Functional graph from a late config."""
+    """Builds one closed Functional graph from a late `config` for Exercise 1."""
     keras.utils.set_random_seed(seed)
     return committee(config['width'], config['depth'], config['members'],
                      config['temperature'])
 
 
 def fit(model, rows: np.ndarray, targets: np.ndarray) -> tuple:
-    """Keras's high-level path: compile the captured graph and fit it."""
+    """Compiles the captured Keras graph and fits it over `TRAIN_STEPS` epochs."""
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=LR),
         loss='mean_squared_error',
@@ -184,7 +184,7 @@ def fit(model, rows: np.ndarray, targets: np.ndarray) -> tuple:
 
 
 def retempered(model, temperature: float):
-    """Exercise 2: rewrite config, rebuild, then transfer compatible values."""
+    """Rewrites `Block` configs, clones the model, and transfers learned weights."""
     def rewrite(layer):
         if type(layer) is Ensemble:
             members = [
@@ -208,7 +208,7 @@ def retempered(model, temperature: float):
 
 
 def configuration(model) -> dict:
-    """Exercise 3: summarize facts read from Keras's model/layer configs."""
+    """Extracts structural hyperparameters from Keras model and layer configs."""
     ensemble = next(layer for layer in model.layers
                     if type(layer) is Ensemble)
     towers = ensemble.members

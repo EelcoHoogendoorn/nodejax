@@ -1,9 +1,6 @@
-"""Composable stateful computations for JAX.
+"""Public surface for composing and transforming functional stateful Nodes in JAX.
 
-``Node``, ``PNode``, and ``PSNode`` are the public unbound,
-parameter-bound, and state-bound views of one internal definition.  Authored
-functions are lowered once to a uniform contract; ready-made transforms then
-compose those contracts without exposing their storage machinery here.
+`Node`, `PNode`, and `PSNode` expose the unbound, parameter-bound, and state-bound views of a normalized internal definition (`Def`), paired with authoring helpers (`@node`, `Leaf`, `Composite`, `Wrapper`) and contract-preserving transforms.
 """
 
 from nodejax.struct import Struct

@@ -1,8 +1,16 @@
-"""Structure-first construction of ordinary definitions."""
+"""Multi-member `Composite` construction for authored and contract-level Nodes.
+
+`Composite(**members)` registers named child Nodes (or `Generic` blueprints)
+into a `Members` builder before attaching behavior. Calling `Members(step, ...)`
+lowers an authored `(self, ...)` or `(param, state, input)` step function, while
+`Members.roles(...)` and `Members(contract=...)` construct multi-member
+definitions directly from T3 role callables or T4 `ContractCalls`.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from typing import Callable
 
 from nodejax.core.contract import (
     ApplyCall, CallField, CallForm, Contract, ContractCalls, InitCall, ParamCall,
@@ -12,7 +20,8 @@ from nodejax.core.definition import Captures, Def, Layout
 from nodejax.frozendict import frozendict
 from nodejax.core.generic import Generic, is_generic
 from nodejax.core.lifting import _check_methods
-from nodejax.core.node import Node, _is_node, _view
+from nodejax.core.node import BaseNode, Node, _is_node, _view
+from nodejax.core.types import PyTree
 from nodejax.struct import Struct
 
 
@@ -26,16 +35,18 @@ def _construction_form(value: Struct, role: str) -> CallForm:
     return CallForm.from_values(value)
 
 
-def _member_roles(definitions: Struct, captures: Captures, apply, *,
-                  param=None, init=None, prime=None, name=None,
+def _member_roles(definitions: Struct, captures: Captures, apply: Callable, *,
+                  param=None, init=None, prime=None, name: str | None = None,
                   param_form: CallForm, state_form: CallForm,
-                  apply_fields=None, input_contract=None,
-                  input_spec=_DEFAULT, open: bool = False,
-                  requires_input=None,
-                  param_takes_rng=None, init_takes_rng=None,
-                  apply_takes_rng=None, tags=(),
-                  methods: Mapping = _EMPTY_MAPPING) -> Def:
-    """Lower bundle-based role functions for one named member structure."""
+                  apply_fields: tuple[str, ...] | None = None,
+                  input_contract: Contract | None = None,
+                  input_spec: PyTree = _DEFAULT, open: bool = False,
+                  requires_input: bool | None = None,
+                  param_takes_rng: bool | None = None,
+                  init_takes_rng: bool | None = None,
+                  apply_takes_rng: bool | None = None,
+                  tags: Iterable[str] = (),
+                  methods: Mapping[str, Callable] = _EMPTY_MAPPING) -> Def:
     from nodejax.core.binding import REQUIRED
 
     if apply is None:
@@ -125,8 +136,8 @@ def _member_roles(definitions: Struct, captures: Captures, apply, *,
     )
 
 
-def _promote_members(members: Mapping[str, object]):
-    """Split construction views into member definitions and explicit captures."""
+def _promote_members(members: Mapping[str, object]) -> tuple[Struct, Captures]:
+    """Separates member Node views into unbound `Def` records and bound `Captures`."""
     for name, member in members.items():
         if not _is_node(member):
             raise TypeError(
@@ -154,33 +165,37 @@ def _promote_members(members: Mapping[str, object]):
 
 
 class Members(Mapping):
-    """Named construction values waiting for behavior."""
+    """Holds named child Nodes declared via `Composite(**members)` prior to binding behavior."""
 
-    def __init__(self, members: dict):
+    def __init__(self, members: dict) -> None:
         self._members = Struct(**members)
 
-    def __getitem__(self, name):
+    def __getitem__(self, name: str):
         return self._members[name]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[str]:
         return iter(self._members.__keys__)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._members)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str):
         if name in self._members:
             return self._members[name]
         raise AttributeError(name)
 
-    def roles(self, apply, *, param=None, init=None, prime=None, name=None,
+    def roles(self, apply: Callable, *, param=None, init=None, prime=None,
+              name: str | None = None,
               param_input=_DEFAULT, state_input=_DEFAULT,
-              apply_fields=None, input_contract=None,
-              input_spec=_DEFAULT, open: bool = False,
-              requires_input=None,
-              param_takes_rng=None, init_takes_rng=None,
-              apply_takes_rng=None, tags=()):
-        """Build a composite from ordinary bundle-based role functions."""
+              apply_fields: tuple[str, ...] | None = None,
+              input_contract: Contract | None = None,
+              input_spec: PyTree = _DEFAULT, open: bool = False,
+              requires_input: bool | None = None,
+              param_takes_rng: bool | None = None,
+              init_takes_rng: bool | None = None,
+              apply_takes_rng: bool | None = None,
+              tags: Iterable[str] = ()) -> BaseNode | Generic:
+        """Builds a multi-member Node from T3 bundle-based role functions (`param`, `init`, `prime`, `apply`)."""
         members = dict(self._members.__items__)
         options = dict(
             param=param, init=init, prime=prime, name=name,
@@ -216,15 +231,18 @@ class Members(Mapping):
         )
 
     def _roles_with_forms(
-            self, apply, *, param=None, init=None, prime=None, name=None,
+            self, apply: Callable, *, param=None, init=None, prime=None,
+            name: str | None = None,
             param_form=_DEFAULT, state_form=_DEFAULT,
-            apply_fields=None, input_contract=None,
-            input_spec=_DEFAULT, open: bool = False,
-            requires_input=None,
-            param_takes_rng=None, init_takes_rng=None,
-            apply_takes_rng=None, tags=(),
-            methods: Mapping = _EMPTY_MAPPING):
-        """Build roles from canonical construction forms."""
+            apply_fields: tuple[str, ...] | None = None,
+            input_contract: Contract | None = None,
+            input_spec: PyTree = _DEFAULT, open: bool = False,
+            requires_input: bool | None = None,
+            param_takes_rng: bool | None = None,
+            init_takes_rng: bool | None = None,
+            apply_takes_rng: bool | None = None,
+            tags: Iterable[str] = (),
+            methods: Mapping[str, Callable] = _EMPTY_MAPPING) -> BaseNode | Generic:
         members = dict(self._members.__items__)
         role_options = dict(
             param=param, init=init, prime=prime, name=name,
@@ -274,10 +292,11 @@ class Members(Mapping):
 
         return _view(definition.copy(tree=bind))
 
-    def __call__(self, apply=None, *, param=None, init=None,
-                 apply_input_spec=None, name=None,
-                 methods: Mapping = _EMPTY_MAPPING,
-                 contract: ContractCalls | None = None):
+    def __call__(self, apply: Callable | None = None, *, param=None, init=None,
+                 apply_input_spec: PyTree = None, name: str | None = None,
+                 methods: Mapping[str, Callable] = _EMPTY_MAPPING,
+                 contract: ContractCalls | None = None) -> BaseNode | Generic:
+        """Attaches authored `apply` wiring or low-level `contract` calls to the declared members."""
         members = dict(self._members.__items__)
         methods = frozendict(methods)
         if any(is_generic(member) for member in members.values()):
@@ -318,7 +337,9 @@ class Members(Mapping):
 
 
 class _CompositeDoor:
-    def __call__(self, **members) -> Members:
+    """Declares named child Nodes (`Composite(a=..., b=...)`) and returns a `Members` builder."""
+
+    def __call__(self, **members: BaseNode | Generic) -> Members:
         return Members(members)
 
 
@@ -326,6 +347,7 @@ Composite = _CompositeDoor()
 
 
 def member_param_input(members: Struct, captures: Captures) -> CallForm:
+    """Builds the nested parameter-construction `CallForm` across `members` and `captures`."""
     empty = CallForm.from_values(Struct())
     return CallForm(Struct(**{
         name: (CallField.complete(captures.param[name])
@@ -337,6 +359,7 @@ def member_param_input(members: Struct, captures: Captures) -> CallForm:
 
 
 def member_state_input(members: Struct, captures: Captures) -> CallForm:
+    """Builds the nested state-construction `CallForm` across `members` and `captures`."""
     empty = CallForm.from_values(Struct())
     return CallForm(Struct(**{
         name: (CallField.complete(captures.state[name])

@@ -8,7 +8,6 @@ Run directly with `python -m examples.comparisons.tower.tower_nnx_reusable`.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -29,8 +28,9 @@ from examples.comparisons.tower.tower_common import (
 
 # Reusable transform machinery
 
+
 def stacked(make_module: Callable, n: int):
-    """Construct ``n`` independently initialized Modules on axis zero."""
+    """Constructs `n` independently initialized Modules on axis zero."""
     @nnx.split_rngs(splits=n)
     @nnx.vmap(in_axes=0, out_axes=0)
     def make(rngs):
@@ -40,7 +40,7 @@ def stacked(make_module: Callable, n: int):
 
 
 def scan_layers(cells, signal, carries):
-    """Feed a value through stacked recurrent cells."""
+    """Feeds a value through stacked recurrent cells."""
     @nnx.scan(in_axes=(0, nnx.Carry, 0), out_axes=(nnx.Carry, 0))
     def depth(cells, signal, carry):
         carry, output = cells(carry, signal)
@@ -50,7 +50,7 @@ def scan_layers(cells, signal, carries):
 
 
 def unroll(module, carry, inputs):
-    """Run one step Module over the leading input axis."""
+    """Runs one step Module over the leading input axis."""
     module_axes = nnx.StateAxes({nnx.Param: None, ...: nnx.Carry})
 
     @nnx.scan(
@@ -69,9 +69,9 @@ def maml_fit(
     inner_lr: float,
     meta_opt,
     meta_steps: int,
-    tasks: Any,
+    tasks: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
 ):
-    """Adapt cloned Modules per task and train the shared initialization."""
+    """Adapts cloned Modules per task and trains the shared initialization."""
     support_inputs, support_targets, query_inputs, query_targets = tasks
     adapt_axes = nnx.StateAxes({...: nnx.Carry})
     optimizer_axes = nnx.StateAxes({...: nnx.Carry})

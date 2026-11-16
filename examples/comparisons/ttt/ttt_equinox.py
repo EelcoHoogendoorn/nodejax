@@ -30,7 +30,7 @@ def query_xent(preds: jax.Array, target: jax.Array) -> jax.Array:
 
 
 class MLP(eqx.Module):
-    """Stateless token predictor (`token -> logits`)."""
+    """Predicts next-token logits from a single token (`token -> logits`)."""
 
     embed: jax.Array
     w: jax.Array
@@ -47,7 +47,7 @@ class MLP(eqx.Module):
 
 
 class RNN(eqx.Module):
-    """Recurrent token predictor (`(carry, token) -> (carry, logits)`)."""
+    """Predicts next-token logits with explicit carry (`(carry, token) -> (carry, logits)`)."""
 
     embed: jax.Array
     wh: jax.Array
@@ -68,7 +68,7 @@ class RNN(eqx.Module):
 
 
 class TTT(eqx.Module):
-    """Reusable online gradient-adaptation wrapper over unary or carry-based Equinox modules."""
+    """Wraps unary or carry-based Equinox modules in online gradient adaptation."""
 
     model: eqx.Module
     rates: eqx.Module

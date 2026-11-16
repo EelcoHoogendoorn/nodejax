@@ -1,21 +1,6 @@
-"""A composable FOC/PMSM actuator simulation.
+"""Models a composable field-oriented-control (FOC) permanent-magnet synchronous motor (PMSM) actuator.
 
-The actuator is a stack of stateful blocks: bus-voltage estimation ->
-command controller -> current controller (model-based current
-estimation, one DQ PID, per-term voltage feedforward, thermal rollback)
--> electrical motor. Mechanical state and the true bus voltage are
-inputs, integrated and supplied at the environment level, where the
-battery lives so that one pack can feed several stacks; the stack reports
-the power it draws for that pack to account. Every quantity the
-controller consumes is estimated through sensor models while the physics
-runs on truth.
-BenchMotor composes the same electrical motor with the mechanism
-for open-loop physics work: cogging and hysteresis live with the
-motor, stiction with the mechanism.
-
-Capitalized names are units: a node that owns params or state, called to
-get one. Lowercase names are pure of both, either a transform over nodes
-or a node that is a plain function of its input.
+Composes encoder and observer sensing, outer command control, `DQ`-frame current control with model-based current estimation, voltage feedforward, thermal derating, and electrical motor physics. Mechanical state and battery bus voltage enter as external environment inputs so one `Battery` pack can power multiple `ActuatorStack` instances; `BenchMotor` pairs `Electrical` and `Mechanical` directly for open-loop characterization.
 """
 
 from examples.actuator.dq import DQ

@@ -1,10 +1,16 @@
-"""Public leaf authoring lowered into complete definitions."""
+"""Leaf Node authoring (`Leaf`) and disjoint leaf extension (`derive`).
+
+`Leaf` compiles plain Python `param`, `init`, and `apply` functions into a
+`Def`, returning a `Node` when `param` is supplied and a parameterless `PNode`
+otherwise. `derive` extends an existing leaf `Def` by merging disjoint `Struct`
+parameter or state constructors and optionally replacing `apply` or methods.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import Any, Callable
+from typing import Callable
 
 from nodejax.core.contract import (
     ApplyCall, CallForm, ContractCalls, InitCall, ParamCall,
@@ -25,7 +31,6 @@ _EMPTY_MAPPING = frozendict()
 
 def _combined_form(parent: CallForm, child: CallForm,
                    role: str) -> CallForm:
-    """Combine two constructor inputs without guessing their structure."""
     collisions = set(parent.fields.__keys__) & set(child.fields.__keys__)
     if collisions:
         raise TypeError(
@@ -38,14 +43,12 @@ def _combined_form(parent: CallForm, child: CallForm,
 
 
 def _constructor_input(form: CallForm, formed_input: Struct) -> Struct:
-    """Project a combined constructor input onto one declared call form."""
     return Struct(**{
         name: formed_input[name] for name in form.fields.__keys__
     })
 
 
 def _merged_struct(parent: Struct, child: Struct, role: str) -> Struct:
-    """Shallowly merge two disjoint constructor result fragments."""
     if (not issubclass(type(parent), Struct)
             or not issubclass(type(child), Struct)):
         raise TypeError(
@@ -62,7 +65,6 @@ def _merged_struct(parent: Struct, child: Struct, role: str) -> Struct:
 
 
 def _merge_param_calls(parent: ParamCall, child: ParamCall) -> ParamCall:
-    """Lower two parameter constructors into one canonical call."""
     form = _combined_form(parent.form, child.form, 'param')
 
     def impl(definition, formed_input, rng):
@@ -88,7 +90,6 @@ def _merge_param_calls(parent: ParamCall, child: ParamCall) -> ParamCall:
 
 def _run_init(call: InitCall, definition: Def, param,
               formed_input: Struct, rng) -> PyTree:
-    """Invoke one non-priming initializer with its declared inputs."""
     values = _constructor_input(call.form, formed_input)
     return call.impl(
         definition, param, values, rng.child(call.takes_rng))
@@ -96,7 +97,6 @@ def _run_init(call: InitCall, definition: Def, param,
 
 def _run_prime(call: InitCall, definition: Def, param,
                formed_input: Struct, input, rng) -> PyTree:
-    """Invoke one initializer while a real input is available."""
     values = _constructor_input(call.form, formed_input)
     child_rng = rng.child(call.takes_rng)
     if call.requires_input:
@@ -105,7 +105,6 @@ def _run_prime(call: InitCall, definition: Def, param,
 
 
 def _merge_init_calls(parent: InitCall, child: InitCall) -> InitCall:
-    """Lower two state constructors into one canonical call."""
     form = _combined_form(parent.form, child.form, 'state')
     requires_input = parent.requires_input or child.requires_input
 
@@ -134,7 +133,7 @@ def _merge_init_calls(parent: InitCall, child: InitCall) -> InitCall:
 
 
 def _preserve_derived_state(call: ApplyCall) -> ApplyCall:
-    """Overlay an inherited transition onto the complete derived state."""
+    """Overlays an inherited step's returned `Struct` state fragment onto the merged state."""
     def impl(definition, param, state, formed_input, rng):
         if not issubclass(type(state), Struct):
             raise TypeError('an inherited transition requires Struct state')
@@ -154,7 +153,7 @@ def _preserve_derived_state(call: ApplyCall) -> ApplyCall:
 
 
 def _complete_derived_state(call: ApplyCall) -> ApplyCall:
-    """Require an overridden transition to return the complete state."""
+    """Checks that an overridden step over merged `Struct` state returns every state field."""
     def impl(definition, param, state, formed_input, rng):
         next_state, output = call.impl(
             definition, param, state, formed_input, rng)
@@ -175,10 +174,15 @@ def _complete_derived_state(call: ApplyCall) -> ApplyCall:
 
 
 def Leaf(apply: Callable | None = None, *, param=None, init=None,
-         name: str | None = None, apply_input_spec: Any = None,
+         name: str | None = None, apply_input_spec: PyTree = None,
          methods: Mapping[str, Callable] = _EMPTY_MAPPING,
-         tags=(), boundary: Mapping = _EMPTY_MAPPING):
-    """Lower authored functions; constructor presence defines owned roles."""
+         tags: Iterable[str] = (),
+         boundary: Mapping[str, Callable] = _EMPTY_MAPPING) -> Node | PNode | Callable:
+    """Builds an atomic leaf Node from `apply` and optional `param` and `init` callables.
+
+    Returns a `Node` when `param` is provided, a `PNode` when `param` is `None`,
+    or a decorator when called with `apply=None`.
+    """
     if apply is None:
         return partial(
             Leaf, param=param, init=init, name=name,
@@ -217,14 +221,14 @@ def Leaf(apply: Callable | None = None, *, param=None, init=None,
 
 def derive(parent: BaseNode, *, apply: Callable | None = None,
            init: Callable | None = None, param: Callable | None = None,
-           name: str | None = None, apply_input_spec: Any = None,
+           name: str | None = None, apply_input_spec: PyTree = None,
            methods: Mapping[str, Callable] = _EMPTY_MAPPING,
-           tags=None):
-    """Extend a leaf with disjoint Struct constructor fragments.
+           tags: Iterable[str] | None = None) -> Node | PNode:
+    """Extends an unbound leaf Node by merging disjoint `Struct` constructor fragments.
 
-    An omitted constructor is inherited. If both parent and child define one
-    role, their input names and returned Struct fields must be disjoint. Apply
-    and methods may replace inherited behavior; tags form a union.
+    Omitted roles are inherited from `parent`; when both `parent` and `derive`
+    supply `param` or `init`, their constructor argument names and returned
+    `Struct` fields must be disjoint.
     """
     if not _is_node(parent):
         raise TypeError('derive expects a Node view')

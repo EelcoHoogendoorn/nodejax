@@ -1,7 +1,10 @@
+"""Field-wise parallel `Composite` dispatch (`parallel`) over `Struct` inputs."""
+
 from __future__ import annotations
 
 from nodejax.core.composite import Composite
 from nodejax.core.generic import Generic, is_generic
+from nodejax.core.node import BaseNode
 from nodejax.struct import Struct
 
 
@@ -12,8 +15,8 @@ def _name(names) -> str:
     return '(' + _SEP.join(names) + ')'
 
 
-def parallel(**members):
-    """Apply named members to matching fields of one Struct input."""
+def parallel(**members: BaseNode | Generic) -> BaseNode | Generic:
+    """Dispatches matching fields of a `Struct` input across named `members` and returns a `Struct` of their outputs."""
     if not members:
         raise TypeError('parallel needs at least one member')
     if any(is_generic(member) for member in members.values()):

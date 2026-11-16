@@ -21,7 +21,7 @@ from examples.comparisons.generics.generics_common import (
 
 @node
 def Block(temperature: float) -> Node:
-    """Same-width linear projection followed by temperature-scaled `tanh`."""
+    """Applies a same-width linear projection followed by temperature-scaled `tanh`."""
     def param(node, rng: KeyStream) -> Struct:
         width = node.input.shape[-1]
         return Struct(
@@ -36,7 +36,7 @@ def Block(temperature: float) -> Node:
 
 
 def committee() -> Node:
-    """Assemble the generic committee with all four hyperparameters left unbound."""
+    """Assembles the generic committee with all four hyperparameters left unbound."""
     tower = serial(entry=nn.Linear(), blocks=stack(Block()), readout=nn.Linear(1))
     return ensemble(tower) >> reduce(jnp.mean)
 

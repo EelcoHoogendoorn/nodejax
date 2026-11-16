@@ -1,4 +1,4 @@
-"""Definition rewrites and state-tree selection."""
+"""Bottom-up definition rewriting (`map_members`) and state-subtree filtering (`tree_filter`)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from nodejax.struct import Struct
 
 
 def map_members(node, fn: Callable) -> Node:
-    """Rewrite a Node tree bottom-up, rebuilding each parent from its members."""
+    """Rewrites an unbound `Node` tree bottom-up by applying `fn` to every rebuilt `Node`."""
     if not _is_node(node) or node.bound:
         raise TypeError(
             'map_members rewrites definitions; use bound.node explicitly '
@@ -29,7 +29,7 @@ def map_members(node, fn: Callable) -> Node:
 
 
 def tree_filter(state, name: str | Callable) -> Struct:
-    """Select state beneath member names matched by a string or predicate."""
+    """Extracts the sparse `Struct` of `state` subtrees whose member keys match `name`."""
     match = (lambda member: name in member) if type(name) is str else name
 
     def prune(state: Struct) -> Struct:

@@ -1,7 +1,6 @@
-"""Type vocabulary for the core.
+"""Defines core type aliases for PyTree roles, lifecycle callables, and static dictionaries.
 
-All four data roles are plain pytrees; the aliases document intent, not
-structure. The three function types state the contract once.
+`Param`, `State`, `Input`, and `Output` are semantic aliases for `PyTree` that record which role an argument or return value occupies in the Node contract.
 """
 
 from __future__ import annotations
@@ -16,9 +15,9 @@ State = PyTree
 Input = PyTree
 Output = PyTree
 
-ParamFn = Callable[..., Param]                            # (*args, **kwargs) -> param
-InitFn = Callable[..., State]                             # (param, *args, **kwargs) -> state
+ParamFn = Callable[..., Param]
+InitFn = Callable[..., State]
 ApplyFn = Callable[[Param, State, Input], tuple[State, Output]]
-LossFn = Callable[..., jax.Array]                         # (output, target[, aux]) -> loss
+LossFn = Callable[..., jax.Array]
 
-StaticTree = dict[str, Any]  # nested static kwargs, keyed by pipe member name
+StaticTree = dict[str, Any]

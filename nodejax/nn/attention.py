@@ -1,4 +1,4 @@
-"""Attention and Transformer block primitives."""
+"""Defines multi-head self-attention, position embeddings, and pre-norm Transformer blocks."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.core.node import Node
+from nodejax.core.pnode import PNode
 from nodejax.struct import Struct
 from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
@@ -16,15 +17,14 @@ from nodejax.nn.mlp import MLP
 
 
 @node
-def tokens():
-    """(H, W, C) feature map -> (H*W, C) token sequence."""
+def tokens() -> PNode:
+    """Flattens spatial axes of a `(H, W, C)` feature map into a `(H * W, C)` token sequence."""
     return Leaf(lambda input: input.reshape(-1, input.shape[-1]))
 
 
 @node(name='pos')
-def PosEmbed():
-    """Learned position embedding; the whole (T, width) shape from
-    the resolved input spec."""
+def PosEmbed() -> Node:
+    """Adds a learned `(tokens, width)` position embedding sized from `node.input.shape`."""
     def param(node, rng) -> Struct:
         return Struct(embed=0.02 * jax.random.normal(rng.next(), node.input.shape))
 
@@ -36,11 +36,9 @@ def PosEmbed():
 
 @node(name='attn')
 def Attention(heads: int, causal: bool = False) -> Node:
-    """Multi-head self-attention over one `(tokens, width)` sequence.
+    """Computes multi-head self-attention over one `(tokens, width)` sequence.
 
-    Width comes from the resolved input spec and is split evenly over the
-    heads. With `causal=True`, each token attends only to itself and earlier
-    tokens. The result preserves the input shape.
+    Splits `node.input.shape[-1]` evenly across `heads` and preserves the input shape. Setting `causal=True` masks positions ahead of each query token.
     """
     def param(node, rng) -> Struct:
         width = node.input.shape[-1]
@@ -69,10 +67,9 @@ def Attention(heads: int, causal: bool = False) -> Node:
 @node
 def TransformerBlock(width: int, heads: int, ratio: int,
                      causal: bool = False) -> Node:
-    """Width-preserving pre-norm transformer block.
+    """Applies pre-norm multi-head self-attention followed by a pre-norm MLP, each wrapped in a residual skip.
 
-    `causal` configures the attention member. The block remains suitable for
-    `stack` because both residual branches preserve width.
+    Both residual branches preserve `width`, making the block directly compatible with `stack` and `repeat`.
     """
     return serial(
         attn=residual(LayerNorm() >> Attention(heads, causal=causal)),

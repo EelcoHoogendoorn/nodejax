@@ -1,3 +1,14 @@
+"""Data-parallel `batch` and single-sample `unbatched` axis transforms.
+
+`batch` maps a single-sample `Node` across a leading input axis via `jax.vmap`
+while broadcasting shared parameters, tiling or per-row initializing state, and
+binding a named axis (`'batch'` by default) so members such as `BatchNorm` can
+run JAX collectives across the batch. Members carrying the
+`'single_batch_state'` tag keep one unmapped state shared across all batch
+elements. `unbatched` provides the inverse size-1 named-axis frame so a Node
+that expects a named `'batch'` axis can run on a single unbatched sample.
+"""
+
 from __future__ import annotations
 
 import jax
@@ -5,21 +16,19 @@ import jax.numpy as jnp
 
 from nodejax.core.contract import Contract
 from nodejax.core.node import Node
-from nodejax.core.spec import element_spec, add_axis, axis_count
-from nodejax.struct import Struct
-from nodejax.tree import tree_first
-from nodejax.transforms.transform import transform, vmap_apply, vmap_prime
+from nodejax.core.spec import add_axis, axis_count, element_spec
 from nodejax.core.wrapper import Wrapper
+from nodejax.struct import Struct
+from nodejax.transforms.transform import transform, vmap_apply, vmap_prime
+from nodejax.tree import tree_first
 
 
 def _state_axes(inner: Contract):
-    """Map ordinary state and broadcast ``single_batch_state`` members."""
     return inner.state_tree(
         lambda member: None if 'single_batch_state' in member.tags else 0)
 
 
 def _batched_states(inner: Contract, single_state, count: int):
-    """Tile state rows while retaining explicitly shared state."""
     def split_or_tile(tree):
         if type(tree) is Struct:
             return Struct(**{
@@ -42,21 +51,16 @@ def _batched_states(inner: Contract, single_state, count: int):
 @transform(preserves='param')
 def batch(sample: Node, n: int | None = None,
           axis: str = 'batch') -> Node:
-    """vmap over the input axis: params broadcast, input/output/state batched.
+    """Maps `sample` across leading input axis 0 with shared parameters and per-element state.
 
-    Type-preserving; accepts nodes and bound nodes (param meaning unchanged).
-    For cyclic nodes the per-element state is tiled to the batch size: read
-    from the bound batched input shape, or from the static n=<batch size>
-    here when the node inits without a shape (a shape-free, constant state).
-
-    The vmap axis is named ``batch`` by default, so members can use JAX
-    collectives over it. Nodes tagged with
-    'single_batch_state' retain a single unbatched state across the batch.
+    Unlike `ensemble`, `batch` preserves the parameter tree unchanged
+    (`preserves='param'`). Cyclic state acquires a leading batch axis read from
+    bound batched input shapes or static `n`, except on members tagged
+    `'single_batch_state'`, which broadcast in and return unmapped along the
+    named `vmap` axis `axis`.
     """
     def apply_fn(contract, param, state, input, rng):
-        """State axes are both in_axes and out_axes: a 'single_batch_state'
-        member broadcasts in and comes back unmapped, no slicing after
-        the fact."""
+        # Shared `'single_batch_state'` leaves use `None` in both `in_axes` and `out_axes`.
         inner = contract.members.sample
         state_axes = _state_axes(inner)
         return vmap_apply(
@@ -65,7 +69,6 @@ def batch(sample: Node, n: int | None = None,
             axis_name=axis)
 
     def init_context(contract):
-        """Resolve the sample shape and the batch extent at this boundary."""
         inner = contract.members.sample
         batched = contract.input_spec
         rows = axis_count(batched)
@@ -83,9 +86,7 @@ def batch(sample: Node, n: int | None = None,
         return inner, element_shape, count
 
     def init_fn(contract, param, state_input, rng):
-        """One state per element. State inputs carry the batch axis and a
-        random init draws per element, as prime does; an init with neither
-        builds one state and tiles it."""
+        # Deterministic empty-bundle init builds one state and tiles it; otherwise `vmap` runs per row.
         inner, element_shape, count = init_context(contract)
         current = (inner if element_shape is None else
                    inner._resolve_def(
@@ -111,7 +112,6 @@ def batch(sample: Node, n: int | None = None,
             state_axis=_state_axes(inner), axis_name=axis)
 
     def param_fn(contract, param_input, rng):
-        """Parameterize one shared sample tree while binding the batch axis."""
         inner = contract.members.sample
         batched = contract.input_spec
         current = (inner if batched is None else
@@ -130,7 +130,7 @@ def batch(sample: Node, n: int | None = None,
     batched = add_axis(sample.contract.input_spec, n)
     return Wrapper(sample=sample).roles(
         name=f'batch({sample.name})',
-        destructurable_state=False,   # state tiles per element; params stay flat
+        destructurable_state=False,
         param=param_fn,
         init=init_fn,
         prime=prime_fn,
@@ -141,10 +141,11 @@ def batch(sample: Node, n: int | None = None,
 
 @transform(preserves='param')
 def unbatched(inner: Node, axis: str = 'batch') -> Node:
-    """Run one sample while binding the named axis at size one.
+    """Evaluates `inner` on a single unbatched sample inside a size-1 named `vmap` frame `axis`.
 
-    The temporary axis is added before the inner call and removed from its
-    state and output afterward.
+    Inserts a temporary leading axis of length 1 before calling `inner` and
+    strips that axis from the resulting state and output afterward so
+    collective-aware Nodes (`BatchNorm`) work on unbatched inputs.
     """
     def lead(tree):
         return jax.tree.map(lambda value: jnp.asarray(value)[None], tree)

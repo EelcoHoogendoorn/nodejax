@@ -1,29 +1,23 @@
-"""A cyclic replay buffer as an ordinary stateful Node.
+"""Implements a cyclic replay buffer as a stateful Node.
 
-The buffer's state is a tiling of the row pytree it is fed, a write
-cursor, and a fill count. Insertion is the apply: one call writes a whole
-segment of rows at the cursor and wraps around at capacity. ``sample`` is a
-method drawing a uniform minibatch from the filled rows. Because the buffer
-is ordinary Node state, it shares one carry with the optimizers and targets
-of its program, and one jitted apply owns collection, storage, and updates
-alike.
+Stores a fixed-capacity ring buffer of row pytrees alongside a write cursor and
+fill count. Each `apply` call writes a segment of rows at the cursor and wraps
+around at capacity, while `sample` draws a uniform minibatch from the filled
+rows within the same carried state as optimizers and target networks.
 """
 
 import jax
 import jax.numpy as jnp
 
-from nodejax import Leaf, Node, PyTree, Struct, node, tree_len
+from nodejax import Leaf, PNode, PyTree, Struct, node, tree_len
 
 
 @node
-def Buffer(capacity: int) -> Node:
-    """A cyclic store of ``capacity`` rows shaped like one row of what is
-    inserted, which the declared input spec says.
+def Buffer(capacity: int) -> PNode:
+    """Maintains a cyclic replay store of `capacity` rows shaped like one row of its input segment.
 
-    Apply inserts a segment whose leading axis counts rows and overwrites
-    the oldest rows once full. ``sample(count, rng=...)`` gathers ``count``
-    filled rows uniformly with replacement. Inside one enclosing apply, a
-    sample after an insert sees the inserted rows.
+    Inserts a leading-axis row segment on `apply`, overwriting the oldest rows once
+    full, and gathers `count` filled rows uniformly with replacement via `sample`.
     """
 
     def init(node):

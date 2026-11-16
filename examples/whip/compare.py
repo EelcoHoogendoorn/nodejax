@@ -1,10 +1,4 @@
-"""SHAC and PPO on the same whip, on one axis.
-
-The differentiable learner gets a gradient through the motor's current
-loops, the encoder's rounding, and the rope's constraint projection. The
-gradient-free one gets returns. Same plant, same policy body, same
-evaluation.
-"""
+"""Trains and evaluates SHAC and PPO side-by-side on the motor-driven whip plant."""
 
 import jax
 

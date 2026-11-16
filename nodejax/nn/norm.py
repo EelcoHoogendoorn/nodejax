@@ -1,4 +1,4 @@
-"""Normalization layer blocks."""
+"""Defines feature normalization and ZCA whitening Leaf factories."""
 
 from __future__ import annotations
 
@@ -6,29 +6,17 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.core.node import Node
+from nodejax.core.pnode import PNode
 from nodejax.struct import Struct
 from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
 
 
 @node(name='norm')
-def LayerNorm(eps: float = 1e-5):
-    r"""Layer normalization over the last (feature) axis.
+def LayerNorm(eps: float = 1e-5) -> Node:
+    """Normalizes activations across the trailing feature axis with learned `scale` and `bias`.
 
-    Normalizes activations across feature channels and scales with learnable
-    parameters `scale` and `bias`:
-        y = ((x - mean(x)) / sqrt(var(x) + eps)) * scale + bias
-
-    Parameters
-    ----------
-    eps : float, default=1e-5
-        Small constant added to variance for numerical stability.
-
-    Design Philosophy
-    -----------------
-    LayerNorm is stateless and parameter-only. Feature width is inferred
-    automatically from the resolved input specification (`node.input.shape[-1]`)
-    during parameterization, requiring no explicit channel dimension at construction.
+    Infers the feature width from `node.input.shape[-1]` and computes `((input - mean) / sqrt(var + eps)) * scale + bias`.
     """
     def param(node) -> Struct:
         width = node.input.shape[-1]
@@ -44,11 +32,9 @@ def LayerNorm(eps: float = 1e-5):
 
 @node
 def RMSNorm(eps: float = 1e-6) -> Node:
-    """Root mean square normalization over the last axis.
+    """Scales activations by their root mean square along the trailing axis with a learned `scale`.
 
-    Feature width comes from the resolved input spec. The learned scale is
-    the only parameter; RMS normalization does not center its input or add a
-    learned bias.
+    Infers the feature width from `node.input.shape[-1]` without centering or adding a bias term.
     """
     def param(node) -> Struct:
         width = node.input.shape[-1]
@@ -62,8 +48,8 @@ def RMSNorm(eps: float = 1e-6) -> Node:
 
 
 @node(name='l2norm')
-def L2Norm(eps: float = 1e-8) -> Node:
-    """Scale vectors on the last axis to unit Euclidean norm."""
+def L2Norm(eps: float = 1e-8) -> PNode:
+    """Divides vectors along the trailing axis by their Euclidean norm plus `eps`."""
     def apply(input) -> jax.Array:
         norm = jnp.linalg.norm(input, axis=-1, keepdims=True)
         return input / (norm + eps)
@@ -71,15 +57,19 @@ def L2Norm(eps: float = 1e-8) -> Node:
     return Leaf(apply)
 
 
-def _reduction_axes(axis) -> tuple[tuple, tuple]:
-    """Split a reduction spec into collective names and positional axes."""
+def _reduction_axes(
+        axis: str | int | tuple[str | int, ...],
+) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    """Splits an axis specification into collective axis names and positional sample axes."""
     axes = axis if type(axis) is tuple else (axis,)
     return (tuple(a for a in axes if type(a) is str),
             tuple(a for a in axes if type(a) is int))
 
 
-def _leading_axes(positional: tuple, sample: tuple, who: str) -> tuple:
-    """Resolve positional reduction axes; only leading sample axes qualify."""
+def _leading_axes(
+        positional: tuple[int, ...], sample: tuple[int, ...], who: str,
+) -> tuple[int, ...]:
+    """Resolves positional reduction axes against `sample` and rejects reducing the trailing feature axis."""
     rank = len(sample)
     resolved = tuple(a if a >= 0 else a + rank for a in positional)
     for index in resolved:
@@ -91,8 +81,10 @@ def _leading_axes(positional: tuple, sample: tuple, who: str) -> tuple:
     return resolved
 
 
-def _statistics_shape(sample: tuple, reduced: tuple) -> tuple:
-    """The sample shape with the reduced axes kept at extent one."""
+def _statistics_shape(
+        sample: tuple[int, ...], reduced: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Replaces each axis index in `reduced` with extent `1` inside `sample`."""
     kept = set(reduced)
     return tuple(1 if index in kept else extent
                  for index, extent in enumerate(sample))
@@ -100,63 +92,11 @@ def _statistics_shape(sample: tuple, reduced: tuple) -> tuple:
 
 @node
 def BatchNorm(momentum: float, eps: float = 1e-5,
-              axis: str | int | tuple = 'batch',
-              train: bool = True):
-    r"""Batch normalization over a named batch axis with running statistics.
+              axis: str | int | tuple[str | int, ...] = 'batch',
+              train: bool = True) -> Node:
+    """Normalizes per-sample activations by running moments pooled over `axis` and scales by `gamma` and `beta`.
 
-    Normalizes features by running moments and scales with learnable parameters:
-        y = ((x - running_mean) / sqrt(running_var + eps)) * gamma + beta
-
-    In training mode (`train=True`), computes batch moments across `axis` using
-    `lax.pmean` and updates running statistics via exponential moving average.
-    In eval mode (`train=False`), running statistics are held constant.
-
-    Parameters
-    ----------
-    momentum : float
-        EMA factor for updating running mean and variance.
-    eps : float, default=1e-5
-        Constant added to variance for numerical stability.
-    axis : str, int, or tuple of these, default='batch'
-        Axes over which batch moments are pooled. A name reaches across the
-        enclosing map that binds it; an int selects a leading axis of the
-        sample itself.
-    train : bool, default=True
-        Whether to compute batch moments and update running statistics.
-
-    Design Philosophy
-    -----------------
-    In conventional frameworks, batch normalization is awkward because it mixes
-    per-sample computation with cross-sample reductions and mutable mode switches
-    like `model.eval()`.
-
-    In NodeJAX:
-    - BatchNorm and the `batch()` transform are natural pairs: BatchNorm is authored
-      strictly per-sample, declaring its collective reduction over a named axis
-      (`axis='batch'`). An enclosing `batch()` transform introduces and binds this
-      exact named axis during vectorized execution.
-    - Because every sample in the batch computes the same pooled moments via
-      `lax.pmean(..., axis)`, the per-sample running state updates remain synchronized
-      without needing special-case state containers.
-    - `train` is a static constructor argument rather than mutable state.
-      Switching a trained model to evaluation mode is done functionally by
-      rebuilding the tree via `model.specialize(**{'*.train': False})`.
-
-    Statistics reduce over exactly the listed axes. A name reaches across
-    the enclosing map that binds it; an int selects a leading axis of the
-    sample itself and stays in the running statistics at extent one. What
-    is not listed is not pooled: unlisted leading axes keep one running
-    moment per position, with state bound to the extents it was
-    initialized for. Naming an axis the moments do not pool fails loudly
-    at trace time: the shared running state is only consistent across
-    pooled axes.
-
-    Over sequences, for example, these spellings are the published
-    treatments: per-position statistics under a plain `batch()` is
-    recurrent batch normalization (Cooijmans et al. 2017), while listing
-    the time axis, `axis=('batch', 0)`, pools it and matches torch's
-    BatchNorm1d over (N, C, L), as does binding it to a name with an inner
-    `batch(norm, axis='stream')` and listing that name.
+    Authored per sample with tags `'single_batch_state'` and `'running_stats'`. String entries in `axis` pool across enclosing `batch` maps via `jax.lax.pmean`; integer entries pool leading positional axes of the sample and keep them at extent `1` in the running state, while unlisted leading axes keep separate statistics per position. When `train=True`, updates `state.mean` and `state.var` with exponential factor `momentum`; when `train=False`, reads the stored moments without updating them.
     """
     def param(node) -> Struct:
         width = node.input.shape[-1]
@@ -192,42 +132,11 @@ def BatchNorm(momentum: float, eps: float = 1e-5,
 
 @node
 def Whiten(momentum: float = 0.1, eps: float = 1e-2,
-           axis: str | int | tuple = 'batch',
-           train: bool = True):
-    r"""ZCA input whitening over a named batch axis with running statistics.
+           axis: str | int | tuple[str | int, ...] = 'batch',
+           train: bool = True) -> PNode:
+    """Decorrelates trailing features via ZCA whitening `(input - mean) @ inv_sqrt_cov` over `axis`.
 
-    Decorrelates features using the running mean and inverse matrix square root
-    of the running covariance:
-        y = (x - running_mean) @ inv_sqrt_cov
-
-    In training mode (`train=True`), computes batch covariance across `axis` using
-    `lax.pmean` and updates running mean and covariance via exponential moving average.
-    In eval mode (`train=False`), running statistics are held constant.
-
-    Parameters
-    ----------
-    momentum : float, default=0.1
-        EMA factor for updating running mean and covariance.
-    eps : float, default=1e-2
-        Small ridge regularization constant added to eigenvalues before inversion.
-    axis : str, int, or tuple of these, default='batch'
-        Axes over which batch moments are pooled. A name reaches across the
-        enclosing map that binds it; an int selects a leading axis of the
-        sample itself.
-    train : bool, default=True
-        Whether to compute batch moments and update running statistics.
-
-    Design Philosophy
-    -----------------
-    Like `BatchNorm`, `Whiten` is authored strictly per-sample and paired with
-    the `batch()` transform. Batch covariance is computed collectively via
-    `lax.pmean` across `axis='batch'`, updating pure functional running state
-    identically across the batch without mutable global state.
-
-    As with `BatchNorm`, moments reduce over exactly the listed axes: a
-    name reaches across the enclosing map that binds it, an int selects a
-    leading axis of the sample itself and stays in the running moments at
-    extent one, and unlisted leading axes keep one moment per position.
+    Authored per sample with tags `'single_batch_state'` and `'running_stats'`, following the same named and positional reduction rules as `BatchNorm`. Regularizes eigenvalues of `state.cov` by `eps` before inversion, updates `state.mean` and `state.cov` via `jax.lax.pmean` with factor `momentum` when `train=True`, and holds running statistics fixed when `train=False`.
     """
     names, positional = _reduction_axes(axis)
 

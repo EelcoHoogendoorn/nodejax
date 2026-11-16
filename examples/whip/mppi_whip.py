@@ -1,17 +1,12 @@
-"""Train a terminal critic for MPPI on the whip, the planner beside the two
-learned policies.
+"""Trains a terminal value critic and evaluates receding-horizon MPPI planning on the whip plant."""
 
-MPPI plans through the plant's own model from the plant's true state, so
-it is the privileged controller here: no policy network, only a critic
-that learns what a state is worth past the planning horizon. The plant,
-the critic, and the evaluation are the ones the policies use.
-"""
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import Leaf, Node, PNode, Struct, carried, node, serial, tree_broadcast_axis
+from nodejax import BaseNode, Leaf, Node, PNode, Struct, carried, node, serial, tree_broadcast_axis
 from nodejax import nn
 from examples.rl import control
 from examples.rl.mppi import mppi_controller, mppi_iteration, mppi_training
@@ -30,21 +25,16 @@ from examples.whip.whip import N_LINKS, whip_plant
 
 DISCOUNT = 0.98
 TRACE = 0.95
-NOISE_SCALE = 20.0  # rad/s on the setpoint, the plant's own unit
+NOISE_SCALE = 20.0  # rad/s on the velocity setpoint
 NOISE_CORRELATION = 0.9
-TEMPERATURE = 30.0  # candidate costs are summed tip energies in the hundreds
+TEMPERATURE = 30.0
 
 N_ITERATIONS = 40
 N_TRAINING_WORLDS = 16
 N_TRAINING_REFINEMENTS = 1
 N_TRAINING_CANDIDATES = 16
-N_STEPS_PER_PLAN = 10  # a tenth of a second of policy steps
-# An iteration runs each world for a second and a half, the evaluation's length: at half a
-# second the far starts never reached a target, the critic learned that far was worthless, and
-# the planner had nothing to travel toward.
+N_STEPS_PER_PLAN = 10
 N_STEPS_PER_ITERATION = 150
-# Critic fits per iteration: the planning rollouts cost far more than a fit, and at four the
-# critic never converged on the whip.
 N_CRITIC_UPDATES = 96
 EMA_CRITIC_DECAY = 0.95
 CRITIC_RATE = 1e-3
@@ -54,15 +44,14 @@ N_EVALUATION_REFINEMENTS = 2
 
 
 def whip_mppi_controller(
-    critic: Node | PNode,
+    critic: BaseNode,
     plant: PNode,
     *,
     n_candidates: int,
     n_refinements: int,
     n_steps_per_plan: int,
-) -> Node:
-    """The receding MPPI controller with the whip's command shape and noise;
-    the setpoint is unbounded, so no projection cleans the plans."""
+) -> Node | PNode:
+    """Builds a receding-horizon MPPI controller for `plant` with unbounded `(N_LINKS,)` velocity setpoints."""
     return mppi_controller(
         critic,
         plant,
@@ -81,12 +70,9 @@ def whip_mppi_controller(
 @node
 def WhipPlanningStarts(
     plant: PNode, n_iterations: int, n_worlds: int, n_steps_per_iteration: int,
-) -> Node:
-    """Random starts of ``plant``, a rope at rest and a target, per
-    (iteration, world), repeated across time since the step consumes one
-    only when a run begins, and zero disturbances shaped (iteration, world,
-    time)."""
-    def apply(rng):
+) -> PNode:
+    """Samples random `(n_iterations, n_worlds)` whip starts broadcast across `n_steps_per_iteration` with zero disturbances."""
+    def apply(rng) -> Struct:
         starts = random_starts(plant, rng.next(), (n_iterations, n_worlds))
         return Struct(
             initial_plant_state=tree_broadcast_axis(starts, n_steps_per_iteration, axis=2),
@@ -108,7 +94,7 @@ def whip_mppi_program(
     n_steps_per_iteration: int = N_STEPS_PER_ITERATION,
     n_critic_updates: int = N_CRITIC_UPDATES,
 ) -> Node:
-    """Assemble the complete whip MPPI critic-training tree."""
+    """Assembles the outer `carried` MPPI critic-training `Node` over `n_iterations`."""
     controller = whip_mppi_controller(
         critic, plant,
         n_candidates=n_candidates, n_refinements=n_refinements, n_steps_per_plan=n_steps_per_plan)
@@ -140,10 +126,7 @@ def train_whip_mppi(
     n_steps_per_iteration: int = N_STEPS_PER_ITERATION,
     n_critic_updates: int = N_CRITIC_UPDATES,
 ) -> Struct:
-    """Train ``critic`` as the terminal critic of ``plant`` under fixed
-    keys. The planner reads the true state, so the plant's sensing does
-    not reach it, only its actuators do. The result holds the critic bound
-    to its EMA parameters and the history."""
+    """Trains `critic` as the terminal value function for MPPI planning on `plant` and returns EMA-bound `critic` and `history`."""
     program = whip_mppi_program(
         n_iterations, critic, plant,
         n_worlds=n_worlds, n_refinements=n_refinements, n_candidates=n_candidates,
@@ -168,7 +151,7 @@ def learned_controller(
     n_refinements: int = N_EVALUATION_REFINEMENTS,
     n_steps_per_plan: int = N_STEPS_PER_PLAN,
 ) -> PNode:
-    """The receding controller planning under a learned critic."""
+    """Builds the evaluation-budget MPPI controller parameterized around a trained `critic`."""
     return whip_mppi_controller(
         critic, plant,
         n_candidates=n_candidates, n_refinements=n_refinements, n_steps_per_plan=n_steps_per_plan,

@@ -15,12 +15,11 @@ import jax.numpy as jnp
 import flax.linen as fnn
 
 from examples.comparisons.chunk import chunk_common as task
-from typing import Any as PyTree
 
 
 class Norm(fnn.Module):
-    """Running per-feature normalizer. Its statistics live in a COLLECTION,
-    which is what makes them cross a boundary."""
+    """Normalizes features using running statistics stored in a Linen `'stats'`
+    collection so lifted scans can carry them across boundaries."""
 
     @fnn.compact
     def __call__(self, x):
@@ -32,16 +31,16 @@ class Norm(fnn.Module):
 
 
 class RNN(fnn.Module):
-    """The recurrent cell, with WEIGHTS. Its hidden state is an ORDINARY
-    VALUE, in and out, because the lifted scan carries it. Two kinds of state
-    in one model, and which kind a piece goes in is decided by whether the
+    """Applies the recurrent cell with `'params'` weights while taking `hidden`
+    as an explicit scan carry. Two kinds of state
+    live in one model, and which kind a piece goes in is decided by whether the
     scan carries it.
 
     `self.param` hands the initializer a key, which flax derives from the one
     given to init and the module's path. The weights land in the `params`
     collection, and a collection is a thing every lift has to be told about:
-    see the scans below, which now say variable_broadcast as well as
-    variable_carry."""
+    see the scans below, which now say `variable_broadcast` as well as
+    `variable_carry`."""
 
     @fnn.compact
     def __call__(self, hidden, x):
@@ -52,9 +51,9 @@ class RNN(fnn.Module):
 
 
 class Step(fnn.Module):
-    """The two composed, the ordinary way: submodules in a compact body.
+    """Composes `Norm` and `RNN` inside a `@nn.compact` step body.
 
-    Composing costs a level of PATH, and here that path is one a caller has to
+    Composing adds a level of string path that the caller has to
     write down. The hand-built variables below mirror the module nesting
     exactly, so a submodule adds a level to a dict literal three functions
     away."""
@@ -66,27 +65,27 @@ class Step(fnn.Module):
 
 
 # the inner scan, over the steps of one chunk. The annotation says how the
-# stats collection crosses the time axis: CARRIED
+# stats collection crosses the time axis: carried
 Inner = fnn.scan(Step, variable_carry='stats', variable_broadcast='params',
                  split_rngs={'params': False},
                  in_axes=0, out_axes=0)
 
 
 class Chunk(fnn.Module):
-    """One chunk: the inner scan, named so the levels above can lift it."""
+    """Wraps the inner step scan in a named module so outer scans can lift it."""
 
     @fnn.compact
     def __call__(self, hidden, chunk):
         return Inner(name='step')(hidden, chunk)
 
 
-def run(seq: jax.Array=task.SEQ):
-    """The whole chunked run as one program: nn.scan over chunks of nn.scan
-    over steps, with the routing restated at both levels.
+def run(seq: jax.Array = task.SEQ):
+    """Runs nested `nn.scan` over chunks and steps with policies restated at
+    both levels.
 
     The variables are built by hand. `init` cannot produce them: a collection
     cannot be carried before it exists, so init through the nested scans fails
-    on a carry-structure mismatch, and init also EXECUTES the module, so it
+    on a carry-structure mismatch, and `init` also executes the module, so it
     would hand back statistics already advanced by a step."""
     outer = fnn.scan(Chunk, variable_carry='stats', variable_broadcast='params',
                      split_rngs={'params': False},
@@ -109,9 +108,8 @@ OverChunks = fnn.scan(Chunk, variable_carry='stats', variable_broadcast='params'
 
 
 class Recording(fnn.Module):
-    """One recording. The carry RE-INITS here, drawn from flax's own rng
-    machinery, written inside a module body rather than declared by anything
-    that owns it.
+    """Runs one recording while re-initializing `hidden` inside the module body
+    via `make_rng('carry')` rather than declaring a lifetime on `RNN`.
 
     `make_rng('carry')` is the draw, and it is only different per recording
     because the scan above was told `split_rngs={'carry': True}`. That flag
@@ -121,16 +119,17 @@ class Recording(fnn.Module):
 
     @fnn.compact
     def __call__(self, _, chunks):
-        hidden = task.carry_init(self.make_rng('carry'))   # the RECORDING boundary
+        hidden = task.carry_init(self.make_rng('carry'))   # the recording boundary
         _, outs = OverChunks(name='rec')(hidden, chunks)
         return None, outs
 
 
-def run_recordings(seq: jax.Array=task.SEQ):
-    """TWO nested lifted scans, and a line in a body saying what dies where.
+def run_recordings(seq: jax.Array = task.SEQ):
+    """Runs nested lifted scans with `split_rngs={'carry': True}` at the outer
+    lift and an in-body reset inside `Recording`.
 
-    Three lifted scans, each restating `variable_carry='stats'`, and now a
-    THIRD annotation on the outer one: `split_rngs={'carry': True}`, which is
+    Three lifted scans each restate `variable_carry='stats'`, plus a
+    third annotation on the outer one: `split_rngs={'carry': True}`, which is
     what makes the draw inside the module body differ per recording. The flag
     is at the lift and the draw is in the body, and nothing connects them but
     the string 'carry'. Drop the flag and every recording starts identically,
@@ -147,8 +146,8 @@ def run_recordings(seq: jax.Array=task.SEQ):
     module structure rather than guessed."""
     outer = fnn.scan(Recording, variable_carry='stats',
                      variable_broadcast='params',         # and now params too
-                     split_rngs={'carry': True,           # a key PER recording
-                                 'params': False},        # but ONE set of weights
+                     split_rngs={'carry': True,           # a key per recording
+                                 'params': False},        # with one set of weights
                      in_axes=0, out_axes=0)()
     _, mean, var = task.cold()
     wx, wh, b = task.weights()
@@ -159,17 +158,15 @@ def run_recordings(seq: jax.Array=task.SEQ):
     return outs.reshape(-1, task.H)
 
 
-def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
-    """FOURTH question: train the weights through the chunked rollout.
+def train(recordings: bool = False, seq: jax.Array = task.SEQ):
+    """Trains the weights through the chunked rollout with isolated `'params'`
+    and `'stats'` variable collections.
 
-    Linen's best row, and worth reading after all the others. The collection
-    split that cost it everywhere else is exactly right here: `params` and
-    `stats` are two trees, so differentiating with respect to one cannot reach
-    the other and nothing has to say which is which.
+    `params` and `stats` are separate trees, so differentiating with respect to
+    `params` cannot reach `stats` and nothing extra has to filter them apart.
 
-    The `mutable=['stats']` on the apply is doing that work, and it was
-    already there for the state questions. One argument, saying the same thing
-    to the gradient and to the scan."""
+    The `mutable=['stats']` argument on `apply` serves both the state updates
+    and the gradient boundary."""
     hidden, mean, var = task.cold()
     wx, wh, b = task.weights()
     weights = {'rnn': {'wx': wx, 'wh': wh, 'b': b}}
@@ -208,7 +205,7 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
     # Python loop over jax code is not something a real user would put up with
     def step(params, _):
         loss, grads = jax.value_and_grad(loss_fn)(params)
-        # HAND-ROLLED SGD: these frameworks own no optimizer, optax being
+        # hand-rolled SGD: these frameworks own no optimizer, optax being
         # the ecosystem's, and this loop owns its own arithmetic instead
         return jax.tree.map(lambda w, g: w - task.LR * g, params, grads), loss
 
@@ -216,9 +213,8 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
     return losses
 
 
-
 def train_sessions():
-    """FIFTH question: recording and session in one scan nest.
+    """Trains across recording and session boundaries in three nested scans.
 
     Three lax.scans the caller owns, as in haiku and equinox, plus linen's
     own tax: the variable trees are threaded by hand through every level,
@@ -239,7 +235,7 @@ def train_sessions():
             return jnp.mean((outs - t) ** 2), (h2, mut['stats'])
 
         (loss, (h2, s2)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
-        # HAND-ROLLED MOMENTUM, same note: the velocity is the caller's
+        # hand-rolled momentum, same note: the velocity is the caller's
         # pytree because nothing in the framework owns the training loop
         vel = jax.tree.map(lambda v, g: task.MU * v + g, vel, grads)
         params = jax.tree.map(lambda w, v: w - task.LR * v, params, vel)
@@ -248,13 +244,13 @@ def train_sessions():
     def over_recordings(carry, xt):
         params, vel, stats = carry
         (params, vel, stats, _), losses = jax.lax.scan(
-            over_chunks, (params, vel, stats, hidden0), xt)   # RECORDING: hidden dies
+            over_chunks, (params, vel, stats, hidden0), xt)   # recording: hidden dies
         return (params, vel, stats), losses
 
     def over_sessions(params, xt):
-        vel0 = jax.tree.map(jnp.zeros_like, params)   # SESSION: momentum restarts
+        vel0 = jax.tree.map(jnp.zeros_like, params)   # session: momentum restarts
         (params, _, _), losses = jax.lax.scan(
-            over_recordings, (params, vel0, stats0), xt)       # SESSION: recalibrated
+            over_recordings, (params, vel0, stats0), xt)       # session: recalibrated
         return params, losses
 
     _, losses = jax.lax.scan(over_sessions, params0,

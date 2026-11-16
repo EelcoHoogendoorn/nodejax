@@ -1,44 +1,41 @@
-"""Shared execution helpers for iteration transforms."""
+"""Sequential `jax.lax.scan` execution and priming helpers shared across iteration transforms.
+
+Unlike parallel `vmap` transforms where every copy sees the same outer input,
+sequential composition (`stack`) feeds position `k` from position `k - 1`. Both
+`scanned_apply` and `scanned_initialize` thread the running activation across
+`length` positions while splitting PRNG keys per position and stacking per-layer
+states and `Aux` outputs along leading axis 0.
+"""
 
 from __future__ import annotations
-
-from typing import Any
 
 import jax
 import jax.numpy as jnp
 
-from nodejax.struct import Struct
 from nodejax.core.contract import Contract
 from nodejax.core.rng import MaybeKeyStream
+from nodejax.core.types import PyTree
+from nodejax.struct import Struct
 
 
 def scanned_apply(inner: Contract,
                   param, state, input, rng: MaybeKeyStream, *,
-                  scanned_params: bool, length: int) -> tuple[Any, Any]:
-    """Uniform lax.scan execution over a sequential axis: position k's output
-    is position k+1's input, and the per-position states stack.
+                  scanned_params: bool,
+                  length: int) -> tuple[PyTree, PyTree]:
+    """Chains `inner.apply` across `length` sequential positions via `jax.lax.scan`.
 
-    `length` is how many positions, and it is REQUIRED because the caller
-    has it as a static: stack's depth is a construction argument. It used to default to counting the param rows, which read the
-    number off the wrong thing and crashed on a cyclic node with no params,
-    which stack accepts by its own guard.
-
-    `scanned_params` says whether params carry that axis, one row per
-    position (stack's layers), or one set threads every position (a
-    non-parametric inner). The apply-side twin of mapped initialization's
-    parameter axis, and the same question: does every member own its
-    params. Apply-side rng splits per position, so no two positions share a
-    draw. Aux rides the output as it does under vmap: split from the carry
-    each step, stacked over the axis, re-emitted as the (output, aux) pair."""
-    from nodejax.core.binding import (split_aux)
-
+    When `scanned_params` is `True`, `param` supplies one slice per position;
+    otherwise one parameter tree is shared across all `length` steps. Per-step
+    states and `Aux` payloads stack along leading axis 0 while clean outputs
+    pass forward as the next position's input.
+    """
+    from nodejax.core.binding import split_aux
 
     n = length
     rngs, _ = rng.axis(inner.apply_takes_rng, n)
     first = inner.intake(input)
 
-    # An empty MaybeKeyStream has no leaves and broadcasts while params or state provide
-    # the scan length.
+    # An empty MaybeKeyStream has no array leaves and broadcasts across the scan.
     if scanned_params:
         scanned, unpack = ((param, state, rngs),
                            lambda x: (x[0], x[1], x[2]))
@@ -59,25 +56,12 @@ def scanned_apply(inner: Contract,
 
 def scanned_initialize(inner: Contract,
                        param, state_input: Struct, input, rng: MaybeKeyStream, *,
-                       count: int, scanned_params: bool) -> Any:
-    """The inner's init for a SEQUENTIAL axis (stack's layers): one state
-    per position, built the way the signal meets it.
+                       count: int, scanned_params: bool) -> PyTree:
+    """Primes `count` sequential layer states by propagating `input` through preceding layers.
 
-    The vmapped sibling serves the parallel transforms, where every member
-    legitimately sees the outer input. Positions in sequence do not:
-    position k's input is what position k-1 produced, so a supplied value
-    threads exactly as serial's init walk threads it, each position's state
-    built from the running value and the value advanced by that position's
-    own apply. A node that PRIMES therefore boots from the signal as it
-    arrives at its depth, not from the raw input n times over.
-
-    `scanned_params` as in scanned_apply: a parametric inner owns a row
-    of the param per layer, a non-parametric one has nothing to slice.
-
-    ``inner`` is deliberately supplied at invocation time, as it is to the
-    vmapped helpers. A transform's member is replaceable structure; closing
-    over the member used to construct the wrapper would make initialization
-    operate on a stale definition.
+    Each layer primes its state from the activation produced by the previous
+    layer's `apply` call rather than from the raw outer `input`, matching the
+    shapes and values seen during forward execution.
     """
     contract = inner.for_input(input)
 

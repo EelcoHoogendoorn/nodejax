@@ -1,20 +1,23 @@
-"""Python 3.15 ``frozendict`` with a fallback for supported older Pythons."""
+"""Re-exports Python 3.15 `frozendict` and provides a pure-Python fallback on older runtimes."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nodejax.core.types import PyTree
 
 
 try:
     from builtins import frozendict
 except ImportError:
     class frozendict(Mapping):
-        """An insertion-ordered immutable mapping."""
+        """Stores key-value pairs in an immutable insertion-ordered mapping."""
 
         __slots__ = ('__values',)
 
-        def __init__(self, source=(), /, **values: Any) -> None:
+        def __init__(self, source=(), /, **values: PyTree) -> None:
             self.__values = dict(source, **values)
 
         def __getitem__(self, key):
@@ -42,11 +45,11 @@ except ImportError:
             values.update(self)
             return type(self)(values)
 
-        def copy(self) -> 'frozendict':
+        def copy(self) -> frozendict:
             return self
 
         @classmethod
-        def fromkeys(cls, keys, value=None) -> 'frozendict':
+        def fromkeys(cls, keys, value=None) -> frozendict:
             return cls(dict.fromkeys(keys, value))
 
         def __reduce__(self):

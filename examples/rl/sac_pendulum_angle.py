@@ -1,4 +1,4 @@
-"""Train recurrent SAC from angle-only observations and save its phase-space plot."""
+"""Trains recurrent Soft Actor-Critic from angle-only observations on the pendulum and plots phase trajectories."""
 
 import jax
 
@@ -35,13 +35,7 @@ N_CHUNKS_PER_MINIBATCH = 8
 
 
 def angle_only_swing_up() -> None:
-    """Train the partially observed recurrent SAC policy.
-
-    The policy reads angle alone, while the Q function keeps the full
-    observation and stored chunk starts carry the memory replay resumes from.
-    Measured on 2026-08-30, this run needs about eight times the fully observed
-    budget, a small buffer, and longer chunks.
-    """
+    """Trains a GRU-backed SAC policy reading angle-only features while the Q-network reads full observations."""
     policy = SquashedGaussian(
         PendulumMean(
             memory=nn.GRU(MEMORY),

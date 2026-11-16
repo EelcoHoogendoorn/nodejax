@@ -9,7 +9,7 @@ steps, the same shape as the other files.
 
 What changes between the behaviours is what wraps the model:
 
-    scan(norm >> rnn)                                    everything survives: LIVE
+    scan(norm >> rnn)                                    everything survives
     scan(scan(norm >> state_reinit(rnn, 'recording')), boundary='recording')
                                                          the carry dies per recording
 
@@ -20,7 +20,7 @@ beneath answers to it: claiming a name nothing declares is an error rather
 than a no-op.
 
 The nesting uses both halves of the pair, and which goes where is forced.
-Every scan but the outermost is `scan`: it changes the GRAIN and hands back a
+Every scan but the outermost is `scan`: it changes the step grain and hands back a
 cyclic node, which is the only reason the level above has something to run.
 The outermost is `scanned`, because when the whole sequence is done nobody
 holds the carry. `scanned` takes no boundary, and needs none: there is no
@@ -34,7 +34,7 @@ import jax.numpy as jnp
 
 import optax
 
-from nodejax import Node, node, Leaf, scan, scanned, trained, state_reinit, train_step
+from nodejax import Node, PNode, node, Leaf, scan, scanned, trained, state_reinit, train_step
 from nodejax.transforms.learning import optimizer, opt_reinit
 from nodejax import tile
 from nodejax.struct import Struct
@@ -42,14 +42,13 @@ from examples.comparisons.chunk import chunk_common as task
 
 
 @node
-def Norm() -> Node:
-    """Running per-feature normalizer: reads the statistics, then updates
-    them from what it just saw. Its state is its own business, and nothing
-    about chunking appears in it.
+def Norm() -> PNode:
+    """Maintains per-feature running mean and variance across steps without
+    referencing chunk or recording boundaries.
 
-    It names `signal` because it is FIRST in the pipe and the sequence is a
+    It names `signal` because it sits first in the pipe and the sequence is a
     named Struct. Entropy rides beside that data in the framework RNG frame;
-    naming ``rng`` in an authored signature declares the separate plan rather
+    naming `rng` in an authored signature declares the separate plan rather
     than another sequence field. Only the first member names the data field:
     everything downstream is fed whatever the member before it returned."""
     def init():
@@ -66,21 +65,21 @@ def Norm() -> Node:
 
 @node
 def RNN() -> Node:
-    """The recurrent cell, carrying the hidden state, which it DRAWS.
+    """Carries a recurrent hidden vector drawn in `init` alongside trainable
+    cell weights.
 
     Naming `rng` in init is the entire declaration. The node says it needs
     entropy to begin; it does not say where from, how often, or which of the
     enclosing scans will ask. The public key becomes an execution frame, and
     the machinery routes one stream here per re-init.
 
-    It has WEIGHTS too, drawn at construction, and they change nothing above.
-    param is its own channel with its own function and its own key, so the
+    It has weights too, drawn at construction, and they change nothing above.
+    `param` is its own role with its own function and its own key, so the
     scans that thread state say not one word about params.
 
-    Naming rng twice, in param and in init, declares two different things:
-    entropy to BUILD with and entropy to START from. The machinery keeps them
-    apart, splitting one key toward each, so neither is served at the other's
-    expense."""
+    Naming `rng` twice, in `param` and in `init`, declares two distinct roles:
+    entropy to parameterize with and entropy to initialize state from. The
+    machinery splits a separate stream toward each."""
     def param(rng):
         wx, wh, b = task.weights(rng.next())
         return Struct(wx=wx, wh=wh, b=b)
@@ -96,32 +95,33 @@ def RNN() -> Node:
 
 
 def sequence(data):
-    """Form the sequence data; execution entropy remains a separate channel."""
+    """Wraps `data` in `Struct(signal=data)` while RNG stays on `apply(rng=...)`."""
     return Struct(signal=data)
 
 
-def run(inner: Node, seq: jax.Array=task.SEQ):
-    """Cut the sequence into chunks, run it, put the outputs back in order.
+def run(inner: Node, seq: jax.Array = task.SEQ):
+    """Reshapes `seq` into chunks, parameterizes `inner`, and runs it.
 
     Nothing that decides what survives lives here. That is all in the
     expression that built `inner`, which is the point of the file; this is
-    data shuffling, plus the parameterize.
+    data reshaping plus `parameterize`.
 
-    doubly so for models that carry no weights at all."""
+    Models without parameters skip `parameterize` directly."""
     return (inner.parameterize(rng=task.PARAM_KEY)
             .apply(bundle=sequence(seq.reshape(-1, task.CHUNK, task.W)),
                    rng=task.INIT_KEY).reshape(-1, task.H))
 
 
-def run_recordings(inner: Node, seq: jax.Array=task.SEQ):
-    """The same, over recordings of chunks rather than chunks of steps."""
+def run_recordings(inner: Node, seq: jax.Array = task.SEQ):
+    """Parameterizes and runs `inner` over recordings of chunks."""
     return (inner.parameterize(rng=task.PARAM_KEY)
             .apply(bundle=sequence(task.recordings(seq)),
                    rng=task.INIT_KEY).reshape(-1, task.H))
 
 
 def two_boundaries() -> Node:
-    """TWO nested scans, and the NAME picks which one the departure answers to.
+    """Builds two nested scans where the `'recording'` boundary name resets
+    only `RNN` while `Norm` statistics carry across both loops.
 
     The statistics cross everything, so they say nothing: that is what a
     carry does. The recurrent carry re-inits per recording, so `state_reinit`
@@ -136,36 +136,36 @@ def two_boundaries() -> Node:
 
 
 def train(model, data):
-    """FOURTH question and the two after it: train the weights through the
-    rollout, and keep every lifetime while doing it.
+    """Trains `model` weights through the chunked rollout while preserving
+    every declared state lifetime.
 
-    The model is already a node, so training is a transform OVER it and the
-    loop is a scan of that. train_step moves the params into state, which is
+    The model is already a node, so training is a transform over it and the
+    loop is a scan of that. `train_step` moves the params into state, which is
     the same state slot everything else uses, so nothing new appears: no
     second mechanism, no third object to hold, no annotation anywhere saying
     which of the things being carried are the trainable ones.
 
     Where the gradient must not go, it does not go, and nothing had to say so.
     The normalizer's statistics update inside the same scan the gradient
-    travels through, and they are STATE, a different channel from param, so
-    differentiating with respect to the param cannot reach them.
+    travels through, and they are state, a separate role from `param`, so
+    differentiating with respect to `param` cannot reach them.
 
-    The sequence ships (input, target) pairs, which is what a target IS: it
-    belongs beside the data it is the target for, not closed over somewhere
-    else. This task's target happens to be the same every step, so the sequence
+    The sequence ships `(input, target)` pairs, placing each target beside
+    the data it scores rather than closing over it elsewhere.
+    This task's target happens to be the same every step, so the sequence
     repeats it, and the loss is an ordinary two-argument one.
 
-    THE MODEL IS A PARAMETER HERE, and that is the fifth and sixth questions.
-    The same three expressions that answered the first three are passed in
+    `model` is a parameter here, which answers the multi-boundary training rows.
+    The same expressions that answered the forward checks are passed in
     unchanged, wrapped in a trainer, and the boundaries go on meaning what
     they meant. Training is another transform over a node, so it composes with
-    the tags rather than negotiating with them: nothing in train_step knows a
+    the tags rather than negotiating with them: nothing in `train_step` knows a
     boundary exists, and nothing in the tags knows an optimizer does.
 
-    Note which way that composition runs. The tags are claimed INSIDE the
+    Note which way that composition runs. The tags are claimed inside the
     model, by the scans that own the grain they name. Nothing claims a
-    boundary across train_step, and nothing should: a tag names a structure in
-    the DATA, and a training step is not part of the data's structure. A model
+    boundary across `train_step`, and nothing should: a tag names a structure in
+    the data, and a training step is not part of the data's structure. A model
     whose state lifetimes changed because it was under an optimizer would be a
     train/eval discrepancy by construction."""
     # a bound model in, a bound trainer out, taking those weights as where
@@ -176,8 +176,8 @@ def train(model, data):
 
     trainer = train_step(model.parameterize(rng=task.PARAM_KEY), loss,
                          optax.sgd(task.LR))
-    # a run OUTPUTS the trained model and sows what it saw on the way, so
-    # both halves come out of one construct. This row wants the trace
+    # `trained` outputs the final model and emits per-step metrics in aux, so
+    # both halves come out of one construct. This row reads the loss trace
     _, aux = trained(trainer).apply(
         rng=task.INIT_KEY,
         signal=tile(data, task.TRAIN_STEPS),         # the same rollout each step
@@ -186,22 +186,22 @@ def train(model, data):
 
 
 def train_two_tags():
-    """FIFTH question: RECORDING and SESSION in one tree, both crossing the
-    trainer, and THREE kinds of state dying at two boundaries. One pass over
+    """Trains across `'recording'` and `'session'` boundaries in one tree with
+    three distinct state lifetimes. One pass over
     a corpus of sessions: the calibration dies per session and the
     optimizer's momentum restarts with it; the hidden dies per recording; the
     weights couple everything, crossing every boundary because a carry
     carries.
 
-    The momentum is OPTIMIZER state, not model state, and the tree says so:
-    its lifetime is declared by opt_reinit on the optimizer node, the
-    special-case state_reinit that acts on its partner's fields, and the SAME
-    session claim fires both it and the calibration's tag.
+    The momentum is optimizer state, not model state, and the tree says so:
+    its lifetime is declared by `opt_reinit` on the optimizer node, the
+    partner-state counterpart of `state_reinit`, and the same `'session'`
+    claim fires both it and the calibration's tag.
 
-    THE TREE IS THE WHOLE STATEMENT. Each tag is declared on the state it
-    describes; each scan claims the one boundary it owns; the trainer sits
-    between declaration and claim saying nothing. Swap the two claims and the
-    same tree computes something else, which is what a name is for."""
+    Each tag is declared on the state it describes; each scan claims the one
+    boundary it owns; the trainer sits between declaration and claim saying
+    nothing. Swap the two claims and the same tree computes something else,
+    which is what a name is for."""
     def loss(outs, target):
         return jnp.mean((outs - target) ** 2)
 

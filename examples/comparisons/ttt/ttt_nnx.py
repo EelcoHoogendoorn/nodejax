@@ -5,7 +5,7 @@ NNX separates unary `module(x) -> y` modules from `RNNCellBase`-style `(carry, x
 Run directly with `python -m examples.comparisons.ttt.ttt_nnx`.
 """
 
-from typing import Any
+from collections.abc import Callable
 
 import numpy as np
 import jax
@@ -18,7 +18,7 @@ from examples.comparisons.ttt.ttt_common import (
     make_tasks, query_nll_numpy, report,
 )
 
-PyTree = Any
+PyTree = object
 
 
 def xent(logits: jax.Array, target: jax.Array) -> jax.Array:
@@ -32,10 +32,10 @@ def query_xent(preds: jax.Array, target: jax.Array) -> jax.Array:
 
 
 class Rate(nnx.Param):
-    """Per-parameter inner learning rates stored outside the wrapped module."""
+    """Tags per-parameter inner learning rates outside the wrapped module."""
 
 
-def _is_var(x: Any) -> bool:
+def _is_var(x: object) -> bool:
     return isinstance(x, nnx.Variable)
 
 
@@ -44,7 +44,7 @@ def _strip(tree: PyTree) -> PyTree:
 
 
 class MLP(nnx.Module):
-    """Stateless token predictor (`token -> logits`)."""
+    """Maps each input token to next-token logits without carried state."""
 
     def __init__(self, vocab: int, hidden: int, rngs: nnx.Rngs):
         self.embed = nnx.Param(0.3 * jax.random.normal(rngs.params(), (vocab, hidden)))
@@ -58,7 +58,7 @@ class MLP(nnx.Module):
 
 
 class RNN(nnx.Module):
-    """Recurrent token predictor following NNX's `(carry, input)` cell convention."""
+    """Updates a recurrent hidden vector and predicts next-token logits per step."""
 
     def __init__(self, vocab: int, hidden: int, rngs: nnx.Rngs):
         self.embed = nnx.Param(0.3 * jax.random.normal(rngs.params(), (vocab, hidden)))
@@ -76,9 +76,9 @@ class RNN(nnx.Module):
 
 
 class TTT(nnx.Module):
-    """Reusable online gradient-adaptation wrapper over unary or carry-based NNX modules."""
+    """Adapts unary or carry-based NNX modules online by per-token gradient descent."""
 
-    def __init__(self, model: nnx.Module, loss_fn, lr0: float):
+    def __init__(self, model: nnx.Module, loss_fn: Callable, lr0: float):
         self.model = model
         self.loss_fn = loss_fn
         self.has_carry = hasattr(model, 'initialize_carry')

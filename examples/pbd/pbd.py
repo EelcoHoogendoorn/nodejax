@@ -1,14 +1,12 @@
-"""Particle Position-Based Dynamics (PBD) entity definitions, constraints, and step.
+"""Defines particle records, distance/bending/floor constraints, and `pbd_step`."""
 
-Provides the ``particle`` record, unconstrained free motion, velocity recovery,
-local particle constraints (``ParticleDistance``, ``ParticleBend``,
-``FloorConstraint``), and the composed particle timestep ``pbd_step``.
-"""
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 
 from nodejax import (
+    BaseNode,
     Leaf,
     Node,
     PNode,
@@ -24,7 +22,7 @@ from examples.pbd.core import PBDStep, safe_norm
 
 @register_struct_subtype
 class Particle(Struct):
-    """A particle record of positions, velocities, and inverse masses."""
+    """Stores particle `position`, `velocity`, and `inverse_mass` arrays with PBD coordinate properties."""
 
     @property
     def coords(self) -> Struct:
@@ -40,14 +38,7 @@ def particle(
     velocity: jax.Array,
     inverse_mass: jax.Array,
 ) -> Particle:
-    """A particle record of positions, velocities, and inverse masses.
-
-    ``position`` and ``velocity`` end in a coordinate axis. Zero ``inverse_mass``
-    fixes that particle in place. Leading batch axes describe collections.
-
-    Individual substeps pass this record as call data; ``pbd_step`` holds the
-    collection as state across timesteps via ``cyclic``.
-    """
+    """Constructs a `Particle` record whose zero `inverse_mass` entries anchor particles in place."""
     return Particle(
         position=position,
         velocity=velocity,
@@ -56,9 +47,9 @@ def particle(
 
 
 @node
-def FreeMotion(dt: float) -> Node:
-    """Predict one unconstrained ``particle`` record from external force."""
-    def apply(particle, force):
+def FreeMotion(dt: float) -> PNode:
+    """Advances one `Particle` unconstrained over `dt` under external `force`."""
+    def apply(particle: Particle, force: jax.Array) -> Particle:
         velocity = particle.velocity + dt * particle.inverse_mass * force
         return particle.replace(
             position=particle.position + dt * velocity,
@@ -72,9 +63,9 @@ def FreeMotion(dt: float) -> Node:
 def VelocityUpdate(
     dt: float,
     damping: float,
-) -> Node:
-    """Reconstruct one ``particle`` record from its corrected displacement."""
-    def apply(previous, projected):
+) -> PNode:
+    """Recovers damped particle velocity from `(projected.position - previous.position) / dt`."""
+    def apply(previous: Particle, projected: Particle) -> Particle:
         velocity = damping * (projected.position - previous.position) / dt
         return projected.replace(velocity=velocity)
 
@@ -83,11 +74,11 @@ def VelocityUpdate(
 
 @node
 def ParticleDistance() -> Node:
-    """Compute scalar distance error between a pair of particles."""
-    def param(rest_length: float, compliance: float = 0.0):
+    """Evaluates scalar distance error `||x_1 - x_0|| - rest_length` for a particle pair."""
+    def param(rest_length: float, compliance: float = 0.0) -> Struct:
         return Struct(rest_length=rest_length, compliance=compliance)
 
-    def apply(param, coords):
+    def apply(param, coords: Struct) -> jax.Array:
         return safe_norm(coords.position[1] - coords.position[0]) - param.rest_length
 
     return Leaf(apply, param=param)
@@ -95,13 +86,11 @@ def ParticleDistance() -> Node:
 
 @node
 def ParticleBend() -> Node:
-    """The signed bending angle at the middle of a triple of 2D particles,
-    less ``rest_angle``: the turn from the first segment to the second,
-    zero when straight, with a clean gradient there."""
-    def param(rest_angle: float = 0.0, compliance: float = 0.0):
+    """Evaluates signed 2D turning-angle error `atan2(cross, dot) - rest_angle` across a particle triple."""
+    def param(rest_angle: float = 0.0, compliance: float = 0.0) -> Struct:
         return Struct(rest_angle=rest_angle, compliance=compliance)
 
-    def apply(param, coords):
+    def apply(param, coords: Struct) -> jax.Array:
         first = coords.position[1] - coords.position[0]
         second = coords.position[2] - coords.position[1]
         cross = first[0] * second[1] - first[1] * second[0]
@@ -112,9 +101,9 @@ def ParticleBend() -> Node:
 
 
 @node
-def FloorConstraint(height: float) -> Node:
-    """Keep one ``particle`` record on or above a horizontal floor."""
-    def apply(particle):
+def FloorConstraint(height: float) -> PNode:
+    """Clamps the vertical coordinate `position[1]` of one `Particle` at or above `height`."""
+    def apply(particle: Particle) -> Particle:
         position = particle.position.at[1].set(jnp.maximum(particle.position[1], height))
         return particle.replace(position=position)
 
@@ -122,13 +111,13 @@ def FloorConstraint(height: float) -> Node:
 
 
 def pbd_step(
-    constraints: Node | PNode,
+    constraints: BaseNode,
     *,
     n_solver_passes: int,
     dt: float,
     velocity_damping: float = 1.0,
-) -> Node:
-    """Assemble one particle timestep, cyclic over the particle collection."""
+) -> Node | PNode:
+    """Builds one cyclic particle PBD timestep carrying the `Particle` collection as state."""
     predict = batch(FreeMotion(dt))
     solver = repeat(constraints, n=n_solver_passes)
     finalize = batch(VelocityUpdate(dt, velocity_damping))

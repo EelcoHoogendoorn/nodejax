@@ -1,12 +1,19 @@
-"""Serial and authored composition over recursive definitions."""
+"""Serial (`>>`) pipelines and authored `Composite` / `Wrapper` compilation.
+
+`serial` wires named child Nodes sequentially so each stage's clean output feeds
+the next stage while member `Aux` outputs nest by member name. `composite` and
+`_wrap_build` compile authored `(self, ...)` step and initializer functions into
+`Def` records whose parameters and states are discovered automatically along the
+executed call graph.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import inspect
 import re
 from functools import wraps
-from typing import Any, Callable
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +38,7 @@ from nodejax.core.lifting import (
 from nodejax.core.node import BaseNode, Node, _is_node, _view
 from nodejax.core.rng import MaybeKeyStream
 from nodejax.core.spec import materialize, spec_of
+from nodejax.core.types import PyTree
 from nodejax.struct import Struct
 from nodejax.tree import tree_first
 from nodejax.core.wiring import (
@@ -41,7 +49,7 @@ from nodejax.core.wiring import (
 _EMPTY_MAPPING = frozendict()
 
 
-def apply_call(impl: Callable, form: CallForm, *, input_spec=None,
+def apply_call(impl: Callable, form: CallForm, *, input_spec: PyTree = None,
                takes_rng: bool = False) -> ApplyCall:
     return ApplyCall(
         impl=impl,
@@ -65,7 +73,6 @@ def init_call(impl: Callable, form: CallForm, *,
 
 
 def _probe_rng(takes_rng: bool) -> MaybeKeyStream:
-    """Private entropy for an abstract execution whose values are discarded."""
     return (MaybeKeyStream(jax.random.PRNGKey(0)) if takes_rng
             else MaybeKeyStream())
 
@@ -89,12 +96,12 @@ def _wiring_takes_rng(members: Struct, authored,
         member.contract.apply_takes_rng for member in members)
 
 
-def block_name(separator: str, names) -> str:
+def block_name(separator: str, names: Iterable[str]) -> str:
     return '(' + separator.join(names) + ')'
 
 
-def _over_members(separator: str):
-    """Normalize an N-ary construction into member Defs plus captures."""
+def _over_members(separator: str) -> Callable:
+    """Normalizes an N-ary member combinator over Node or `Generic` operands."""
     def decorate(build):
         @wraps(build)
         def entry(**named):
@@ -147,7 +154,7 @@ def _over_members(separator: str):
     return decorate
 
 
-def _rekeyed(state, key, where):
+def _rekeyed(state: PyTree, key, where: str) -> PyTree:
     draws = 0
 
     def walk(value, current):
@@ -184,7 +191,7 @@ def _rekeyed(state, key, where):
     return result
 
 
-def _probe_apply(apply_fn, param, state, input, rng):
+def _probe_apply(apply_fn: Callable, param, state, input, rng: MaybeKeyStream):
     bound_axes = set()
     call = lambda p, s, i: apply_fn(p, s, i, rng)
     while True:
@@ -205,7 +212,8 @@ def _probe_apply(apply_fn, param, state, input, rng):
                     lead(p), lead(s), lead(i)))
 
 
-def _step_priming_carry(member, param, state, carry, name, rng):
+def _step_priming_carry(member: Def, param, state, carry: PyTree,
+                        name: str, rng: MaybeKeyStream) -> PyTree:
     formed_input = (member.contract.feed(carry)
                     if member.contract._accepts_input else Struct())
     try:
@@ -218,7 +226,7 @@ def _step_priming_carry(member, param, state, carry, name, rng):
     return value
 
 
-def _step_spec(member, param, state, spec, name):
+def _step_spec(member: Def, param, state, spec: PyTree, name: str) -> PyTree:
     from nodejax.core.spec import _axis_probe_spec
     formed_input = (member.contract.feed(_axis_probe_spec(spec))
                     if member.contract._accepts_input else Struct())
@@ -238,8 +246,9 @@ def _step_spec(member, param, state, spec, name):
     return value
 
 
-def _member_param(name, member, sub_bundle, rng, input_spec=None, *,
-                  bundled: bool = False):
+def _member_param(name: str, member: Def, sub_bundle: Struct | None,
+                  rng: MaybeKeyStream, input_spec: PyTree = None, *,
+                  bundled: bool = False) -> PyTree:
     if not member.parametric:
         return ()
     bundle = Struct() if sub_bundle is None else sub_bundle
@@ -251,7 +260,8 @@ def _member_param(name, member, sub_bundle, rng, input_spec=None, *,
         raise TypeError(f"member '{name}': {error}") from error
 
 
-def _member_states_init(members, captures: Captures, *, block, project):
+def _member_states_init(members: Struct, captures: Captures, *, block: str,
+                        project: Callable) -> InitCall | None:
     if not any(member.cyclic for member in members):
         return None
     requires_input = any(
@@ -301,7 +311,8 @@ def _member_states_init(members, captures: Captures, *, block, project):
 
 
 @_over_members(' >> ')
-def serial(members: Struct, captures: Captures):
+def serial(members: Struct, captures: Captures) -> BaseNode:
+    """Chains `members` sequentially, propagating shapes, priming values, and per-stage `Aux`."""
     names = members.__keys__
     last_primer = max((index for index, (name, member)
                        in enumerate(members.__items__)
@@ -457,8 +468,9 @@ def serial(members: Struct, captures: Captures):
         captures=captures, layout=Layout(kind='serial')))
 
 
-def _member_init(members, authored, param, evidence, rng, inputs, *,
-                 prime, captures):
+def _member_init(members: Struct, authored, param, evidence: PyTree,
+                 rng: MaybeKeyStream, inputs: Struct, *,
+                 prime: bool, captures: Captures) -> PyTree:
     if evidence is not None and authored.wired:
         wired = _InitWired(
             members, param, rng, inputs, dict(captures.state),
@@ -495,20 +507,12 @@ def _member_init(members, authored, param, evidence, rng, inputs, *,
 
 
 def _takes_self(fn: Callable) -> bool:
-    """Whether an authored init is written against ``self``: member views
-    over the init-time slots, as an authored apply has over the step's."""
     return next(iter(inspect.signature(fn).parameters), None) == 'self'
 
 
 def _compile_wired_init(fn: Callable, definitions: Struct, captures: Captures,
                         owner: str) -> InitCall:
-    """An init written against ``self``. Its member views bind, reset, and
-    read the members through the init-time slots, each member's parameters
-    bound and its key split off by the view, and the composite's state is
-    what the slots hold when the function returns; so it returns nothing.
-    The init takes a key exactly when a member's init does, or when the
-    author declares ``rng``. ``input`` is the priming input, as for any
-    init; every other name is a state input."""
+    """Compiles an `init(self, ...)` function that initializes members via `self` handles."""
     signature = _signature(fn, 'initializer')
     claimed = {'param', 'state', 'node'} & set(signature)
     if claimed:
@@ -559,16 +563,15 @@ def _compile_wired_init(fn: Callable, definitions: Struct, captures: Captures,
     )
 
 
-def _checked_init(call: InitCall, members, name):
+def _checked_init(call: InitCall, members: Struct, name: str | None) -> InitCall:
     def validate(state):
         from nodejax.core.contract import _empty
         expected = {
             field for field, member in members.__items__ if member.cyclic}
         entries = (dict(state.__items__)
                    if issubclass(type(state), Struct) else {})
-        # An explicit empty slot for a stateless member is permitted and
-        # stripped here, so authored inits need not fork on member
-        # lifecycles while the stored state stays canonically sparse.
+        # Strip explicit empty tuples returned for stateless members so stored
+        # composite state remains canonically sparse.
         vacuous = {
             field for field, value in entries.items()
             if field not in expected
@@ -596,12 +599,11 @@ def _checked_init(call: InitCall, members, name):
 
 @node
 def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
-              init=None, apply_input_spec=None, name=None,
-              methods: Mapping = _EMPTY_MAPPING,
-              rng_from: bool | None = None):
-    """``rng_from`` is the authored rng policy (see ``_Wired``); it serves
-    the one-member wrapper, which is this composite without a nesting
-    level."""
+              init=None, apply_input_spec: PyTree = None,
+              name: str | None = None,
+              methods: Mapping[str, Callable] = _EMPTY_MAPPING,
+              rng_from: bool | None = None) -> BaseNode:
+    """Compiles an authored multi-member `Composite` step and optional `param`/`init` overrides."""
     definitions, captures = _promote_members(members)
     reserved = {'param', 'state'} & set(definitions.__keys__)
     if reserved:
@@ -732,7 +734,7 @@ def composite(apply: Callable, *, members: dict[str, BaseNode], param=None,
     return _view(definition.copy(tree=bind))
 
 
-def _defer_wrapper(build):
+def _defer_wrapper(build: Callable) -> Callable:
     @wraps(build)
     def entry(apply, operand, *, member, init=None, name=None, rng_from=None,
               input_spec=None):
@@ -751,13 +753,10 @@ def _defer_wrapper(build):
 
 @_defer_wrapper
 @node
-def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
-                rng_from: bool | None = None, input_spec=None):
-    """An authored wrapper is the one-member composite without a nesting
-    level: the composite builds, initializes, and runs the member; this
-    presents its keyed param, state, and aux as the member's own.
-    ``input_spec`` is the wrapper's own declared input wire, as for a
-    composite; a wrapper publishes nothing it is not told."""
+def _wrap_build(apply: Callable, operand: BaseNode, *, member: str, init=None,
+                name: str | None = None, rng_from: bool | None = None,
+                input_spec: PyTree = None) -> BaseNode:
+    """Compiles an authored one-member `Wrapper` without introducing a `Struct` nesting level."""
     from nodejax.core.wrapper import _transparent_def
 
     if not _authored(apply).wired:
@@ -766,10 +765,6 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
             apply, drop=('self',)):
         raise TypeError('rng_from requires an rng parameter')
     child = operand._def
-    # A declared init stays over a stateless member: its state is the empty
-    # slot either way, but its state-input fields are part of the wrapper's
-    # call form, so callers need not fork on the member's lifecycle. An init
-    # written against self already stores under the member's name.
     declared_init = (
         None if init is None else
         init if _takes_self(init) else _transparent_init(init, member))
@@ -783,7 +778,6 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
         return Struct(**{member: value})
 
     def member_state(state):
-        """The member's slot of a keyed state; a stateless member has none."""
         return getattr(state, member) if child.cyclic else ()
 
     calls = inner.calls
@@ -791,10 +785,6 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
         inner_param = calls.param
 
         def param_impl(definition, formed_input, rng):
-            # Re-entering parameterization replaces a bound member's capture,
-            # just as it does for any other bound Node. Remove that construction
-            # default before delegating the wrapper's flat member-form input to
-            # the ordinary composite parameter builder.
             captures = definition.captures
             if member in captures.param:
                 definition = definition.copy(captures=Captures(
@@ -810,8 +800,6 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
         )
     if calls.init is not None:
         inner_init = calls.init
-        # A generated init takes the member's bundle under its name; a
-        # declared one takes the wrapper's own fields as they are.
         generated = declared_init is None
         formed = keyed if generated else (lambda formed_input: formed_input)
         if inner_init.requires_input:
@@ -855,8 +843,6 @@ def _wrap_build(apply, operand: BaseNode, *, member, init=None, name=None,
 
 
 def _transparent_init(init: Callable, member: str) -> Callable:
-    """A wrapper's declared init, written against the member's own param
-    and returning the member's own state, in the composite's keyed form."""
     def keyed(**arguments):
         if 'param' in arguments:
             arguments['param'] = getattr(arguments['param'], member)
@@ -866,11 +852,11 @@ def _transparent_init(init: Callable, member: str) -> Callable:
     return keyed
 
 
-def _ident(name):
+def _ident(name: str) -> str:
     return re.sub(r'\W+', '_', name).strip('_') or 'node'
 
 
-def _components(value):
+def _components(value: BaseNode | Generic) -> frozendict:
     if is_generic(value) or value.state_bound:
         return frozendict({_ident(value.name): value})
     definition = value._def
@@ -887,7 +873,8 @@ def _components(value):
     return frozendict({_ident(value.name): value})
 
 
-def _compose(left, right):
+def _compose(left: BaseNode | Generic,
+             right: BaseNode | Generic) -> BaseNode | Generic:
     if not is_generic(left) and not _is_node(left):
         raise TypeError('left side of >> must be a Node')
     if not is_generic(right) and not _is_node(right):

@@ -1,23 +1,35 @@
+"""Weight-tied output-chaining iteration (`repeat` and `repeated`).
+
+Both transforms share one parameter tree across `n` sequential applications
+where each step's output becomes the next step's input. `repeat` threads state
+externally (`preserves='param,state'`) and returns the final step's output,
+whereas `repeated` internalizes state for one trajectory (`internalizes='state'`)
+and returns all `n` step outputs stacked along leading axis 0.
+"""
+
 from __future__ import annotations
 
 import jax
 
 from nodejax.core.binding import split_aux
 from nodejax.core.node import Node
+from nodejax.core.wrapper import Wrapper
 from nodejax.transforms.iteration.scan import (
     _given_start, _run_takes_rng, _split_state_fields,
 )
 from nodejax.transforms.transform import transform
-from nodejax.core.wrapper import Wrapper
 
 
 @transform(preserves='param,state')
 def repeat(layer: Node, n: int) -> Node:
-    """Apply one node ``n`` times, sharing parameters and threading state.
+    """Chains `layer` `n` times with shared parameters, feeding each output into the next step.
 
-    Outputs feed the next iteration. Auxiliary outputs stack over iterations,
-    and stochastic applications receive separate keys. A state-bound layer
-    runs from its bound state.
+    Preserves both parameter and state bindings (`preserves='param,state'`),
+    returns the `n`-th output alongside any `Aux` values stacked along leading
+    axis 0, and splits PRNG keys per step. Unlike `iterated`, which holds the
+    input fixed while advancing state, `repeat` feeds the running output
+    forward; unlike `repeated`, it keeps state external and returns only the
+    final output.
     """
     count = n
 
@@ -46,17 +58,12 @@ def repeat(layer: Node, n: int) -> Node:
 
 @transform(preserves='param', internalizes='state')
 def repeated(step: Node, n: int) -> Node:
-    """Apply one node ``n`` times from the input with fresh state on every
-    call, each output feeding the next input, and return every output
-    stacked over a leading axis.
+    """Chains `step` `n` times from fresh or bound state and stacks all `n` outputs along axis 0.
 
-    The past-complete form of ``repeat``, as ``scanned`` is of ``scan``: the
-    trajectory of a step from a start, every point kept and the state
-    discarded. A state-bound step runs from its bound state; otherwise the
-    state is built from the step's state-input fields, which the call takes
-    beside the start, and from the start itself. Parameters are shared,
-    auxiliary outputs stack over the steps, and stochastic applications
-    receive separate keys.
+    When `step` is a `PSNode`, its bound state seeds the trajectory; otherwise
+    initial state is primed from the call's state-input fields and starting
+    input, and the final state is discarded after collecting the `n`-step
+    output trajectory.
     """
     if type(n) is not int or n < 1:
         raise TypeError(f'repeated n must be a positive int, got {n!r}')

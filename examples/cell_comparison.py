@@ -1,16 +1,8 @@
-"""Qualitative comparison of recurrent cells in the meta-controller.
+"""Compares recurrent cell families inside the indirect-adaptive meta-controller benchmark.
 
-Runs the meta-controller setup (mandated PID bank with plain de/dt,
-persisted RLS plant identifier feeding beliefs forward, Meta-SGD
-inner tuning, domain-randomized plants) with a
-range of recurrent cells, and writes one per-plant trajectory figure
-per variant to plots/cells_<name>.png plus a summary table to stdout.
+Runs the meta-controller setup (mandated PID bank with plain `de/dt`, persisted RLS plant identifier feeding beliefs across episodes, `learned_sgd` inner tuning, and domain-randomized plants) across Elman RNN, GRU, `MinGRU`, and diagonal `LRU` cores. Because `MinGRU` and `LRU` omit hidden-to-hidden mixing matrices, each also runs at double depth. Writes per-plant trajectory figures to `plots/cells_<name>.png` and prints settled tracking metrics to stdout.
 
-The min-cells (minGRU, diagonal LRU) are less expressive per layer —
-no hidden-to-hidden mixing matrix — so each also runs at double depth
-to compensate.
-
-Run directly:  python -m examples.cell_comparison
+Run directly via `python -m examples.cell_comparison`.
 """
 
 import numpy as np
@@ -20,7 +12,7 @@ import optax
 
 from nodejax.transforms.learning import learned_sgd
 from nodejax import (
-    KeyStream, Leaf, Node, PNode, batch, finetune, nn, node, scan, stack,
+    Leaf, Node, batch, finetune, nn, node, scan, stack,
     train_step, trained,
 )
 from nodejax.struct import Struct
@@ -29,52 +21,47 @@ import examples.test_meta_controller as mc
 
 @node(name='mingru')
 def MinGRU(hidden: int, tanh_candidate: bool) -> Node:
-    """minGRU: gate and candidate depend on the input alone (no
-    hidden-to-hidden matrix), so the temporal gradient is a product of
-    (1 - z) factors — stable by construction. The form has a
-    linear candidate; the tanh variant bounds it."""
-    def param(rng: KeyStream) -> Struct:
-        def w() -> jax.Array:
+    """Advances a `MinGRU` cell whose gate and candidate depend on `input` alone, optionally bounding the candidate with `tanh`."""
+    def param(rng) -> Struct:
+        def weight() -> jax.Array:
             return 0.5 * jax.random.normal(rng.next(), (hidden, hidden)) / jnp.sqrt(hidden)
-        return Struct(wz=w(), bz=jnp.zeros(hidden), wh=w(), bh=jnp.zeros(hidden))
+        return Struct(wz=weight(), bz=jnp.zeros(hidden), wh=weight(), bh=jnp.zeros(hidden))
 
-    def init(node, param: Struct) -> jax.Array:
+    def init(node, param) -> jax.Array:
         return jnp.zeros_like(node.input)
 
-    def apply(param: Struct, state: jax.Array, input: jax.Array) -> tuple[jax.Array, jax.Array]:
-        z = jax.nn.sigmoid(input @ param.wz + param.bz)
-        hc = input @ param.wh + param.bh
+    def apply(param, state, input) -> tuple[jax.Array, jax.Array]:
+        gate = jax.nn.sigmoid(input @ param.wz + param.bz)
+        candidate = input @ param.wh + param.bh
         if tanh_candidate:
-            hc = jnp.tanh(hc)
-        h = (1 - z) * state + z * hc
-        return h, h
+            candidate = jnp.tanh(candidate)
+        next_state = (1 - gate) * state + gate * candidate
+        return next_state, next_state
 
     return Leaf(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN))
 
 
 @node
 def LRU(hidden: int) -> Node:
-    """Diagonal leaky-integrator units: per-unit poles sigmoid-bounded
-    in (0, 1) — gradient-stable by construction, mixing only through
-    depth."""
-    def param(rng: KeyStream) -> Struct:
+    """Advances diagonal leaky-integrator units with sigmoid-bounded poles in `(0, 1)`."""
+    def param(rng) -> Struct:
         return Struct(p=jax.random.uniform(rng.next(), (hidden,), minval=1.0, maxval=3.0),
                       wx=0.5 * jax.random.normal(rng.next(), (hidden,)),
                       b=jnp.zeros(hidden))
 
-    def init(node, param: Struct) -> jax.Array:
+    def init(node, param) -> jax.Array:
         return jnp.zeros_like(node.input)
 
-    def apply(param: Struct, state: jax.Array, input: jax.Array) -> tuple[jax.Array, jax.Array]:
-        a = jax.nn.sigmoid(param.p)
-        h = a * state + (1 - a) * jnp.tanh(param.wx * input + param.b)
-        return h, h
+    def apply(param, state, input) -> tuple[jax.Array, jax.Array]:
+        pole = jax.nn.sigmoid(param.p)
+        next_state = pole * state + (1 - pole) * jnp.tanh(param.wx * input + param.b)
+        return next_state, next_state
 
     return Leaf(apply, init=init, param=param, apply_input_spec=jnp.zeros(mc.HIDDEN))
 
 
 def task_with_cell(cell: Node, layers: int) -> Node:
-    """The meta-controller task node with the given recurrent core."""
+    """Builds the meta-controller closed-loop task `Node` around `layers` stacked copies of `cell`."""
     from nodejax import externalize, observed_loop, at
     pipe = at(mc.Filters(mc.DT), 'error') >> mc.flat \
         >> mc.Up(3 + mc.ORDER + 1, mc.HIDDEN) \
@@ -90,45 +77,42 @@ def run(name: str, cell: Node, layers: int) -> None:
     adapt = finetune(train_step(task, mc.mse, learned_sgd(mc.INNER_LR0)))
     trainer = train_step(batch(adapt), mc.mse, optax.adam(mc.META_LR)).parameterize(
         rng=jax.random.PRNGKey(0))
-    start = trainer.param.objective.model    # the un-meta-trained inits
+    start = trainer.param.objective.model
 
-    _, train_tasks, q_t = mc.make_tasks(np.random.RandomState(0),
-                                        mc.META_STEPS * mc.TASKS, k=mc.K)
+    _, train_tasks, query_targets = mc.make_tasks(
+        np.random.RandomState(0), mc.META_STEPS * mc.TASKS, k=mc.K)
 
-    def fold(x):
-        return jax.tree.map(lambda a: a.reshape(mc.META_STEPS, mc.TASKS, *a.shape[1:]), x)
+    def fold(tree):
+        return jax.tree.map(
+            lambda array: array.reshape(mc.META_STEPS, mc.TASKS, *array.shape[1:]),
+            tree,
+        )
 
     folded = fold(train_tasks)
     final, aux = trained(trainer).apply(
         support=folded.support,
         query=folded.query,
-        target=fold(q_t),
+        target=fold(query_targets),
     )
 
-    plant, tasks, q_t = mc.make_tasks(np.random.RandomState(99), mc.TASKS, k=mc.K)
-    # three probes on FRESH tasks, isolating what meta-training bought:
-    # 1) the method itself: meta-learned inits, adapted per task on its
-    #    support episode, scored on the query
+    plant, tasks, query_targets = mc.make_tasks(
+        np.random.RandomState(99), mc.TASKS, k=mc.K)
+    # Evaluate three probes on fresh tasks: meta-adapted, zero-shot meta-init, and inner adaptation from random init.
     _, meta_adapted = final.apply(bundle=tasks)
-    # 2) the inits alone: the meta-learned weights predict the query with
-    #    NO per-task adaptation (the recurrent cells still get their
-    #    fresh start state)
     init_model = batch(task).with_input(tasks.query).bind(final.param.objective.model)
     _, init_only = init_model.initialize()(tasks.query)
-    # 3) adaptation alone: the same inner loop from RANDOM inits, meta-
-    #    training ablated
     adapt_only = batch(adapt).bind(start).apply(bundle=tasks)
 
-    settled = mc.mse(meta_adapted[:, mc.T // 2:], q_t[:, mc.T // 2:])
-    bias = jnp.mean(meta_adapted[:, -20:] - q_t[:, -20:], axis=1)
-    n_weights = sum(x.size for x in jax.tree.leaves(final.param.objective.model))
+    settled = mc.mse(meta_adapted[:, mc.T // 2:], query_targets[:, mc.T // 2:])
+    bias = jnp.mean(meta_adapted[:, -20:] - query_targets[:, -20:], axis=1)
+    n_weights = sum(leaf.size for leaf in jax.tree.leaves(final.param.objective.model))
     mc.plot_tuning(f'cells_{name}.png',
                    f'{name}: {layers} layers, {n_weights} weights | '
                    f'settled mse {settled:.5f}, worst bias {jnp.max(jnp.abs(bias)):.3f}',
-                   plant, q_t, meta_adapted, init_only, adapt_only)
+                   plant, query_targets, meta_adapted, init_only, adapt_only)
     print(f'{name:16s} L={layers} weights={n_weights:4d}: '
           f'finite={bool(jnp.all(jnp.isfinite(aux.loss)))} '
-          f'adapted {mc.mse(meta_adapted, q_t):.4f} unadapted {mc.mse(init_only, q_t):.4f} '
+          f'adapted {mc.mse(meta_adapted, query_targets):.4f} unadapted {mc.mse(init_only, query_targets):.4f} '
           f'settled {settled:.5f} worst|bias| {jnp.max(jnp.abs(bias)):.4f}')
 
 

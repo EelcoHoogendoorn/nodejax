@@ -1,4 +1,4 @@
-"""Transforms that change parameter ownership or definition structure."""
+"""Re-exports structural and parameter-routing transforms (`cyclic`, `externalize`, `tie`, `map_members`, `tree_filter`)."""
 
 from nodejax.transforms.structure.cyclic import cyclic
 from nodejax.transforms.structure.externalize import externalize

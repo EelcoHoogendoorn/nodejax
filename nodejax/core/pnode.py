@@ -1,8 +1,19 @@
-"""The parameter-bound public view."""
+"""Parameter-bound public view (`PNode`) registered as a JAX PyTree.
+
+A `PNode` pairs an immutable `Def` (stored as static PyTree metadata) with its
+sparse `param` tree (stored as the PyTree child). Because `_ParamHop` formats
+as an empty path segment, `jax.tree_util.tree_flatten_with_path` reports leaf
+paths directly from the root of `param` (for example `.encoder.w`), matching
+the dotted paths consumed by Optax masks and `paths.py` predicates.
+
+Stateless definitions evaluate `pnode(x) -> output`, whereas cyclic definitions
+require an explicit positional state on `PNode` (`pnode(state, x) -> (state,
+output)`) or transition to `PSNode` via `pnode.initialize(...)`.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 import jax
 
@@ -12,26 +23,31 @@ from nodejax.core.binding import (
 )
 from nodejax.core.definition import Def
 from nodejax.core.node import BaseNode
+from nodejax.core.types import PyTree
 from nodejax.struct import Struct
+
+if TYPE_CHECKING:
+    from nodejax.core.psnode import PSNode
 
 
 class PNode(BaseNode):
-    """A definition with its parameter tree bound as JAX data."""
+    """Binds a sparse `param` tree to a `Def` as JAX PyTree data."""
 
     bound = True
 
-    def __init__(self, definition: Def, param):
+    def __init__(self, definition: Def, param) -> None:
         super().__init__(definition)
         self.param = self.contract._sparse_param(param)
 
-    def _binding_items(self):
+    def _binding_items(self) -> tuple[tuple[str, PyTree], ...]:
         return (('param', self.param),)
 
-    def _with_definition(self, definition: Def) -> 'PNode':
+    def _with_definition(self, definition: Def) -> PNode:
         return PNode(definition, self.param)
 
     def _transfer_bindings(
-            self, target: BaseNode, preserves=('param', 'state'),
+            self, target: BaseNode,
+            preserves: tuple[str, ...] = ('param', 'state'),
             strict: bool = False, operation: str = 'operation') -> BaseNode:
         preserved = frozenset(preserves)
         if strict and not self.parametric:
@@ -45,11 +61,12 @@ class PNode(BaseNode):
         return target
 
     @property
-    def pnode(self) -> 'PNode':
+    def pnode(self) -> PNode:
         return self
 
-    def init(self, state_input: Any = _UNSET, /, *,
-             input=_UNSET, **fields):
+    def init(self, state_input: PyTree = _UNSET, /, *,
+             input=_UNSET, **fields: PyTree) -> PyTree:
+        """Computes a fresh sparse `state` tree from optional field overrides, priming `input`, and `rng`."""
         key = fields.pop('rng', _UNSET)
         if state_input is not _UNSET and fields:
             raise TypeError('pass one state bundle or loose fields')
@@ -59,9 +76,7 @@ class PNode(BaseNode):
             raise TypeError('init expects a Struct or loose fields')
         validate_state_input(self, bundle)
         if not self.cyclic:
-            # A stateless node initializes to the empty state. A priming
-            # input is vacuous data and accepted; a claimed state field
-            # already raised above, and an unconsumed key stays a leak.
+            # Stateless definitions return the empty state tuple while still rejecting leaked RNG keys.
             _bind_rng(False, key, f'{self.name}: init')
             return ()
         rng = _bind_rng(
@@ -72,13 +87,15 @@ class PNode(BaseNode):
             state = self.contract.prime(self.param, bundle, input, rng)
         return self.contract._sparse_state(state)
 
-    def initialize(self, state_input: Any = _UNSET, /, *,
-                   input=_UNSET, **fields):
+    def initialize(self, state_input: PyTree = _UNSET, /, *,
+                   input=_UNSET, **fields: PyTree) -> PSNode:
+        """Computes initial state via `init(...)` and binds both `param` and `state` into a `PSNode`."""
         from nodejax.core.psnode import PSNode
         state = self.init(state_input, input=input, **fields)
         return PSNode(self._def, self.param, state)
 
-    def apply(self, *args, **fields):
+    def apply(self, *args: PyTree, **fields: PyTree) -> PyTree:
+        """Evaluates `input -> output` when stateless, or `(state, input) -> (state, output)` when cyclic."""
         if self.cyclic:
             if not args:
                 raise TypeError(
@@ -91,10 +108,11 @@ class PNode(BaseNode):
         _, output = self.contract.apply(self.param, (), formed, rng)
         return output
 
-    def __call__(self, *args, **fields):
+    def __call__(self, *args: PyTree, **fields: PyTree) -> PyTree:
         return self.apply(*args, **fields)
 
-    def bind(self, param=_UNSET, *, state=_UNSET):
+    def bind(self, param=_UNSET, *, state=_UNSET) -> PNode | PSNode:
+        """Replaces `param` or attaches `state`, returning an updated `PNode` or `PSNode`."""
         actual_param = self.param if param is _UNSET else param
         if state is _UNSET:
             return PNode(self._def, actual_param)
@@ -104,7 +122,7 @@ class PNode(BaseNode):
     def __getattr__(self, name: str):
         if name in self._def.methods:
             from nodejax.core.author_view import AuthorNode
-            # Methods see the dense slices an authored apply sees.
+            # Authored `@node.method` functions receive the dense parameter tree.
             return _bind_method(
                 self._def.methods[name],
                 param=lambda: self.contract._dense_param(self.param),
@@ -114,8 +132,7 @@ class PNode(BaseNode):
             return self._member(name)
         transparent = self._def.layout.transparent_member
         if transparent is not None:
-            # A transparent wrapper adds no level to the tree, so its
-            # member's attributes are reached without naming it.
+            # Transparent wrappers forward member lookup without adding a tree level.
             return getattr(self._member(transparent), name)
         methods = tuple(self._def.methods)
         available = f'; authored methods: {methods}' if methods else ''
@@ -123,8 +140,7 @@ class PNode(BaseNode):
             f'PNode {self.name!r} has no attribute {name!r}; '
             f'values live under .param{available}')
 
-    def _member(self, name: str) -> 'PNode':
-        """The member view with its parameter slice."""
+    def _member(self, name: str) -> PNode:
         if not self._def.layout.destructurable_param:
             raise AttributeError(
                 f'{self.name!r} maps parameters over an axis; '
@@ -147,10 +163,10 @@ class PNode(BaseNode):
 
 
 class _ParamHop:
-    def __str__(self):
+    def __str__(self) -> str:
         return ''
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return '<param>'
 
 

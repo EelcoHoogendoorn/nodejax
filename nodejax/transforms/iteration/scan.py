@@ -1,3 +1,19 @@
+"""Sequence-axis transforms (`scan`, `scanned`, and `carried`) over `jax.lax.scan`.
+
+All three transforms step a single-step `Node` along leading sequence axis 0
+with shared parameters and per-step PRNG splitting, differing in how state
+enters and leaves the run:
+
+- `scan` keeps `state` external (`(state, xs) -> (state, ys)`), supporting
+  multi-chunk streaming and named `boundary=` partial state resets.
+- `scanned` internalizes `state` (`xs -> ys`), priming fresh state from the
+  first sequence element (or starting from a bound `PSNode`) and discarding the
+  final carry.
+- `carried` internalizes `state` (`xs -> final_psnode`), priming or consuming
+  initial state and returning `step` bound to its final state as a `PSNode`
+  while discarding per-step primary outputs.
+"""
+
 from __future__ import annotations
 
 from nodejax.core.binding import _has_rng_deep, split_aux
@@ -5,14 +21,13 @@ from nodejax.core.contract import Contract
 from nodejax.core.node import Node
 from nodejax.core.pnode import PNode
 from nodejax.core.spec import add_axis, element_spec
-from nodejax.struct import Struct
-from nodejax.tree import tree_first
-from nodejax.transforms.transform import bind, scan_inputs, scan_steps, transform
 from nodejax.core.wrapper import Wrapper
+from nodejax.struct import Struct
+from nodejax.transforms.transform import bind, scan_inputs, scan_steps, transform
+from nodejax.tree import tree_first
 
 
 def _sequence_spec(inner: Contract, n: int | None = None):
-    """Lift a step input specification over one sequence axis."""
     step = inner._def.calls.apply.input_spec
     if (
         step is None
@@ -30,7 +45,6 @@ def _sequence_spec(inner: Contract, n: int | None = None):
 
 
 def _split_state_fields(input: Struct, fields: tuple[str, ...]) -> tuple[Struct, Struct]:
-    """One internalized call as its state-input bundle and its sequence bundle."""
     state_input = Struct(**{name: input[name] for name in fields})
     sequence = Struct(**{name: value for name, value in input.__items__ if name not in fields})
     return state_input, sequence
@@ -38,8 +52,6 @@ def _split_state_fields(input: Struct, fields: tuple[str, ...]) -> tuple[Struct,
 
 def _internalized_form(inner: Contract, fields: tuple[str, ...],
                        n: int | None = None) -> dict:
-    """The call form of an internalized run: the step's sequence fields, and its
-    required state-input fields beside them, once and unbatched over time."""
     if not fields:
         return {'input_spec': _sequence_spec(inner, n)}
     return {'apply_fields': tuple(inner.apply_fields) + fields, 'input_spec': None}
@@ -52,13 +64,7 @@ def _check_length(name: str, n: int | None) -> None:
 
 def _state_at_first_step(inner: Contract, param, state_input, data, rng, *,
                          bundled: bool):
-    """Build fresh state from the first element of a sequence.
-
-    `scan` needs what a restart would produce at a claimed boundary;
-    internalized runs need the same fresh carry as their start. The element is
-    a real value, so a node that primes gets data and not a shape, and the node
-    is bound to it so a node that only reads its shape is served too.
-    """
+    """Primes fresh state from the concrete first element of `data`."""
     element = tree_first(scan_inputs(inner, data))
     if bundled:
         element = inner.intake(element)
@@ -66,7 +72,6 @@ def _state_at_first_step(inner: Contract, param, state_input, data, rng, *,
 
 
 def _element_initialize(contract, param, state_input, rng):
-    """Build the step's state from one element's shape alone."""
     current = contract.members.step
     sequence_spec = contract.input_spec
     element = (None if sequence_spec is None else
@@ -78,8 +83,6 @@ def _element_initialize(contract, param, state_input, rng):
 
 
 def _sequence_parameterize(member_name: str, fields: tuple[str, ...] = ()):
-    """``fields`` are the state-input fields this transform's own call takes
-    beside the sequence; they carry no sequence axis."""
     def parameterize(contract, param_input, rng):
         current = getattr(contract.members, member_name)
         sequence_spec = contract.input_spec
@@ -93,25 +96,18 @@ def _sequence_parameterize(member_name: str, fields: tuple[str, ...] = ()):
 
 
 def _fresh_step_state(step: Contract, param, state_input, inputs, rng):
-    """Initialize an internalized run from its state inputs and its first
-    sequence element."""
     child_rng = rng.child(step.init_takes_rng)
     return _state_at_first_step(
         step, param, state_input, inputs, child_rng, bundled=True)
 
 
 def _given_start(step: Contract, state, rng):
-    """A run's carry from the state it was given, rekeyed when it holds
-    RNG keys, as a bound member's state is when a fresh state is formed."""
     from nodejax.core.compose import _rekeyed
     start = step._dense_state(state)
     return _rekeyed(start, rng.next(), step.name) if _has_rng_deep(state) else start
 
 
 def _run_start(contract: Contract, param, state_input, sequence, rng, state):
-    """The carry an internalized run starts from: the state the run was
-    given, else fresh state from the state inputs and the first sequence
-    element."""
     current = contract.members.step
     if state is not None:
         return _given_start(current, state, rng)
@@ -126,8 +122,7 @@ def _run_takes_rng(inner: Contract, state) -> bool:
     return inner.apply_takes_rng or _has_rng_deep(state)
 
 
-def _check_claim(inner: Contract, boundary):
-    """Reject a boundary name that no node in the step declares."""
+def _check_claim(inner: Contract, boundary: str | None) -> None:
     if boundary is None:
         return
     declared = inner.boundary_names
@@ -145,22 +140,19 @@ def _check_claim(inner: Contract, boundary):
 def scan(step: Node, record: bool = False,
          boundary: str | None = None,
          n: int | None = None) -> Node | PNode:
-    """Run ``step`` over a sequence while keeping its state external.
+    """Steps `step` along leading sequence axis 0 while threading `state` externally.
 
-    The supplied state becomes the initial carry and the returned state can be
-    passed to another call, making this form suitable for chunks or open-ended
-    streams. ``boundary`` may reinitialize matching state slots at the start
-    of each call. ``record=True`` adds the state trajectory to the auxiliary
-    output. ``n`` declares and enforces a fixed sequence length; without it,
-    the sequence length may change between calls.
+    Unlike `scanned` and `carried`, `scan` keeps `state` on the outer contract
+    so carry persists across chunked calls. Supplying `boundary` reinitializes
+    only descendant states marked with `state_reinit(..., boundary)` at the
+    start of each call; `record=True` sows the per-step state trajectory under
+    `Aux(state=...)`; and `n` enforces a fixed sequence length.
     """
     _check_length('scan', n)
     _check_claim(step.contract, boundary)
 
     if not step.cyclic:
-        # An acyclic step has unit carry, so scanning it is its ordinary
-        # sequence map; the boundary claim above already rejects a
-        # boundary= that nothing beneath declares.
+        # Acyclic steps carry `()` across the scan and expose a stateless sequence map.
         def map_fn(contract, param, input, rng):
             current = contract.members.step
             input = scan_inputs(current, input, n)
@@ -224,18 +216,15 @@ def scan(step: Node, record: bool = False,
 
 
 @transform(preserves='param', internalizes='state')
-def scanned(step: Node, record: bool = False, n: int | None = None) -> Node | PNode:
-    """Run ``step`` over a sequence with fresh state on every call.
+def scanned(step: Node, record: bool = False,
+            n: int | None = None) -> Node | PNode:
+    """Runs `step` across a sequence from fresh or bound state and returns stacked outputs.
 
-    A state-bound step runs from its bound state. Otherwise the state is
-    built from the step's state-input fields, which the call takes beside
-    the sequence fields, once and unbatched over time, and from the first
-    sequence element. The per-step outputs are returned and the final
-    state is discarded. ``record=True`` adds the state trajectory to the
-    auxiliary output without changing the ordinary output. ``n`` declares
-    and enforces a fixed sequence length; without it, the sequence length
-    may change between calls. An acyclic step has unit state, so this is
-    its ordinary sequence map.
+    Unlike `scan`, `scanned` exposes a stateless outer Node whose call accepts
+    any unbatched state-input fields alongside the sequence, primes initial
+    state from the first element (unless `step` was passed as a `PSNode`), and
+    discards the final carry. Setting `record=True` sows the state trajectory
+    under `Aux(state=...)`, and `n` enforces a fixed sequence length.
     """
     _check_length('scanned', n)
     state = step.state if step.state_bound else None
@@ -263,14 +252,12 @@ def scanned(step: Node, record: bool = False, n: int | None = None) -> Node | PN
 
 @transform(preserves='param', internalizes='state')
 def carried(step: Node, n: int | None = None) -> Node | PNode:
-    """Run ``step`` from fresh state and return it bound to its final state.
+    """Runs cyclic `step` across a sequence and returns a `PSNode` bound to the final state.
 
-    A state-bound step runs from its bound state. Otherwise the state is
-    built from the step's state-input fields, which the call takes beside
-    the sequence fields, and from the first sequence element. Per-step
-    outputs are discarded. Any auxiliary values emitted by the step remain
-    available alongside the bound step, whose members and methods read the
-    final state. ``n`` declares and enforces a fixed sequence length.
+    Unlike `scanned`, which returns stacked per-step outputs and discards the
+    final carry, `carried` discards per-step primary outputs (retaining stacked
+    `Aux` values when emitted) and returns `step` bound to its terminal state so
+    subsequent calls or member inspections read the warmed-up carry directly.
     """
     if not step.cyclic:
         raise TypeError(f'carried requires a cyclic node, got {step!r}')

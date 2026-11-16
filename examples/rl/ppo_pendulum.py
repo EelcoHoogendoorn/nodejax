@@ -1,4 +1,8 @@
-"""Run recurrent PPO on the Pendulum and save its phase-space plot."""
+"""Trains a recurrent PPO policy on the pendulum and plots closed-loop phase trajectories."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +36,9 @@ from examples.rl.pendulum import (
 )
 from examples.rl.ppo import ppo_iteration, ppo_training
 
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
+
 
 HIDDEN = 64
 MEMORY = 32
@@ -55,7 +62,7 @@ N_EVALUATION_STEPS = 300
 
 @node
 def PendulumValue(hidden: int) -> Node:
-    """Pendulum state value for the advantage baseline."""
+    """Predicts pendulum state values as an advantage baseline."""
     members = Composite(
         features=PendulumFeatures(),
         body=(
@@ -74,14 +81,14 @@ def PendulumValue(hidden: int) -> Node:
 
 
 def pendulum_policy(memory: BaseNode) -> Node:
-    """Build the example policy with an explicit memory lifecycle."""
+    """Builds a Gaussian pendulum policy wrapping `memory` inside `PendulumMean`."""
     mean = PendulumMean(memory=memory, hidden=HIDDEN)
     log_std = StateIndependentLogStd(initial=INITIAL_LOG_STD)
     return LearnedGaussian(mean, log_std)
 
 
 def pendulum_value() -> Node:
-    """Build the example value Node."""
+    """Builds the default `PendulumValue` critic Node."""
     return PendulumValue(hidden=HIDDEN)
 
 
@@ -92,14 +99,11 @@ def pendulum_training_program(
     value_loss: LossFn | BaseNode,
     iterations: int,
 ) -> Node:
-    """Build a complete executable Pendulum PPO training program.
+    """Assembles an executable pendulum PPO training Node over `iterations` rounds.
 
-    The returned Node has no ordinary inputs and requires ``rng``. It draws new
-    plant starts and initializes fresh policy state for every PPO iteration.
-    Plant and policy state then carry across every chunk in that iteration;
-    only actor and critic training state carries between iterations. The
-    ordinary output is the final bound PPO iteration, and per-iteration metrics
-    are retained under ``aux.training``.
+    Draws fresh plant starts and resets policy carry at the start of every iteration,
+    carries plant and policy state across chunks within each iteration, and carries
+    actor and critic optimizer state across iterations.
     """
     iteration = ppo_iteration(
         policy,
@@ -128,8 +132,8 @@ def pendulum_training_program(
     return serial(data=training_data, training=carried(iteration))
 
 
-def save_figure(figure, filename: str) -> str:
-    """Save one example figure beside the other RL plots."""
+def save_figure(figure: Figure, filename: str) -> str:
+    """Saves `figure` into the RL `plots/` directory and returns the output path."""
     import os
 
     output = os.path.join(os.path.dirname(__file__), 'plots', filename)
@@ -139,7 +143,7 @@ def save_figure(figure, filename: str) -> str:
 
 
 def swing_up() -> None:
-    """Train the recurrent policy, evaluate it, and save its phase portrait."""
+    """Trains the recurrent PPO policy, evaluates it on downward starts, and saves its phase portrait."""
     import matplotlib
 
     matplotlib.use('Agg')

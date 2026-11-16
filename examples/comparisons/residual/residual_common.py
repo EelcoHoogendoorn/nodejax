@@ -4,8 +4,8 @@ A residual wrapper is the smallest transform there is. It owns no axis, no
 state, no entropy and no parameters. It adds its input to its member's
 output and forwards everything else untouched.
 
-That is what makes it the controlled experiment. The lifted-stack comparison
-next door confounds two things: axis machinery, which is genuinely hard
+That is what makes it the controlled experiment. The companion `lift/`
+comparison confounds two things: axis machinery, which is non-trivial
 anywhere, and transparency, which is the point. Here there is no axis
 machinery to blame, so whatever a column cannot do is a transparency failure
 and nothing else.
@@ -30,7 +30,7 @@ OTHER_DROPOUT_SEED = 11
 
 @dataclass
 class Evidence:
-    """Observable behavior required from each transparent wrapper."""
+    """Records observable parity outcomes for each residual wrapper."""
 
     #: x + f(x) preserves the member's shape.
     output_shape: tuple[int, ...]
@@ -56,7 +56,7 @@ class Evidence:
 
 
 def verify(label: str, evidence: Evidence) -> Evidence:
-    """Assert the parity contract and print one compact summary."""
+    """Asserts the parity contract and prints one compact summary."""
     assert evidence.output_shape == (WIDTH,)
     assert evidence.parameter_shape == (WIDTH,)
     assert evidence.state_advanced

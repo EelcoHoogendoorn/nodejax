@@ -1,16 +1,16 @@
 """An attempt at a reusable lifted layer stack in idiomatic Equinox.
 
-The substrate is as different from Flax NNX as the JAX ecosystem offers. An
-``eqx.Module`` IS a pytree of its parameters, so building the stack is
-``eqx.filter_vmap`` over the constructor and running it is a plain
-``lax.scan`` over the stacked leaves. Nothing is lifted and no graph is split.
+The substrate differs sharply from Flax NNX in the JAX ecosystem. An
+`eqx.Module` is a pytree of its parameters, so building the stack is
+`eqx.filter_vmap` over the constructor and running it is a plain
+`lax.scan` over the stacked leaves. Nothing is lifted and no graph is split.
 
 State is where the difference shows. Equinox has no mutable variable, so a
-layer that carries something returns a NEW SELF, and the scan stacks those
+layer that carries something returns a new self, and the scan stacks those
 successors like any other output. That is uniform and it costs nothing at the
 scan. What it costs is that parameters and state are leaves of one pytree,
 told apart only by which field you name: this file reads
-``stacked.weight`` and ``stacked.mean`` off the same value, and no filter can
+`stacked.weight` and `stacked.mean` off the same value, and no filter can
 recover which was which.
 
 Two limits below are structural rather than a matter of spelling, and they
@@ -18,9 +18,9 @@ lock together. The mechanism that separates state from parameters is the one
 that cannot be built per-layer, and the mechanism that can be built per-layer
 is the one that cannot separate them.
 
-``eqx.nn.State`` is the official place to keep mutable state, and it is
-addressed by ``eqx.nn.StateIndex``, a Python object created when the
-constructor runs. ``eqx.filter_vmap`` traces a constructor ONCE, so N layers
+`eqx.nn.State` is the official place to keep mutable state, and it is
+addressed by `eqx.nn.StateIndex`, a Python object created when the
+constructor runs. `eqx.filter_vmap` traces a constructor once, so N layers
 receive one index between them rather than one each. The state leaf still
 comes out with a leading axis and looks right until it is scanned: inside the
 scan the weights are sliced to a single row, while a read of the state returns
@@ -28,21 +28,21 @@ the whole stacked array, because the index addresses a model-global slot and
 identity is not something a scan can index per iteration. The carry types then
 disagree and the scan is rejected. Building the layers in a Python loop does
 give one slot each, and that is unrolling, which is what a lifted stack exists
-to avoid. ``_state_slots_when_stacked`` measures both counts.
+to avoid. `_state_slots_when_stacked` measures both counts.
 
 So this file uses the other convention, returned successors, which is what the
 protocol below is built around. The price is that a returned successor puts
 state and parameters in one pytree as ordinary arrays. Nothing distinguishes
 them but the field name, and a transform does not know the field names of a
-layer someone else wrote. ``eqx.filter_grad`` differentiates the running
+layer someone else wrote. `eqx.filter_grad` differentiates the running
 statistic along with the weights, so an optimizer handed that gradient updates
-the statistic as if it were a parameter. ``_state_gets_gradient`` measures it.
+the statistic as if it were a parameter. `_state_gets_gradient` measures it.
 
 The layer protocol is this file's own, exactly as the NNX column's is:
-``make_layer`` is a closure over construction arguments taking one key;
-``__call__`` returns ``(successor, output)`` so a stateless layer answers
-``(self, value)``; it may declare ``key=``; and it uses this file's
-``WithAux`` when it emits aux. Only the entropy fact is discovered rather
+`make_layer` is a closure over construction arguments taking one key;
+`__call__` returns `(successor, output)` so a stateless layer answers
+`(self, value)`; it may declare `key=`; and it uses this file's
+`WithAux` when it emits aux. Only the entropy fact is discovered rather
 than declared, by inspecting the signature, and that is the one that decides
 whether the transform composes with itself.
 
@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -75,8 +75,8 @@ from examples.comparisons.lift.lift_common import (
 
 
 class WithAux(NamedTuple):
-    value: Any
-    aux: Any
+    value: object
+    aux: object
 
 
 class LayerAux(NamedTuple):
@@ -85,7 +85,7 @@ class LayerAux(NamedTuple):
 
 
 def emit(value, aux):
-    """Mark auxiliary output without constraining its pytree type."""
+    """Marks auxiliary output without constraining its pytree type."""
     return WithAux(value, aux)
 
 
@@ -94,7 +94,7 @@ def _split_output(output):
 
 
 class LayerStack(eqx.Module):
-    """Stack layers satisfying this comparison's constructor/call protocol."""
+    """Stacks layers satisfying this comparison's constructor and call protocol."""
 
     layers: eqx.Module
     depth: int = eqx.field(static=True)
@@ -133,7 +133,7 @@ class LayerStack(eqx.Module):
 
 def layer_stack(make_layer: Callable, depth: int,
                 key: jax.Array) -> LayerStack:
-    """Construct a sequential transform over the documented layer protocol."""
+    """Constructs a sequential transform over the documented layer protocol."""
     return LayerStack(make_layer, depth, key)
 
 
@@ -155,7 +155,7 @@ class NoisyStatefulLayer(eqx.Module):
 
 
 class BareLayer(eqx.Module):
-    """A deterministic layer proving that state and aux are not mandatory."""
+    """Scales inputs deterministically without carried state or auxiliary output."""
 
     weight: jax.Array
 
@@ -175,7 +175,7 @@ def _raises(call) -> bool:
 
 
 def _nests() -> bool:
-    """Whether layer_stack accepts its own product as a layer."""
+    """Checks whether `layer_stack` accepts its own product as a layer."""
     try:
         tower = layer_stack(
             lambda key: layer_stack(BareLayer, 2, key),
@@ -216,13 +216,13 @@ class StatefulLayer(eqx.Module):
 
 
 class OtherStateLayer(eqx.Module):
-    """State of Equinox\'s other kind.
+    """Carries state via Equinox's `StateIndex` and `State` mechanism.
 
     Everywhere else in this file a stateful layer returns a new self, which
-    is a convention this column invented. Equinox also ships a real
-    mechanism: ``eqx.nn.StateIndex`` marks a slot and ``eqx.nn.State``
+    is a convention this column invented. Equinox also ships a built-in
+    mechanism: `eqx.nn.StateIndex` marks a slot and `eqx.nn.State`
     carries the values, threaded through the call as a second argument and
-    returned alongside the output. It is the mechanism ``eqx.nn.BatchNorm``
+    returned alongside the output. It is the mechanism `eqx.nn.BatchNorm`
     uses.
     """
 
@@ -239,7 +239,7 @@ class OtherStateLayer(eqx.Module):
 
 
 #: Each context and the module that presents it. Every module owns
-#: parameters, since a layer axis is what ``layer_stack`` ranges over.
+#: parameters, since a layer axis is what `layer_stack` ranges over.
 _CONTEXTS = (
     ('plain', BareLayer, False),
     ('rng', NoisyLayer, True),
@@ -250,7 +250,7 @@ _CONTEXTS = (
 
 
 def _contexts(param_key, apply_key) -> tuple[str, ...]:
-    """Which member contexts ``layer_stack`` carries."""
+    """Reports which member contexts `layer_stack` carries."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     carried = []
     for name, make_layer, draws in _CONTEXTS:
@@ -267,10 +267,10 @@ def _contexts(param_key, apply_key) -> tuple[str, ...]:
 
 
 def _state_gets_gradient(param_key) -> bool:
-    """Whether a gradient reaches the running statistic.
+    """Checks whether a gradient reaches the running statistic.
 
-    It does. ``weight`` and ``mean`` are both inexact arrays in one pytree,
-    and ``eqx.is_inexact_array`` is what selects what to differentiate, so
+    It does. `weight` and `mean` are both inexact arrays in one pytree,
+    and `eqx.is_inexact_array` is what selects what to differentiate, so
     nothing separates a parameter from a running statistic except the field
     name. An optimizer handed this gradient updates the statistic too.
     """
@@ -286,12 +286,12 @@ def _state_gets_gradient(param_key) -> bool:
 
 
 def _state_slots_when_stacked() -> tuple[int, int]:
-    """How many distinct state slots ``eqx.nn.State`` gives DEPTH layers,
-    built separately and built under ``eqx.filter_vmap``.
+    """Counts distinct `eqx.nn.State` slots for `DEPTH` layers built
+    separately versus built under `eqx.filter_vmap`.
 
-    The answer is DEPTH and 1. ``eqx.nn.StateIndex`` is addressed by Python
+    The answer is `DEPTH` and `1`. `eqx.nn.StateIndex` is addressed by Python
     object identity, created when the constructor runs, and
-    ``eqx.filter_vmap`` traces the constructor once. So the layers cannot
+    `eqx.filter_vmap` traces the constructor once. So the layers cannot
     receive one slot each, and inside a scan there is no way to reach the
     row belonging to this iteration: see the module docstring.
     """

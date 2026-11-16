@@ -1,47 +1,53 @@
-"""Carved from core.py: one file per class, the helpers beside their
-class. The package __init__ is the public facade."""
+"""Argument binding, input-spec validation, and `Aux` output splitting.
+
+Public Node calls accept positional arguments, named keyword fields, or an
+explicit `bundle=` `Struct`, alongside a separate `rng=` keyword for stochastic
+computations. This module converts those public calls into validated `Struct`
+bundles and `MaybeKeyStream` capabilities, tracks mapped leading axes via
+`AxisSpec`, and separates `Aux` payloads from primary runtime outputs.
+"""
 
 from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Callable
 
 import jax
 
 from nodejax.struct import Struct, register_struct_subtype
 from nodejax.frozendict import frozendict
 from nodejax.core.rng import MaybeKeyStream, _check_raw_key
-from nodejax.core.types import Output
+from nodejax.core.types import Output, PyTree
+
+if TYPE_CHECKING:
+    from nodejax.core.contract import CallForm
+    from nodejax.core.definition import Def
 
 
 class _Required:
-    """Marker for a required input-bundle field: a constructor parameter with
-    no default, whose value the caller must supply. Its shape/dtype is the
-    spec's concern; this is the requirement marker."""
+    """Marks a declared call field that has no default and must be supplied."""
     def __repr__(self) -> str:
         return 'REQUIRED'
 
 
 REQUIRED = _Required()
 
-_UNSET = object()      # a channel not offered to bind: absent, not None
+_UNSET = object()
 
 
 @dataclass(frozen=True, eq=False)
 class AxisSpec:
-    """A leading axis over one ELEMENT: what an axis transform
-    (batch, and the scan family in turn) publishes as its input spec.
+    """Declares a mapped leading axis over an element spec PyTree.
 
-    The element is a spec pytree, concrete leaves or a declared bundle;
-    count is the axis's declared extent. A fixed mapping learns an omitted
-    count from its first binding and checks it thereafter. A variable mapping
-    never adopts a runtime extent; scans use that form because sequence length
-    may change between calls. The element survives either way, which is the
-    point: params build against it and bindings validate against it. Reserved
-    RNG never sits under the map; its invocation capability is separate."""
-    element: Any
+    Axis transforms (`batch` and the `scan` family) publish `AxisSpec` as their
+    input spec so parameter constructors see the unmapped `element` shape while
+    call validation checks the leading extent. When `fixed` is `True` and `count`
+    is `None`, the first input binding locks the axis extent for subsequent checks;
+    when `fixed` is `False`, sequence length remains variable across calls.
+    """
+    element: PyTree
     count: int | None = None
     fixed: bool = True
 
@@ -53,9 +59,9 @@ class AxisSpec:
         if type(self.fixed) is not bool:
             raise TypeError('AxisSpec.fixed must be a bool')
 
-    def replace(self, *, element: Any = _UNSET, count: Any = _UNSET,
-                fixed: Any = _UNSET) -> 'AxisSpec':
-        """Return a distinct declaration with the named fields replaced."""
+    def replace(self, *, element: PyTree = _UNSET, count: int | None = _UNSET,
+                fixed: bool = _UNSET) -> AxisSpec:
+        """Returns a new `AxisSpec` with the specified fields replaced."""
         return type(self)(
             self.element if element is _UNSET else element,
             self.count if count is _UNSET else count,
@@ -67,7 +73,7 @@ class AxisSpec:
              '?' if self.count is None else self.count)
         return f'axis[{n}]({self.element!r})'
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return (type(other) is AxisSpec and other.count == self.count
                 and other.element == self.element
                 and other.fixed == self.fixed)
@@ -76,7 +82,6 @@ class AxisSpec:
 def _bundle_spec(parameters: Mapping[str, inspect.Parameter], *, drop: tuple = (),
                  owner: str | None = None,
                  allow_defaults: bool = True) -> Struct:
-    """Build one ordered argument declaration from inspected parameters."""
     declaration = {}
     prefix = f'{owner}: ' if owner else ''
     for name, parameter in parameters.items():
@@ -102,12 +107,7 @@ def _bundle_spec(parameters: Mapping[str, inspect.Parameter], *, drop: tuple = (
 
 
 def _bundle_spec_from_sig(fn: Callable, *, drop: tuple = ()) -> Struct:
-    """The required input fields of an authored apply function.
-
-    Names in ``drop`` are implementation channels rather than inputs. The
-    reserved ``rng`` marker remains only long enough for compilation to record
-    the role's entropy requirement; it is never part of the data bundle.
-    """
+    """Extracts the required input fields declared by an authored `apply` function."""
     try:
         params = inspect.signature(fn).parameters
     except (ValueError, TypeError):
@@ -121,26 +121,23 @@ def _bundle_spec_from_sig(fn: Callable, *, drop: tuple = ()) -> Struct:
         params, drop=drop, owner=fn.__name__, allow_defaults=False)
 
 
-def _has_rng_deep(tree: Any) -> bool:
-    """Whether a state VALUE carries a reserved rng field at any depth:
-    the question a stored state answers before it may fill an init slot
-    without a boundary key (a stored key never replays; it is replaced)."""
+def _has_rng_deep(tree: PyTree) -> bool:
+    """Reports whether a state PyTree contains a `Struct` field named `rng` at any depth."""
     if issubclass(type(tree), Struct):
         return 'rng' in tree or any(_has_rng_deep(v) for _, v in tree.__items__)
     return False
 
 
-def _has_rng_field(tree: Any) -> bool:
-    """Whether one Struct value has a top-level domain field named ``rng``."""
+def _has_rng_field(tree: PyTree) -> bool:
     return issubclass(type(tree), Struct) and 'rng' in tree
 
 
-def _spec_resolved(spec: Any) -> bool:
-    """Whether an apply input spec is RESOLVED (shapes known) rather than a
-    signature-derived marker bundle awaiting binding. None is not resolved;
-    a tree containing a REQUIRED marker is not resolved. A AxisSpec is
-    resolved when its ELEMENT is: the count is not shape knowledge, and
-    nothing that builds params needs it."""
+def _spec_resolved(spec: PyTree) -> bool:
+    """Reports whether an input spec contains concrete shapes rather than `REQUIRED` markers.
+
+    An `AxisSpec` counts as resolved as soon as its `element` spec is resolved,
+    even when its leading `count` is still `None`.
+    """
     if spec is None:
         return False
     leaves = jax.tree.leaves(spec, is_leaf=lambda x: type(x) is AxisSpec)
@@ -148,14 +145,12 @@ def _spec_resolved(spec: Any) -> bool:
                else leaf is not REQUIRED for leaf in leaves)
 
 
-def _contains_axis(spec: Any) -> bool:
-    """Whether the spec declares any axis."""
+def _contains_axis(spec: PyTree) -> bool:
     return any(type(leaf) is AxisSpec for leaf in jax.tree.leaves(
         spec, is_leaf=lambda x: type(x) is AxisSpec))
 
 
-def _counts_unknown(spec: Any) -> bool:
-    """Whether any fixed axis still lacks its extent."""
+def _counts_unknown(spec: PyTree) -> bool:
     axes = jax.tree.leaves(
         spec,
         is_leaf=lambda value: type(value) is AxisSpec,
@@ -170,12 +165,8 @@ def _counts_unknown(spec: Any) -> bool:
     )
 
 
-def _bind_axis(declared: Any, got: Any) -> Any:
-    """The spec to store after binding `got` (already reduced to a spec)
-    against `declared`: where declared maps an axis, got's leading axis
-    becomes the count and the rest the element, so the stored spec keeps
-    the declared FORM; everywhere else got stands. Validation is
-    validate_input_spec's job; this only records."""
+def _bind_axis(declared: PyTree, got: PyTree) -> PyTree:
+    """Merges incoming shape evidence `got` into `declared` while preserving `AxisSpec` wrappers."""
     if type(declared) is AxisSpec:
         if type(got) is AxisSpec:
             count = declared.count
@@ -212,12 +203,8 @@ def _bind_axis(declared: Any, got: Any) -> Any:
     return got
 
 
-def _spec_sig(tree: Any) -> tuple:
-    """A pytree's structural shape signature (treedef + per-leaf shape and
-    dtype), taken through spec_of so concrete and spec leaves compare
-    alike. Axis declarations compare through one abstract representative,
-    never by treating AxisSpec itself as an array. For validating one shape
-    against another."""
+def _spec_sig(tree: PyTree) -> tuple:
+    """Computes a structural `(treedef, leaf_shapes_and_dtypes)` signature for spec comparison."""
     from nodejax.core.spec import _axis_probe_spec
     leaves, treedef = jax.tree.flatten(_axis_probe_spec(tree))
     return treedef, tuple((tuple(leaf.shape), leaf.dtype) for leaf in leaves)
@@ -231,12 +218,7 @@ def _validate_bundle(
         *,
         _boundary: bool = True,
 ) -> None:
-    """One bundle against its declared spec: an unknown field and a missing
-    REQUIRED field are both errors, named, at the call that supplied them.
-
-    RNG is a separate framework channel at the call boundary. Complete fields
-    remain ordinary domain data even when their value is a Struct; only fields
-    explicitly declared as nested construction forms recurse."""
+    """Validates `bundle` against `form`, recursing only into explicitly nested call fields."""
     if not issubclass(type(bundle), Struct):
         raise TypeError(
             f'{name}.{entry}: canonical bundles are Struct values; '
@@ -267,12 +249,7 @@ def _validate_bundle(
 
 
 def validate_param_input(node, param_input: Struct) -> None:
-    """Check a construction bundle against param_input_spec.
-
-    An absent spec means the node takes no construction input at all, so any
-    field is an error. That is not the same as having no params: a composite
-    has no construction input of its own and still builds a param, the Struct
-    of its members'."""
+    """Validates a parameter-construction `Struct` against `node`'s declared `param` form."""
     call = node._def.calls.param
     if call is None:
         if set(param_input.__keys__):
@@ -282,10 +259,7 @@ def validate_param_input(node, param_input: Struct) -> None:
 
 
 def validate_state_input(node, state_input: Struct) -> None:
-    """Check a state_input bundle against state_input_spec.
-
-    An absent spec means the node has no state to build from, so any field is an
-    error: it claims state that does not exist."""
+    """Validates a state-construction `Struct` against `node`'s declared `init` form."""
     call = node._def.calls.init
     if call is None:
         if set(state_input.__keys__):
@@ -294,24 +268,13 @@ def validate_state_input(node, state_input: Struct) -> None:
     _validate_bundle(node.name, 'contract.init', call.form, state_input)
 
 
-def validate_input_spec(definition, input_spec: Any) -> None:
-    """Check a value against a definition's declared input spec.
-
-    Bundles validate by the bundle rule, the same one every other bundle
-    boundary applies: an unknown field is a NAMED conflict, a present field
-    must match the spec's shape, and an absent field merely contributes no new
-    shape evidence. Runtime requiredness is owned separately by CallForm;
-    apply inputs never have defaults. Non-bundle trees compare whole."""
+def validate_input_spec(definition: Def, input_spec: PyTree) -> None:
+    """Validates `input_spec` against `definition`'s declared `apply` input spec."""
     declared = definition.calls.apply.input_spec
     _validate_spec(definition.name, declared, input_spec)
 
 
-def _validate_spec(where: str, spec: Any, got: Any) -> None:
-    """One spec subtree against what a binding supplies, recursing through
-    bundles and declared axes so the error names the exact conflict.
-
-    RNG is not represented here: public binding has already converted the raw
-    key into a separate invocation capability."""
+def _validate_spec(where: str, spec: PyTree, got: PyTree) -> None:
     if spec is REQUIRED:
         return
     if type(spec) is AxisSpec:
@@ -359,36 +322,27 @@ def _validate_spec(where: str, spec: Any, got: Any) -> None:
 
 @register_struct_subtype
 class Aux(Struct):
-    """The auxiliary channel's marker: sown metrics, losses and taps.
+    """Marks a `Struct` of side-band metrics, losses, or diagnostic taps in `(output, Aux(...))`.
 
-    A named bundle like any other, which is why it subtypes Struct — and a
-    distinct TYPE, because that is what split_aux dispatches on. The output
-    doctrine spells positional pairs of data as named Structs, so a Struct
-    in the second slot is data; only an Aux is aux."""
-
-
-def split_aux(output: Output) -> tuple[Output, Any]:
-    """The aux stream: clean output and auxiliary data separation.
-
-    Returns (clean_output, aux).
-    aux is non-None when output is a 2-tuple whose second element is an
-    Aux — the explicit marker, and the only one. A Struct there is DATA: the
-    output doctrine spells positional pairs of data as named Structs, so
-    reading any Struct as aux would take a node's own output away from it.
+    `split_aux` dispatches on the exact `Aux` type so an ordinary `Struct` returned
+    in the second slot of a 2-tuple remains part of the primary output.
     """
+
+
+def split_aux(output: Output) -> tuple[Output, Aux | None]:
+    """Splits a runtime output into `(clean_output, aux)` when `output` is `(value, Aux(...))`."""
     if type(output) is tuple and len(output) == 2 and type(output[1]) is Aux:
         return output[0], output[1]
     return output, None
 
 
 def drop_aux(output: Output) -> Output:
-    """Discard Aux from a concrete runtime output."""
+    """Strips an `Aux` payload from `output` and returns the primary output value."""
     clean, _ = split_aux(output)
     return clean
 
 
 def _freeze_mapping(values: Mapping) -> frozendict:
-    """Freeze a nested mapping after local assembly."""
     return frozendict({
         name: (_freeze_mapping(value)
                if issubclass(type(value), Mapping) else value)
@@ -397,8 +351,7 @@ def _freeze_mapping(values: Mapping) -> frozendict:
 
 
 def _unflatten_dot_paths(statics: dict) -> frozendict:
-    """'member.field' keys nest into member dicts; '*.'-wilds are the
-    caller's to strip first."""
+    """Expands `'member.field'` keys into nested `frozendict` mappings."""
     out: dict = {}
     for key, value in statics.items():
         if '.' in key and not key.startswith('*.'):
@@ -417,13 +370,9 @@ def _unflatten_dot_paths(statics: dict) -> frozendict:
     return _freeze_mapping(out)
 
 
-def _as_bundle(fields: dict) -> Any:
-    """The param/state-boundary sugar: loose kwargs pack into a bundle,
-    and a dot-joined key configures by path: parameterize(**{'gain.scale':
-    1.0}) nests exactly as parameterize(gain=Struct(scale=1.0)) does, so
-    the flat and the nested spelling are the same call. Sub-bundles are
-    Structs."""
-    def as_struct(tree: Any) -> Any:
+def _as_bundle(fields: dict) -> Struct:
+    """Packs keyword arguments and dot-joined member paths into nested `Struct` bundles."""
+    def as_struct(tree: PyTree) -> PyTree:
         if issubclass(type(tree), Mapping):
             return Struct(**{name: as_struct(value)
                              for name, value in tree.items()})
@@ -434,13 +383,8 @@ def _as_bundle(fields: dict) -> Any:
     return Struct(**fields)
 
 
-def _bind_call(node, args: tuple, kwargs: dict) -> Any:
-    """THE calling convention: a node's input signature is a function
-    signature. Positional args bind to the declared fields in order,
-    kwargs by name; what travels underneath is the input bundle. For a
-    closed call, explicit ``bundle=`` selects the declared fields from a
-    formed source bundle. An open call receives that bundle whole. Ordinary
-    positional and keyword calls remain exact."""
+def _bind_call(node, args: tuple, kwargs: dict) -> Struct:
+    """Binds positional, keyword, or `bundle=` arguments into `node`'s input `Struct`."""
     kwargs = dict(kwargs)
     if 'bundle' in kwargs:
         formed = kwargs.pop('bundle')
@@ -484,14 +428,8 @@ def _bind_call(node, args: tuple, kwargs: dict) -> Any:
     return _validate_public_input(node, Struct(**ordered))
 
 
-def _bind_rng(takes_rng: bool, key: Any, where: str) -> MaybeKeyStream:
-    """Bind a raw key or adapt a forwarded invocation capability.
-
-    Raw public keys are strict: a stochastic role requires exactly one and a
-    deterministic role rejects one. A forwarded ``MaybeKeyStream`` is
-    compositional: deterministic children receive an empty capability without
-    advancing the parent, while stochastic children consume one parent draw.
-    """
+def _bind_rng(takes_rng: bool, key: PyTree, where: str) -> MaybeKeyStream:
+    """Validates a raw public PRNG key or derives a child `MaybeKeyStream` capability."""
     if type(takes_rng) is not bool:
         raise TypeError(f'{where}: takes_rng must be a bool')
     if type(key) is MaybeKeyStream:
@@ -512,11 +450,7 @@ def _bind_rng(takes_rng: bool, key: Any, where: str) -> MaybeKeyStream:
 
 def _bind_public_call(node, args: tuple,
                       kwargs: dict) -> tuple[Struct, MaybeKeyStream]:
-    """Bind one root apply call and its separate RNG execution channel.
-
-    Authored member calls use the same argument binding before their enclosing
-    wiring supplies a child capability. Only a public call accepts a raw key.
-    """
+    """Binds a public `apply` call into its input `Struct` and `MaybeKeyStream`."""
     kwargs = dict(kwargs)
     key = kwargs.pop('rng', _UNSET)
     bundle = _bind_call(node, args, kwargs)
@@ -526,17 +460,7 @@ def _bind_public_call(node, args: tuple,
 
 
 def _validate_public_input(node, bundle: Struct) -> Struct:
-    """Validate one formed public input against its stable call form.
-
-    This is the sole validation boundary for positional, keyword, and
-    explicit ``bundle=`` calls. A closed explicit bundle has already selected
-    the declaration's fields before reaching this boundary. Internal
-    composition already produces formed bundles and enters through the
-    compiled contract instead. Resolved value specs are construction and
-    transform metadata, not a restriction on the outer shape of every later
-    runtime value; resolution validates those shapes at ``with_input`` and
-    internal binding sites.
-    """
+    """Checks `bundle` against `node`'s declared `apply` fields at a public call site."""
     if 'rng' in bundle:
         raise TypeError(f'{node.name}: rng is a separate call channel')
     declaration = node.contract._apply_form.declaration
@@ -553,25 +477,23 @@ def _validate_public_input(node, bundle: Struct) -> Struct:
     return bundle
 
 
-# names that are CHANNELS in a method signature, injected by the view
-# that binds the method
+# Reserved method parameter names injected by the enclosing Node view.
 _METHOD_CHANNELS = frozenset({'param', 'state', 'node', 'rng'})
 
 
-def _bind_method(fn: Callable, *, node = None,
-                 param = None, state = None,
-                 rng = None) -> Callable:
-    """Bind a node method to a view: the reserved parameters (node, param,
-    state, rng) fill from the view at call time, every other parameter is
-    a call argument, and an explicit keyword beats the view.
+def _bind_method(fn: Callable, *, node=None,
+                 param=None, state=None,
+                 rng=None) -> Callable:
+    """Binds a custom Node method to a view by injecting reserved parameters per call.
 
-    Each keyword here is a zero-arg callable, evaluated per call rather
-    than captured, so a state read after a member step sees the advance."""
+    Each provider is a zero-argument callable evaluated on every invocation so
+    methods inside authored `step` scopes observe updated member states.
+    """
     names = list(inspect.signature(fn).parameters)
     fields = [n for n in names if n not in _METHOD_CHANNELS]
     reserved = [n for n in names if n in _METHOD_CHANNELS]
 
-    def bound(*args: Any, **kwargs: Any) -> Any:
+    def bound(*args: PyTree, **kwargs: PyTree) -> PyTree:
         if len(args) > len(fields):
             raise TypeError(f'{fn.__name__}() takes {len(fields)} call argument(s) '
                             f'{fields}; the reserved names {reserved} are injected')
@@ -592,6 +514,3 @@ def _bind_method(fn: Callable, *, node = None,
         return fn(**kw)
 
     return bound
-
-
-# === the form ===

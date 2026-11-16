@@ -1,8 +1,9 @@
-"""Input-shape declarations and derived shape operations."""
+"""Constructs and manipulates input shape/dtype specifications (`jax.ShapeDtypeStruct` and `AxisSpec`).
+
+Abstract shape propagation uses `jax.ShapeDtypeStruct` leaves for concrete shapes and `AxisSpec` nodes for leading mapped or scanned axes whose extent may still be unknown at assembly time. `materialize` converts abstract spec leaves into zero arrays while passing concrete array leaves through unchanged so input-primed Nodes keep real initial values when supplied.
+"""
 
 from __future__ import annotations
-
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -12,16 +13,15 @@ from nodejax.core.types import PyTree
 from nodejax.core.binding import AxisSpec, _spec_resolved
 
 
-def spec(shape: int | tuple = (), dtype: Any = jnp.float32) -> jax.ShapeDtypeStruct:
-    """Declare a single array spec; an int is shorthand for a 1-d shape."""
+def spec(shape: int | tuple = (), dtype=jnp.float32) -> jax.ShapeDtypeStruct:
+    """Creates a `jax.ShapeDtypeStruct`, treating an integer `shape` as a 1-D `(shape,)` tuple."""
     if type(shape) is int:
         shape = (shape,)
     return jax.ShapeDtypeStruct(tuple(shape), dtype)
 
 
 def spec_of(tree: PyTree) -> PyTree:
-    """The spec of a pytree: ShapeDtypeStruct leaves for concrete values;
-    existing spec leaves, AxisSpec included, pass through."""
+    """Converts concrete leaves in `tree` to `jax.ShapeDtypeStruct` while preserving existing spec leaves."""
     return jax.tree.map(
         lambda leaf: leaf if type(leaf) in (jax.ShapeDtypeStruct, AxisSpec)
         else jax.ShapeDtypeStruct(jnp.shape(leaf), jnp.result_type(leaf)),
@@ -29,17 +29,7 @@ def spec_of(tree: PyTree) -> PyTree:
 
 
 def _axis_probe_spec(tree: PyTree) -> PyTree:
-    """A concrete abstract representative of a spec that may declare an axis.
-
-    JAX shape evaluation needs array-shaped leaves, while ``AxisSpec`` is a
-    partial declaration rather than an array.  Replace each declared axis with
-    a leading abstract axis: its declared extent when fixed and known, or one
-    representative element otherwise.  Nested axes recurse, and an axis over a
-    Struct distributes over its fields just like ``add_axis`` does.
-
-    This is a throwaway shape probe.  It never changes the declaration or
-    teaches a variable map the representative extent.
-    """
+    """Expands `AxisSpec` nodes into temporary `ShapeDtypeStruct` leaves for `jax.eval_shape`."""
     def expand(leaf):
         if type(leaf) is not AxisSpec:
             return leaf
@@ -56,10 +46,7 @@ def _axis_probe_spec(tree: PyTree) -> PyTree:
 
 
 def materialize(tree: PyTree) -> PyTree:
-    """Turn a spec (or value) into a materialized value: spec leaves become zeros,
-    concrete leaves pass through unchanged — so a real value primes
-    state with data where a spec only supplies shape. A declared axis
-    materializes at its count, and refuses while the count is unknown."""
+    """Replaces abstract spec leaves in `tree` with zero arrays while leaving concrete values intact."""
     def leaf(l):
         if type(l) is AxisSpec:
             if l.count is None:
@@ -75,8 +62,8 @@ def materialize(tree: PyTree) -> PyTree:
 
 
 def add_axis(spec: PyTree, n: int | None = None, *,
-                fixed: bool = True) -> AxisSpec:
-    """Add a declared leading axis, optionally with a fixed extent."""
+                fixed: bool = True) -> PyTree:
+    """Wraps `spec` (field-wise across `Struct`s) in a leading `AxisSpec` of extent `n`."""
     if issubclass(type(spec), Struct):
         return Struct(**{
             k: add_axis(v, n, fixed=fixed) for k, v in spec.__items__})
@@ -86,9 +73,7 @@ def add_axis(spec: PyTree, n: int | None = None, *,
 
 
 def axis_count(spec: PyTree) -> int | None:
-    """The declared axis extent of a bundle spec: the first populated field's
-    count (every field declaring one shares the axis), or the leading data
-    axis of a resolved spec without one. None when nothing says."""
+    """Returns the leading `AxisSpec` count or leading concrete dimension of `spec`, or `None` if unknown."""
     def lead(tree):
         leaves = jax.tree.leaves(
             tree,
@@ -107,11 +92,10 @@ def axis_count(spec: PyTree) -> int | None:
 
 
 def element_spec(spec: PyTree) -> PyTree:
-    """Remove one declared or concrete leading axis from a spec."""
+    """Peels one declared `AxisSpec` or concrete leading dimension off `spec`."""
     leaves = jax.tree.leaves(spec, is_leaf=lambda x: type(x) is AxisSpec)
     if any(type(l) is AxisSpec for l in leaves):
-        # axis subtrees unwrap in place; fields beside the axis (a boundary
-        # key) pass unchanged, since the map never covered them
+        # Unwrap AxisSpec subtrees in place while leaving non-axis sibling fields untouched.
         return jax.tree.map(
             lambda l: l.element if type(l) is AxisSpec else l,
             spec, is_leaf=lambda x: type(x) is AxisSpec)

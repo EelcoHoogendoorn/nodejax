@@ -1,4 +1,8 @@
-"""Run Gaussian MPPI with a learned Pendulum terminal critic and save its plot."""
+"""Trains a terminal value critic for receding-horizon Gaussian MPPI on the pendulum and plots phase trajectories."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -12,7 +16,6 @@ from nodejax import (
     Struct,
     batch,
     carried,
-    control,
     drop_aux,
     node,
     serial,
@@ -34,6 +37,9 @@ from examples.rl.pendulum import (
     phase_starts,
     phase_surface,
 )
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 
 DISCOUNT = 0.97
@@ -60,8 +66,8 @@ N_EVALUATION_STEPS = 300
 
 
 @node
-def PendulumCommandRange() -> Node:
-    """Keep raw planner commands in a useful range before actuation."""
+def PendulumCommandRange() -> PNode:
+    """Clips raw planner commands into `[-COMMAND_LIMIT, COMMAND_LIMIT]`."""
     return Leaf(lambda input: jnp.clip(input, -COMMAND_LIMIT, COMMAND_LIMIT))
 
 
@@ -70,15 +76,11 @@ def PlanningStarts(
     n_iterations: int,
     n_worlds: int,
     n_steps_per_iteration: int,
-) -> Node:
-    """Mix hard reference starts with random states for every training chunk.
+) -> PNode:
+    """Mixes downward reference starts with uniformly sampled phase states for each training iteration.
 
-    The reference order alternates the negative and positive representations
-    of the downward angle, then moves inward by equal offsets. Truncating the
-    references for a small world batch therefore still covers both sides of
-    the angle wrap. Remaining worlds start uniformly across the plotted phase
-    region. Every start is repeated across time because ``ControlledStep``
-    consumes it only when initializing a fresh sampled rollout.
+    Alternates negative and positive downward angles so truncated world batches cover
+    both sides of the angle wrap, then broadcasts starts across `n_steps_per_iteration`.
     """
     def apply(rng):
         reference_order = jnp.asarray((0, 3, 1, 4, 2, 5))
@@ -117,7 +119,7 @@ def PlanningStarts(
 
 
 def pendulum_critic() -> Node:
-    """Build an analytic phase-cost prior plus a learned residual."""
+    """Builds a `PendulumCritic` combining an analytic phase-cost prior with an MLP residual."""
     residual = (
         nn.Linear(HIDDEN)
         >> nn.tanh
@@ -142,7 +144,7 @@ def pendulum_training_program(
     n_steps_per_iteration: int = N_STEPS_PER_ITERATION,
     n_critic_updates: int = N_CRITIC_UPDATES,
 ) -> Node:
-    """Assemble the complete Pendulum MPPI critic-training tree."""
+    """Assembles the complete pendulum MPPI critic-training Node."""
     controller = pendulum_controller(
         critic,
         plant,
@@ -173,8 +175,8 @@ def pendulum_controller(
     n_candidates: int,
     n_refinements: int,
     n_steps_per_plan: int,
-) -> Node:
-    """The receding MPPI controller with the pendulum's command range and noise."""
+) -> Node | PNode:
+    """Configures `mppi_controller` with the pendulum command range and noise hyperparameters."""
     return mppi_controller(
         critic,
         plant,
@@ -197,11 +199,12 @@ def receding_trajectory(
     steps: int,
     key: jax.Array,
 ) -> Struct:
-    """Run real closed-loop trajectories with carried plan state."""
+    """Evaluates closed-loop receding-horizon trajectories with carried plan state."""
     return policy_trajectory(controller, plant, starts, steps, key, step=PlannedStep)
 
 
-def save_figure(figure, filename: str) -> str:
+def save_figure(figure: Figure, filename: str) -> str:
+    """Writes `figure` to the RL `plots/` directory and returns the output path."""
     import os
 
     output = os.path.join(os.path.dirname(__file__), 'plots', filename)
@@ -211,7 +214,7 @@ def save_figure(figure, filename: str) -> str:
 
 
 def plot_learned_critic(trajectory: Struct, critic: BaseNode) -> str:
-    """Plot real receding rollouts beside the learned terminal value."""
+    """Plots receding closed-loop rollouts beside the learned terminal value surface."""
     import matplotlib
 
     matplotlib.use('Agg')
@@ -249,7 +252,7 @@ def plot_learned_critic(trajectory: Struct, critic: BaseNode) -> str:
 
 
 def evaluate_receding(trajectory: Struct) -> Struct:
-    """Summarize the reference starts without changing the plot sample."""
+    """Summarizes episode cost, terminal error, and upright fraction across the downward reference starts."""
     references = tree_len(downward_starts())
     tail = jax.tree.map(
         lambda value: value[:references, -50:],
@@ -274,7 +277,7 @@ def evaluate_receding(trajectory: Struct) -> Struct:
 
 
 def critic_swing_up() -> None:
-    """Train a terminal critic, evaluate it in MPPI, and save one plot."""
+    """Trains a terminal critic, evaluates receding MPPI on the pendulum, and saves the phase plot."""
     plant = Pendulum()
     critic = pendulum_critic()
     trained = mppi_training(
@@ -287,13 +290,14 @@ def critic_swing_up() -> None:
         jax.random.PRNGKey(29),
         velocity_limit=3.0,
     )
-    learned_controller = pendulum_controller(
+    controller = pendulum_controller(
         learned_critic,
         plant,
         n_candidates=N_EVALUATION_CANDIDATES,
         n_refinements=N_EVALUATION_REFINEMENTS,
         n_steps_per_plan=N_TRAINING_STEPS_PER_PLAN,
-    ).parameterize()
+    )
+    learned_controller = controller if isinstance(controller, PNode) else controller.parameterize()
     learned = receding_trajectory(
         learned_controller,
         starts,

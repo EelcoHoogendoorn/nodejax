@@ -1,4 +1,4 @@
-"""Multi-Layer Perceptron and Mixture-of-Experts blocks."""
+"""Defines feed-forward MLP, SwiGLU, and Mixture-of-Experts factories."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import jax.numpy as jnp
 
 from nodejax.core.node import Node
 from nodejax.struct import Struct
-from nodejax.core.binding import (Aux)
+from nodejax.core.binding import Aux
 from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
 from nodejax.nn.linear import Linear
@@ -15,20 +15,16 @@ from nodejax.nn.activations import gelu
 
 
 @node
-def MLP(width: int, ratio: int):
-    """The transformer's two-layer feed-forward: expand to ratio*width,
-    gelu, project back to width. Plain composition of stock linears;
-    width is the design decision, fan-ins derive from the resolved input spec."""
+def MLP(width: int, ratio: int) -> Node:
+    """Expands the trailing feature axis to `ratio * width`, applies `gelu`, and projects back to `width`."""
     return Linear(ratio * width) >> gelu >> Linear(width)
 
 
 @node
 def SwiGLU(width: int, ratio: int) -> Node:
-    """SwiGLU feed-forward block with an inferred input width.
+    """Applies a gated two-branch feed-forward projection returning `width` features.
 
-    Two projections expand to `ratio * width`. One passes through SiLU and
-    gates the other elementwise, then a third projection returns `width`
-    features.
+    Projects `node.input.shape[-1]` twice to `ratio * width`, gates one branch by `silu` of the other elementwise, and projects the product to `width`.
     """
     def param(node, rng) -> Struct:
         input_width = node.input.shape[-1]
@@ -54,12 +50,11 @@ def SwiGLU(width: int, ratio: int) -> Node:
 
 
 @node(name='moe')
-def MoE(hidden: int, experts: int):
-    """Soft mixture-of-experts with an internal residual, written over a
-    (B, hidden) batch: the load-balance statistic is a population
-    quantity. Emits that statistic (experts * sum(mean_gate^2); 1.0 =
-    uniform) and per-expert usage as AUX — the Aux convention; the
-    loss decides what to do with it."""
+def MoE(hidden: int, experts: int) -> Node:
+    """Routes a `(batch, hidden)` input softly across `experts` experts and adds the mixture back onto `input`.
+
+    Operates over a batch so per-expert usage (`mean_gate`) and the load-balancing penalty `experts * sum(usage ** 2)` (`1.0` at uniform routing) can be computed across the population and emitted via `Aux(balance=..., usage=...)`.
+    """
     def param(rng) -> Struct:
         return Struct(
             router=0.2 * jax.random.normal(rng.next(), (hidden, experts)),

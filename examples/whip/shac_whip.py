@@ -1,9 +1,7 @@
-"""Train a whip policy with SHAC through the actuator and the rope.
+"""Trains a whip policy with SHAC through the actuator and rope.
 
-The learner is the RL module's SHAC unchanged, the plant is the whip. The
-policy sees the actuator's own estimates, the critic sees the rope, and
-the gradient runs through the motor's current loops and the rope's
-constraint projection alike.
+Runs the RL module's SHAC learner unchanged on the whip plant, propagating
+gradients through both motor current loops and rope constraint projection.
 """
 
 import jax
@@ -40,7 +38,7 @@ N_EPISODES = 40
 N_CRITIC_UPDATES = 4
 EMA_CRITIC_DECAY = 0.99
 ACTOR_RATE = 0.0005
-ACTOR_GRADIENT_CLIP = 1.0  # global norm: the crack makes rollout gradients spike
+ACTOR_GRADIENT_CLIP = 1.0  # clips global norm when the whip crack spikes rollout gradients
 ACTOR_OPTIMIZER = optax.chain(
     optax.clip_by_global_norm(ACTOR_GRADIENT_CLIP), optax.adam(ACTOR_RATE))
 CRITIC_RATE = 0.001
@@ -56,11 +54,12 @@ def WhipTrainingData(
     n_steps_per_chunk: int,
     n_worlds: int,
     disturbance_scale: float,
-) -> Node:
-    """Random starts of ``plant``, a rope at rest and a target, and torque
-    disturbances for chunked SHAC episodes, shaped (episode, chunk, world,
-    time). The plant derives the rest of its state from the start at the
-    episode boundary, so the start is repeated over chunks and time."""
+) -> PNode:
+    """Samples random `plant` start states and `(episode, chunk, world, time)` torque disturbances.
+
+    Broadcasts each episode start across chunks and steps so `plant` derives its initial
+    state at episode boundaries.
+    """
     def apply(rng):
         disturbance = disturbance_scale * jax.random.normal(
             rng.next(),
@@ -80,13 +79,12 @@ def whip_training_program(
     plant: PNode,
     n_episodes: int,
     *,
-    actor_optimizer=ACTOR_OPTIMIZER,
+    actor_optimizer: optax.GradientTransformation = ACTOR_OPTIMIZER,
     n_worlds: int = N_WORLDS,
     n_chunks_per_episode: int = N_CHUNKS_PER_EPISODE,
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
 ) -> Node:
-    """Assemble the complete whip SHAC Node tree; ``actor_optimizer`` is
-    the optax transformation on the policy's parameters."""
+    """Assembles the complete whip SHAC training Node with `actor_optimizer` updating policy parameters."""
     iteration = shac_iteration(
         policy,
         critic,
@@ -114,18 +112,16 @@ def whip_training_program(
 
 def train_whip_shac(
     plant: PNode,
-    features: Node,
+    features: Node | PNode,
     *,
     n_episodes: int = N_EPISODES,
     seed: int = 0,
-    actor_optimizer=ACTOR_OPTIMIZER,
+    actor_optimizer: optax.GradientTransformation = ACTOR_OPTIMIZER,
     n_worlds: int = N_WORLDS,
     n_chunks_per_episode: int = N_CHUNKS_PER_EPISODE,
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
 ) -> Struct:
-    """Train a policy reading ``features`` of what ``plant`` observes; the
-    critic sees the plant's rope either way. ``seed`` picks the keys. The
-    history holds the mean cost per step by episode."""
+    """Trains a policy reading `features` of `plant` observations with SHAC while the critic reads full rope state."""
     program = whip_training_program(
         WhipMean(features, nn.GRU(MEMORY), HIDDEN), whip_critic(plant), plant, n_episodes,
         actor_optimizer=actor_optimizer, n_worlds=n_worlds,
@@ -135,12 +131,13 @@ def train_whip_shac(
         parameter_key=jax.random.fold_in(jax.random.PRNGKey(1), seed),
         training_key=jax.random.fold_in(jax.random.PRNGKey(11), seed),
     )
-    # The history arrives per chunk; one training round here is an episode.
+    # History arrives per chunk; average across chunks to record one cost per episode.
     per_episode = outcome.history.mean_cost.reshape(n_episodes, -1).mean(axis=1)
     return Struct(policy=outcome.policy, history=outcome.history.replace(mean_cost=per_episode))
 
 
 def main() -> None:
+    """Trains a whip policy with SHAC and saves training and evaluation figures."""
     plant = whip_plant().parameterize()
     features = WhipFeatures(tip_sensor=False)
     run = timed(lambda: train_whip_shac(plant, features))

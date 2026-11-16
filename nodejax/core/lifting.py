@@ -1,10 +1,17 @@
-"""Lower ordinary authored functions into canonical definition calls."""
+"""Compilation of authored Python functions into canonical `ContractCalls`.
+
+Leaf and custom-role functions declare only the reserved parameters (`node`,
+`param`, `state`, `input`, `rng`) and domain fields they consume. This module
+inspects their signatures, builds their `CallForm` declarations, injects
+`AuthorNode` and `KeyStream` capabilities at call time, and prevents `KeyStream`
+handles from escaping into returned PyTrees.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 import inspect
-from typing import Any, Callable
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -16,17 +23,13 @@ from nodejax.core.binding import (
 from nodejax.core.contract import ApplyCall, CallForm, InitCall, ParamCall
 from nodejax.frozendict import frozendict
 from nodejax.core.rng import KeyStream, MaybeKeyStream
+from nodejax.core.types import PyTree
 from nodejax.struct import Struct
 
 
-def _keys_only(tree: Any, where: str) -> Any:
-    """Store raw keys under ``rng`` and reject other capability escapes.
-
-    Authored output containers keep their declared pytree type. A returned
-    ``dict`` or ``list`` is therefore user output, not framework working
-    storage.
-    """
-    def walk(value: Any, path: str, rng_field: bool = False):
+def _keys_only(tree: PyTree, where: str) -> PyTree:
+    """Draws raw PRNG keys stored under `rng` fields and rejects other `KeyStream` escapes."""
+    def walk(value: PyTree, path: str, rng_field: bool = False) -> PyTree:
         if type(value) is KeyStream:
             if rng_field:
                 return value.next()
@@ -62,8 +65,8 @@ def _keys_only(tree: Any, where: str) -> Any:
     return walk(tree, '')
 
 
-def tree_asarray(tree: Any) -> Any:
-    """Convert every leaf in a pytree with ``jnp.asarray``."""
+def tree_asarray(tree: PyTree) -> PyTree:
+    """Converts every leaf in `tree` to a JAX array via `jnp.asarray`."""
     return jax.tree.map(jnp.asarray, tree)
 
 
@@ -193,9 +196,8 @@ def _compile_init(fn: Callable, *, owner: str | None = None) -> InitCall:
         declaration = declaration.without('rng')
 
     def filled(definition, param):
-        """The init param names every declared member: a member
-        without parameters answers the empty slot, so authored inits
-        need not fork on a member's parametricity."""
+        # Populate empty slots for non-parametric members so authored init
+        # functions can access every declared member uniformly on param.
         members = definition.members
         if not tuple(members.__keys__):
             return param
@@ -250,7 +252,7 @@ _RESERVED_METHOD_NAMES = frozenset({
 })
 
 
-def _check_methods(methods) -> frozendict:
+def _check_methods(methods: Mapping[str, Callable]) -> frozendict:
     methods = dict(methods)
     collisions = set(methods) & _RESERVED_METHOD_NAMES
     if collisions:

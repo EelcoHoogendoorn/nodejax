@@ -1,14 +1,14 @@
-"""Reusable probability-distribution Nodes for reinforcement-learning examples."""
+"""Provides reusable probability-distribution Nodes for reinforcement learning."""
 
 import jax
 import jax.numpy as jnp
 
-from nodejax import Composite, Leaf, Node, Struct, node
+from nodejax import BaseNode, Composite, Leaf, Node, Struct, node
 
 
 @node
 def StateIndependentLogStd(initial: float) -> Node:
-    """A learned state-independent log standard deviation."""
+    """Returns a learned state-independent log standard deviation initialized to `initial`."""
     def param():
         return jnp.asarray(initial)
 
@@ -19,8 +19,8 @@ def StateIndependentLogStd(initial: float) -> Node:
 
 
 @node
-def LearnedGaussian(mean: Node, log_std: Node) -> Node:
-    """A Gaussian proposal with independently replaceable parameter Nodes."""
+def LearnedGaussian(mean: BaseNode, log_std: BaseNode) -> Node:
+    """Combines replaceable `mean` and `log_std` Nodes into a diagonal Gaussian proposal."""
     members = Composite(mean=mean, log_std=log_std)
 
     def apply(self, input):
@@ -67,14 +67,11 @@ def LearnedGaussian(mean: Node, log_std: Node) -> Node:
 
 
 @node
-def SquashedGaussian(mean: Node, log_std: Node, scale: float) -> Node:
-    """A tanh-squashed Gaussian with commands bounded in (-scale, scale).
+def SquashedGaussian(mean: BaseNode, log_std: BaseNode, scale: float) -> Node:
+    """Produces a tanh-squashed Gaussian proposal with commands bounded in `(-scale, scale)`.
 
-    ``sample`` returns the command together with its log-probability. Both
-    come from the pre-squash Gaussian draw and the change of variables, so
-    no inverse tanh appears anywhere. Bounded commands keep a learned
-    value function from extrapolating past the data and dragging the
-    policy into actuator saturation.
+    Computes both the squashed command and its change-of-variables log-probability directly
+    from the pre-squash draw in `sample`, avoiding inverse hyperbolic tangents.
     """
     members = Composite(mean=mean, log_std=log_std)
 

@@ -1,4 +1,12 @@
-"""Construction-time scope and definition-factory recording."""
+"""Factory-recording `@node` decorator and construction-time `ambient` scopes.
+
+`@node` wraps a Python factory function so calling it with complete static
+arguments records a `Construction` receipt on the returned `Def` (enabling
+`specialize` and `statics_by_path`), while calling it with missing or `Generic`
+arguments defers execution and returns an open `Generic` blueprint. `ambient`
+pushes lexical default values onto a context-local stack consulted only while
+`@node` factories bind omitted static parameters.
+"""
 
 from __future__ import annotations
 
@@ -8,16 +16,17 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import partial, wraps
-from typing import Any, Callable
+from typing import Callable
 
 from nodejax.core.definition import Construction
 from nodejax.frozendict import frozendict
 from nodejax.core.generic import Generic, is_generic
 from nodejax.core.node import Node, _is_node
+from nodejax.core.types import PyTree
 from nodejax.struct import Struct
 
 
-_SCOPE: ContextVar[tuple[dict[str, Any], ...]] = ContextVar(
+_SCOPE: ContextVar[tuple[dict[str, PyTree], ...]] = ContextVar(
     'nodejax_ambient', default=())
 _FILLABLE = (
     inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -27,7 +36,7 @@ _NO_REPLAY_ARGUMENT = object()
 
 
 @contextmanager
-def _scope(values):
+def _scope(values: dict[str, PyTree]):
     token = _SCOPE.set(_SCOPE.get() + (values,))
     try:
         yield
@@ -35,7 +44,7 @@ def _scope(values):
         _SCOPE.reset(token)
 
 
-def _lookup(name):
+def _lookup(name: str) -> tuple[bool, PyTree]:
     for scope in reversed(_SCOPE.get()):
         if name in scope:
             return True, scope[name]
@@ -43,7 +52,9 @@ def _lookup(name):
 
 
 class _Ambient:
-    def __call__(self, fn=None, **values):
+    """Context-manager factory supplying construction-time static defaults to `@node` calls."""
+
+    def __call__(self, fn=None, **values: PyTree):
         if fn is not None:
             raise TypeError('use @node on factories and ambient(...) as scope')
         return _scope(values)
@@ -52,14 +63,14 @@ class _Ambient:
 ambient = _Ambient()
 
 
-def _snake(name):
+def _snake(name: str) -> str:
     return re.sub(
         r'([a-z0-9])([A-Z])', r'\1_\2',
         re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name),
     ).lower()
 
 
-def _contains_unbound(value):
+def _contains_unbound(value: PyTree) -> bool:
     from nodejax.core.binding import REQUIRED
 
     if value is REQUIRED or is_generic(value):
@@ -73,7 +84,7 @@ def _contains_unbound(value):
     return False
 
 
-def _construction_value(value):
+def _construction_value(value: PyTree) -> PyTree:
     if _is_node(value):
         return value.node
     if issubclass(type(value), Mapping):
@@ -87,7 +98,7 @@ def _construction_value(value):
     return value
 
 
-def _construction_arguments(arguments) -> dict[str, Any]:
+def _construction_arguments(arguments: Mapping[str, PyTree]) -> dict[str, PyTree]:
     return {
         field: _construction_value(value)
         for field, value in arguments.items()
@@ -95,8 +106,15 @@ def _construction_arguments(arguments) -> dict[str, Any]:
     }
 
 
-def node(fn: Callable | None = None, *, name: str | None = None):
-    """Record a factory call, deferring execution while statics are missing."""
+def node(fn: Callable | None = None, *, name: str | None = None) -> Callable:
+    """Decorates a Node factory to record static arguments and support `Generic` deferral.
+
+    Calling the decorated factory with all static parameters bound builds the
+    Node, names it after `fn` in `snake_case` unless `name=` or an explicit leaf
+    name overrides it, and attaches a `Construction` record for `specialize`.
+    Omitting required static parameters or passing `Generic` values returns a
+    `Generic` blueprint instead.
+    """
     if fn is None:
         return partial(node, name=name)
     signature = inspect.signature(fn)
@@ -104,7 +122,7 @@ def node(fn: Callable | None = None, *, name: str | None = None):
                 if parameter.kind in _FILLABLE]
 
     @wraps(fn)
-    def factory(*args, **kwargs):
+    def factory(*args: PyTree, **kwargs: PyTree):
         supplied = dict(kwargs)
         try:
             partial_call = signature.bind_partial(*args, **kwargs)
@@ -158,8 +176,6 @@ def node(fn: Callable | None = None, *, name: str | None = None):
         construction = definition.construction
         replay_arguments = Struct()
         if construction is not None and construction.factory is factory:
-            # An inner call of this same factory built the product and
-            # recorded the arguments it was actually built with.
             recorded = construction.arguments
             replay_arguments = construction.replay_arguments
         unnamed_wrapper = (

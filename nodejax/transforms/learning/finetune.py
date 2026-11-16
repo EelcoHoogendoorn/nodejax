@@ -1,24 +1,34 @@
+"""Episodic support-set adaptation and query evaluation (`finetune`).
+
+`finetune` wraps a `train_step` Node into a stateless episodic Node taking
+`(support, query)`. Each call primes fresh optimizer and model state from the
+episode's outer `param` tree, scans support updates, extracts the adapted model
+via `.trained()`, and evaluates `query`, keeping the entire inner trajectory
+differentiable with respect to the starting parameters (MAML-style meta-learning).
+"""
+
 from __future__ import annotations
 
 from nodejax.core.ambient import node
 from nodejax.core.node import BaseNode, Node
 from nodejax.core.pnode import PNode
 from nodejax.core.spec import add_axis, element_spec
+from nodejax.core.wrapper import Wrapper
 from nodejax.struct import Struct
-from nodejax.tree import tree_first
-from nodejax.transforms.transform import bind, scan_steps
 from nodejax.transforms.learning.train_step import (
     _model_contract, _require_train_step,
 )
-from nodejax.core.wrapper import Wrapper
+from nodejax.transforms.transform import bind, scan_steps
+from nodejax.tree import tree_first
 
 
 @node
 def finetune(step: BaseNode) -> Node | PNode:
-    """Run ``train_step`` on support data, then evaluate on a query.
+    """Adapts a `train_step` across a `support` sequence and evaluates the adapted model on `query`.
 
-    The step's parameters are the episode's starting parameters, so an
-    outer optimization can differentiate through the support updates.
+    Outer `param` values seed each episode's initial weights before scanning
+    `support`, so an outer `train_step` or `jax.grad` differentiates directly
+    through the inner adaptation updates.
     """
     step_node = _require_train_step(step, 'finetune')
     model = _model_contract(step_node.contract)
@@ -29,7 +39,6 @@ def finetune(step: BaseNode) -> Node | PNode:
         or model.apply_takes_rng)
 
     def apply_fn(contract, param, input, rng):
-        """Reset from ``param``, train on support, then evaluate the query."""
         current = contract.members.step
         current_model = _model_contract(current)
         init_rng = rng.child(current.init_takes_rng)
@@ -47,11 +56,7 @@ def finetune(step: BaseNode) -> Node | PNode:
         return output
 
     def param_fn(contract, param_input, rng):
-        """Fresh meta-params through the train step's own constructor. The
-        episode is Struct(support=<sequence>, query=<one input>) and the
-        train step consumes one support element per call, so a shape-reading
-        constructor beneath resolves against that slice rather than the
-        episode."""
+        # Shape-reading constructors beneath `step` resolve against a single support element.
         current = contract.members.step
         episode = contract.input_spec
         current = current.for_input(

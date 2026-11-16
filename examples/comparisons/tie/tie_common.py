@@ -9,7 +9,7 @@ CONCENTRATION = 2.0
 
 
 def make_data(rs: np.random.RandomState) -> tuple[np.ndarray, np.ndarray]:
-    """Sample one Markov token stream and return `(prev_tokens, next_tokens)` (`int32`)."""
+    """Samples one Markov token stream and returns `(prev_tokens, next_tokens)` (`int32`)."""
     logits = CONCENTRATION * rs.standard_normal((VOCAB, VOCAB))
     probs = np.exp(logits)
     probs /= probs.sum(-1, keepdims=True)
@@ -23,7 +23,7 @@ def make_data(rs: np.random.RandomState) -> tuple[np.ndarray, np.ndarray]:
 
 def report(name: str, table_copies: int, drift: float, first: float,
            last: float, *, expect_tied: bool = True) -> None:
-    """Assert optimizer table count, drift behavior, and loss reduction, then print."""
+    """Asserts optimizer table count, drift behavior, and loss reduction, then prints."""
     assert np.isfinite(first) and np.isfinite(last) and last < first, (
         f'{name}: training loss failed to decrease ({first:.2f} -> {last:.2f})'
     )

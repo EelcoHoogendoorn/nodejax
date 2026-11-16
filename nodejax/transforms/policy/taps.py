@@ -1,20 +1,23 @@
+"""Intermediate activation observation (`taps`) for serial `>>` pipelines."""
+
 from __future__ import annotations
 
 from nodejax.core.binding import Aux, split_aux
 from nodejax.core.node import Node
+from nodejax.core.wrapper import Wrapper
 from nodejax.struct import Struct
 from nodejax.transforms.transform import transform
-from nodejax.core.wrapper import Wrapper
 
 
 @transform(preserves='param')
 def taps(inner: Node) -> Node:
-    """Observe every wire of a composite def: the output becomes
-    (final carry, Struct(<each member's output, keyed by name>)) — the aux
-    convention with every member opted in. Because taps are ordinary
-    outputs, batch/ensemble/scan add their axes to them automatically.
-    Shallow: this pipe's wires, not nested ones — tap an inner pipe
-    before composing to see inside it."""
+    """Sows every direct stage output of a serial `>>` pipeline `inner` into `Aux` keyed by member name.
+
+    Each stage's clean output (or `(output, member_aux)` when that stage emits
+    `Aux`) is recorded on `Aux(**stage_outputs)` alongside the pipeline's final
+    output, so enclosing `batch`, `ensemble`, and `scan` transforms stack
+    tapped activations automatically.
+    """
     if inner._def.layout.kind != 'serial':
         raise TypeError(f'taps requires a serial pipe def (its members chain on '
                         f'the carry), got {inner!r}')

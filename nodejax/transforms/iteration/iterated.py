@@ -1,22 +1,23 @@
+"""Fixed-count state iteration (`iterated`) with constant input."""
+
 from __future__ import annotations
 
 import jax
 
 from nodejax.core.binding import split_aux
 from nodejax.core.node import Node
-from nodejax.transforms.transform import transform
 from nodejax.core.wrapper import Wrapper
+from nodejax.transforms.transform import transform
 
 
 @transform(preserves='param')
 def iterated(step: Node, n: int) -> Node:
-    """Apply one node ``n`` times to the same input, threading state.
+    """Advances `step`'s state `n` times while holding the runtime `input` constant.
 
-    Function iteration on the state channel: the input is held constant
-    across iterations, unlike ``repeat``, which chains each output into
-    the next input. The last iteration's output is returned, auxiliary
-    outputs stack over iterations, and stochastic applications receive
-    separate keys.
+    Unlike `repeat`, which feeds each step's output into the next step's input,
+    `iterated` supplies the same `input` on all `n` substeps, returns the final
+    substep's output alongside stacked `Aux` values, and splits PRNG keys across
+    substeps.
     """
     count = n
 

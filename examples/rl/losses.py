@@ -1,10 +1,11 @@
-"""Plain loss callables shared by reinforcement-learning examples."""
+"""Provides scalar loss and discounted return functions for reinforcement learning."""
 
 import jax
 import jax.numpy as jnp
 
 
 def mse(output: jax.Array, target: jax.Array) -> jax.Array:
+    """Computes the mean squared error between `output` and `target`."""
     return jnp.mean((output - target) ** 2)
 
 
@@ -13,8 +14,7 @@ def discounted_backward_sum(
     factor: float,
     final: jax.Array,
 ) -> jax.Array:
-    """``result[..., t] = increment[..., t] + factor * result[..., t + 1]`` along
-    the trailing time axis, with ``final`` standing in past the last step."""
+    """Accumulates `increment[..., t] + factor * result[..., t + 1]` backward along the trailing time axis from `final`."""
     def step(carry, current):
         value = current + factor * carry
         return value, value
@@ -30,7 +30,7 @@ def td_lambda(
     discount: float,
     trace: float,
 ) -> jax.Array:
-    """TD-lambda targets along a trailing time axis."""
+    """Computes TD-lambda targets along the trailing time axis."""
     return discounted_backward_sum(
         cost + discount * (1.0 - trace) * next_value,
         discount * trace,
@@ -44,8 +44,7 @@ def bootstrapped_costs(
     *,
     discount: float,
 ) -> jax.Array:
-    """Discounted running costs along a trailing time axis plus discounted
-    terminal values."""
+    """Sums discounted running `cost` along the trailing time axis plus discounted `terminals`."""
     n_steps = cost.shape[-1]
     discounts = discount ** jnp.arange(n_steps)
     return jnp.sum(discounts * cost, axis=-1) + discount ** n_steps * terminals

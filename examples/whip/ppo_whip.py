@@ -1,8 +1,7 @@
-"""Train a whip policy with PPO, the control beside SHAC.
+"""Trains a whip policy with PPO alongside the SHAC learner.
 
-Same plant, same policy body, same evaluation; only the learner differs.
-PPO needs no gradient through the motor or the rope, so it is the check on
-whatever the differentiable path does or fails to do.
+Uses the same plant, policy body, and evaluation while avoiding gradients through
+the motor or rope.
 """
 
 import math
@@ -50,9 +49,8 @@ N_ITERATIONS = 60
 
 
 @node
-def WhipValue(features: Node, hidden: int) -> Node:
-    """The value of what the controller sees, for the advantage baseline;
-    ``features`` is what the value reads of the observation."""
+def WhipValue(features: Node | PNode, hidden: int) -> Node:
+    """Predicts a scalar advantage baseline from `features` of the observation."""
     return serial(
         features=features,
         body=(
@@ -73,10 +71,8 @@ def WhipPPOTrainingData(
     n_worlds: int,
     n_chunks: int,
     n_steps_per_chunk: int,
-) -> Node:
-    """Random starts of ``plant``, a rope at rest and a target, per
-    (iteration, world), and zero torque disturbances shaped (iteration,
-    world, chunk, time)."""
+) -> PNode:
+    """Samples random `plant` start states per `(iteration, world)` and zero torque disturbances."""
     def apply(rng):
         return Struct(
             initial_plant_state=random_starts(plant, rng.next(), (iterations, n_worlds)),
@@ -86,9 +82,8 @@ def WhipPPOTrainingData(
     return Leaf(apply)
 
 
-def whip_policy(features: Node, memory: Node, initial_std: float = INITIAL_STD) -> Node:
-    """The SHAC policy body under a learned Gaussian, for sampling; the
-    noise starts at ``initial_std`` in the setpoint's unit, rad/s."""
+def whip_policy(features: Node | PNode, memory: Node, initial_std: float = INITIAL_STD) -> Node:
+    """Wraps the whip policy mean under a learned Gaussian with initial noise `initial_std` (rad/s)."""
     return LearnedGaussian(
         WhipMean(features, memory, HIDDEN), StateIndependentLogStd(initial=math.log(initial_std)))
 
@@ -104,7 +99,7 @@ def whip_ppo_program(
     n_minibatches_per_epoch: int = N_MINIBATCHES_PER_EPOCH,
     n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
 ) -> Node:
-    """Assemble the complete whip PPO Node tree."""
+    """Assembles the complete whip PPO training Node."""
     iteration = ppo_iteration(
         policy,
         value,
@@ -135,7 +130,7 @@ def whip_ppo_program(
 
 def train_whip_ppo(
     plant: PNode,
-    features: Node,
+    features: Node | PNode,
     *,
     iterations: int = N_ITERATIONS,
     seed: int = 0,
@@ -145,9 +140,7 @@ def train_whip_ppo(
     n_minibatches_per_epoch: int = N_MINIBATCHES_PER_EPOCH,
     n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
 ) -> Struct:
-    """Train a policy and a value reading ``features`` of what ``plant``
-    observes, with PPO; ``seed`` picks the keys and ``initial_std`` the
-    exploration noise the policy starts with."""
+    """Trains a policy and value network reading `features` of `plant` observations with PPO."""
     program = whip_ppo_program(
         whip_policy(features, nn.GRU(MEMORY), initial_std),
         WhipValue(features, HIDDEN),
@@ -167,11 +160,12 @@ def train_whip_ppo(
 
 
 def mean_policy(policy: PNode) -> PNode:
-    """The Gaussian policy's mean, as the deterministic policy to evaluate."""
+    """Extracts the deterministic mean policy from a Gaussian `policy` for evaluation."""
     return policy >> control.ProposalMean()
 
 
 def main() -> None:
+    """Trains a whip policy with PPO and saves training and evaluation figures."""
     plant = whip_plant().parameterize()
     run = timed(lambda: train_whip_ppo(plant, WhipFeatures(tip_sensor=False)))
     print('mean cost per step by iteration:', run.result.history.mean_cost)

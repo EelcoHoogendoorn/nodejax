@@ -1,4 +1,4 @@
-"""Generic deterministic reverse diffusion over an injected sample pytree."""
+"""Implements deterministic DDIM reverse diffusion over arbitrary sample PyTrees."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from nodejax import (
     Composite,
     Leaf,
     Node,
+    PNode,
     PyTree,
     Struct,
     node,
@@ -28,14 +29,14 @@ def _validate_schedule_values(steps: int, floor: float) -> None:
 
 
 def linear_alpha_bar(steps: int, floor: float) -> tuple[float, ...]:
-    """Linearly decrease cumulative alpha from one to ``floor``."""
+    """Decreases cumulative alpha linearly from `1.0` to `floor` across `steps` intervals."""
     _validate_schedule_values(steps, floor)
     values = np.linspace(1.0, floor, steps + 1)
     return tuple(float(value) for value in values)
 
 
 def cosine_alpha_bar(steps: int, floor: float) -> tuple[float, ...]:
-    """Cosine cumulative-alpha schedule with a finite noisy-end floor."""
+    """Computes a cosine cumulative-alpha schedule clipped below at `floor`."""
     _validate_schedule_values(steps, floor)
     time = np.arange(steps + 1) / steps
     offset = 0.008
@@ -49,7 +50,7 @@ def _assert_matching_shapes(
     candidate: PyTree,
     label: str,
 ) -> None:
-    """Require every candidate leaf to preserve its sample leaf's shape."""
+    """Asserts that every leaf in `candidate` matches the shape of its counterpart in `reference`."""
     matches = jax.tree.map(
         lambda reference_leaf, candidate_leaf: (
             jnp.shape(reference_leaf) == jnp.shape(candidate_leaf)
@@ -79,14 +80,14 @@ def DenoisingStep(
     predictor: BaseNode,
     clean: BaseNode,
     alpha_bar: tuple[float, ...],
-) -> Node:
-    """One epsilon-prediction DDIM update over an arbitrary sample pytree."""
+) -> Node | PNode:
+    """Applies one deterministic epsilon-prediction DDIM update over a sample PyTree."""
     _validate_alpha_bar(alpha_bar)
     schedule = jnp.asarray(alpha_bar, dtype=jnp.float32)
     steps = len(alpha_bar) - 1
     members = Composite(predictor=predictor, clean=clean)
 
-    def apply(self, input):
+    def apply(self, input) -> Struct:
         assert input.reverse.shape == ()
         time = input.reverse.astype(jnp.float32) / steps
         current_alpha = schedule[input.reverse]
@@ -130,13 +131,10 @@ def Denoiser(
     predictor: BaseNode,
     alpha_bar: tuple[float, ...],
     clean: BaseNode = nn.identity,
-) -> Node:
-    """Run deterministic epsilon-prediction DDIM from an explicit sample.
+) -> Node | PNode:
+    """Iterates deterministic epsilon-prediction DDIM from an initial noisy sample.
 
-    Input is ``Struct(condition=<pytree>, sample=<pytree>)``. The predictor
-    receives the condition, current sample, normalized time, and current
-    cumulative alpha. Its output and the optional clean-estimate Node must
-    match the sample pytree exactly.
+    Consumes `Struct(condition=<pytree>, sample=<pytree>)` and passes `Struct(condition, sample, time, alpha_bar)` to `predictor` at each reverse step. Both `predictor` and `clean` must preserve the leaf shapes of `sample`.
     """
     _validate_alpha_bar(alpha_bar)
     steps = len(alpha_bar) - 1

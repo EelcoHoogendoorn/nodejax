@@ -1,4 +1,4 @@
-"""Rematerialization: recompute the forward instead of storing it."""
+"""Activation checkpointing (`remat`) over `jax.checkpoint`."""
 
 from __future__ import annotations
 
@@ -7,18 +7,18 @@ from typing import Callable
 import jax
 
 from nodejax.core.node import Node
-from nodejax.transforms.transform import transform
 from nodejax.core.wrapper import Wrapper
+from nodejax.transforms.transform import transform
 
 
 @transform(preserves='param')
 def remat(inner: Node, *, policy: Callable | None = None,
           prevent_cse: bool = True) -> Node:
-    """Checkpoint ``inner``, trading recomputation for lower backward memory.
+    """Wraps `inner`'s `apply` call in `jax.checkpoint` to recompute activations during backprop.
 
-    Placement controls granularity: wrapping a cell checkpoints each step;
-    wrapping a scanned node checkpoints the complete rollout. ``policy`` and
-    ``prevent_cse`` are passed to :func:`jax.checkpoint`.
+    Placement in the composition tree controls checkpoint granularity: wrapping
+    a single layer or cell checkpoints each step, whereas wrapping a `scan` or
+    `stack` Node checkpoints the entire sequential pass.
     """
     def apply_fn(contract, param, state, input, rng):
         inner = contract.members.inner

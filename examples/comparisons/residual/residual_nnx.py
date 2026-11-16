@@ -1,18 +1,18 @@
 """An attempt at a reusable residual wrapper in Flax NNX.
 
-For a module shaped like ``value -> output``, NNX makes this direct. Parameters
+For a module shaped like `value -> output`, NNX makes this direct. Parameters
 and graph-resident Variables live on the member, and graph-aware transforms,
-Param filtering, mutation, and ``sow``/``capture`` traverse the wrapper. Extra
+Param filtering, mutation, and `sow`/`capture` traverse the wrapper. Extra
 call arguments can pass through without inspecting whether one happens to be
-``rngs``, so deterministic and stochastic residuals both nest.
+`rngs`, so deterministic and stochastic residuals both nest.
 
 That is genuine composition within the unary-value protocol chosen here. It is
-not a set-and-forget wrapper over every ``nnx.Module``. NNX does not declare
+not a set-and-forget wrapper over every `nnx.Module`. NNX does not declare
 which argument is the signal, where the output lives, or whether state is a
 mutated Variable or an explicit functional carry. Stock RNN cells use
-``initialize_carry`` and ``(carry, input) -> (carry, output)``. This wrapper
+`initialize_carry` and `(carry, input) -> (carry, output)`. This wrapper
 neither preserves the cell interface nor knows to add only to the returned
-output. Cache-bearing modules use another lifecycle method, ``init_cache``.
+output. Cache-bearing modules use another lifecycle method, `init_cache`.
 
 Construction has the same boundary. Wrapping one configured module is ordinary
 NNX. A later stack or ensemble that needs independently initialized copies must
@@ -20,9 +20,9 @@ instead receive a factory that constructs the member and residual together.
 The configured module carries its values, not the construction call that made
 them.
 
-Later transforms must also describe the two state forms separately. ``StateAxes``
+Later transforms must also describe the two state forms separately. `StateAxes`
 maps or carries graph Variables, while a distinct call argument is marked as
-functional ``Carry``. Neither choice records when that state resets. Finally,
+functional `Carry`. Neither choice records when that state resets. Finally,
 the residual has no output contract with which to check addition before the
 member runs, so an eager member may mutate graph state before an incompatible
 output makes the addition fail.
@@ -57,7 +57,7 @@ from examples.comparisons.residual.residual_common import (
 
 
 class Residual(nnx.Module):
-    """x + f(x) for a member whose first argument and complete result are the signal."""
+    """Computes `x + f(x)` for a unary `value -> output` NNX module."""
 
     def __init__(self, inner: nnx.Module):
         self.inner = inner
@@ -93,7 +93,7 @@ class BareBody(nnx.Module):
 
 
 class StatefulCell(nnx.SimpleCell):
-    """An NNX cell using functional carry and graph-resident state together."""
+    """Combines an explicit functional carry with graph-resident `Variable` state."""
 
     def __init__(self, rngs: nnx.Rngs):
         super().__init__(WIDTH, WIDTH, rngs=rngs)
@@ -119,7 +119,7 @@ def _captured_call(member, value, *, rngs):
 
 
 def _nests() -> bool:
-    """Whether the unary wrapper accepts its own deterministic and stochastic products."""
+    """Checks whether the unary wrapper accepts its own deterministic and stochastic products."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     try:
         Residual(Residual(BareBody(_construction_rngs())))(inputs)
@@ -143,7 +143,7 @@ def _nests() -> bool:
 
 
 def _forwards_functional_state() -> bool:
-    """Whether the unary wrapper also understands NNX's explicit carry convention."""
+    """Checks whether the unary wrapper forwards NNX's explicit carry convention."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     carry = jnp.ones(WIDTH)
     cell = StatefulCell(_construction_rngs())
@@ -162,7 +162,7 @@ def _forwards_functional_state() -> bool:
 
 
 def _preserves_cell_interface() -> bool:
-    """Whether an NNX API accepting a cell also accepts the wrapped cell."""
+    """Checks whether `nnx.RNN` accepts the wrapped cell."""
     inputs = jnp.stack([jnp.linspace(-1.0, 1.0, WIDTH)] * 2)
     cell = StatefulCell(_construction_rngs())
     carry, outputs = nnx.RNN(cell, return_carry=True)(inputs)
@@ -181,10 +181,10 @@ def _preserves_cell_interface() -> bool:
 
 
 def _state_gets_gradient() -> bool:
-    """Whether a gradient reaches the member\'s running statistic.
+    """Checks whether a gradient reaches the member's running statistic.
 
-    It does not. ``nnx.grad`` differentiates ``nnx.Param`` by default, and
-    the running statistic is a plain ``nnx.Variable``, so the Variable
+    It does not. `nnx.grad` differentiates `nnx.Param` by default, and
+    the running statistic is a plain `nnx.Variable`, so the Variable
     subclass is what keeps the two apart.
     """
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)

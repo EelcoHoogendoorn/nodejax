@@ -1,10 +1,6 @@
-"""Questions about the learners, each answered by a run with descriptive
-artifacts: PPO given ten times the comparison's iterations; each learner
-with the tip sensed, the privileged variant, against blind; SHAC on the
-ideal actuator against the stack; both learners on the exact encoder
-against the quantized one over several seeds; SHAC at several gradient
-clips; and every learner on the stiff-loop exact-encoder plant.
-"""
+"""Runs controlled ablation suites across PPO, SHAC, and MPPI on the whip plant."""
+
+from __future__ import annotations
 
 import jax
 import optax
@@ -29,8 +25,8 @@ from examples.whip.whip import LINK_LENGTHS, VELOCITY_GAIN, VELOCITY_GAIN_STIFF,
 
 
 N_PPO_ITERATIONS = 600
-N_SHAC_EPISODES = 120  # about the wall time of the PPO run
-N_MPPI_ITERATIONS = 40  # of 150 steps: the same transitions as 120 of the 50-step iterations
+N_SHAC_EPISODES = 120  # comparable wall time to the PPO run
+N_MPPI_ITERATIONS = 40  # 40 x 150 steps matches 120 x 50-step transitions
 EVALUATION_KEY = jax.random.PRNGKey(21)
 
 
@@ -40,11 +36,9 @@ def configured(
     ideal_actuator: bool = False,
     exact_encoder: bool = False,
     velocity_gain: float = VELOCITY_GAIN,
-    link_lengths: tuple = LINK_LENGTHS,
+    link_lengths: tuple[float, ...] = LINK_LENGTHS,
 ) -> Struct:
-    """The plant of one experimental condition and the features a policy
-    reads of it, built once and handed to the trainer and the evaluation
-    alike."""
+    """Builds the parameterized `plant` and matching `WhipFeatures` for one experimental condition."""
     plant = whip_plant(
         tip_sensor=tip_sensor, ideal_actuator=ideal_actuator, exact_encoder=exact_encoder,
         velocity_gain=velocity_gain, link_lengths=link_lengths)
@@ -52,9 +46,7 @@ def configured(
 
 
 def run_ppo(label: str, prefix: str, condition: Struct, *, seed: int = 0) -> Struct:
-    """Train PPO on ``condition``, report, and write artifacts under
-    ``prefix``; the cost curve and the wall seconds come back for the
-    shared figure."""
+    """Trains PPO on `condition`, writes evaluation artifacts under `prefix`, and returns the cost curve and wall time."""
     run = timed(lambda: train_whip_ppo(
         condition.plant, condition.features, iterations=N_PPO_ITERATIONS, seed=seed))
     print(f'{label}: {run.seconds:.0f} s for {N_PPO_ITERATIONS} iterations')
@@ -74,10 +66,7 @@ def run_shac(
     actor_optimizer=ACTOR_OPTIMIZER,
     artifacts=write_artifacts,
 ) -> Struct:
-    """Train SHAC on ``condition``, report, and write ``artifacts`` under
-    ``prefix``; the cost curve and the wall seconds come back for the
-    shared figure. The ideal actuator has no readouts to draw, so its runs
-    pass ``write_animation``."""
+    """Trains SHAC on `condition`, writes `artifacts` under `prefix`, and returns the cost curve and wall time."""
     run = timed(lambda: train_whip_shac(
         condition.plant, condition.features, n_episodes=N_SHAC_EPISODES, seed=seed,
         actor_optimizer=actor_optimizer))
@@ -90,10 +79,7 @@ def run_shac(
 
 
 def run_mppi(label: str, prefix: str, condition: Struct) -> Struct:
-    """Train the MPPI terminal critic on ``condition``, report, and write
-    artifacts under ``prefix``; the cost curve and the wall seconds come
-    back for the shared figure. The planner sees the true state, so only
-    the condition's actuators reach it."""
+    """Trains the MPPI terminal critic on `condition`, evaluates receding-horizon planning, and writes artifacts under `prefix`."""
     run = timed(lambda: train_whip_mppi(
         condition.plant, whip_critic(condition.plant), n_iterations=N_MPPI_ITERATIONS))
     explained = run.result.history.critic_explained
@@ -133,8 +119,7 @@ def shac_blind_versus_tip_sensed() -> None:
 
 
 def shac_stack_versus_ideal_actuator() -> None:
-    """SHAC through the actuator stack against SHAC through plain torque
-    sources, blind and tip sensed."""
+    """Compares SHAC through the FOC `ActuatorStack` against `IdealActuator` torque sources with and without tip sensing."""
     runs = {}
     for tip_sensor in (False, True):
         for ideal_actuator in (False, True):
@@ -151,10 +136,8 @@ def shac_stack_versus_ideal_actuator() -> None:
     print(f'training curves: {curves}')
 
 
-def quantized_versus_exact_encoder(seeds: tuple = (0, 1, 2)) -> None:
-    """Both blind learners with the stock encoder and with none, the
-    observer fed the true angle, over several seeds, since one run of SHAC
-    says little on its own."""
+def quantized_versus_exact_encoder(seeds: tuple[int, ...] = (0, 1, 2)) -> None:
+    """Compares blind SHAC and PPO across quantized and exact encoders over multiple random `seeds`."""
     runs = {}
     for encoder, exact in (('quantized encoder', False), ('exact encoder', True)):
         slug = encoder.replace(' ', '_')
@@ -170,9 +153,8 @@ def quantized_versus_exact_encoder(seeds: tuple = (0, 1, 2)) -> None:
     print(f'training curves: {curves}')
 
 
-def shac_gradient_clip(clips: tuple = (1.0, 10.0, None)) -> None:
-    """SHAC at each actor gradient clip, tip sensed with the exact encoder
-    so that sensing is not the excuse; ``None`` is plain Adam."""
+def shac_gradient_clip(clips: tuple[float | None, ...] = (1.0, 10.0, None)) -> None:
+    """Evaluates SHAC actor global-norm gradient clipping (`None` disables clipping) under tip sensing and exact encoders."""
     runs = {}
     condition = configured(tip_sensor=True, exact_encoder=True)
     for clip in clips:
@@ -189,9 +171,7 @@ def shac_gradient_clip(clips: tuple = (1.0, 10.0, None)) -> None:
 
 
 def strong_actuator_all_learners() -> None:
-    """Every learner on the exact encoder, whose velocity loop is stiff
-    enough to sit on the torque clamp: PPO and SHAC with the tip sensed,
-    MPPI on the true state."""
+    """Evaluates PPO, SHAC, and MPPI on the stiff-velocity-loop exact-encoder whip plant."""
     sensed = configured(tip_sensor=True, exact_encoder=True, velocity_gain=VELOCITY_GAIN_STIFF)
     runs = {
         'PPO, tip sensed, exact encoder': run_ppo(
@@ -209,10 +189,8 @@ def strong_actuator_all_learners() -> None:
     print(f'training curves: {curves}')
 
 
-def longer_upper_arm(upper_arms: tuple = (0.3, 0.45, 0.6), seed: int = 1) -> None:
-    """PPO, tip sensed on the exact encoder, on arms whose upper link grows
-    while the forearm stays 0.3 m: whether distinct link lengths give the
-    two joints distinct roles."""
+def longer_upper_arm(upper_arms: tuple[float, ...] = (0.3, 0.45, 0.6), seed: int = 1) -> None:
+    """Evaluates tip-sensed PPO across increasing upper-arm link lengths with a fixed `0.3` m forearm."""
     runs = {}
     for upper_arm in upper_arms:
         label = f'PPO, upper arm {upper_arm:.2f} m'

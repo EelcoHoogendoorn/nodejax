@@ -23,8 +23,8 @@ Every line consumes a `Node` and returns a `Node`. No rival framework's module a
 | NodeJAX (`tower_nodejax.py`) | 114 | Nowhere; architecture, state, adaptation, and meta-training stay in one `Node` algebra |
 | Flax NNX bespoke (`tower_nnx.py`) | 162 | Architecture is scattered across per-site `nnx.StateAxes`, `nnx.split_rngs`, and manual `(h_layers, stats)` carries |
 | Equinox (`tower_equinox.py`) | 168 | Modules cover parameters only; depth, time, committee, inner SGD, and outer Adam drop to raw `lax.scan` and `vmap` |
-| PyTorch (`tower_torch.py`) | 184 | Abandons `nn.Module` for `torch.func.functional_call` dictionaries and takes ~260 s on CPU to trace its unrolled tape (vs. 0.4 s on JAX) |
-| Keras 3 on JAX (`tower_keras.py`) | 205 | Compiles fast via `lax.scan` (427 jaxpr equations, 0.4 s), yet fails to construct an ensemble under `vmap` because `keras.initializers` crash on traced seeds and `add_weight` under `vmap` silently aliases every member onto one tensor so a 3-member committee trains as 3 identical clones |
+| PyTorch (`tower_torch.py`) | 181 | Abandons `nn.Module` for `torch.func.functional_call` dictionaries and unrolls depth and time in Python across a dynamic autograd tape |
+| Keras 3 on JAX (`tower_keras.py`) | 205 | Compiles via `lax.scan` (427 jaxpr equations), yet fails to construct an ensemble under `vmap` because `keras.initializers` crash on traced seeds and `add_weight` under `vmap` silently aliases every member onto one tensor so a 3-member committee trains as 3 identical clones |
 | Flax NNX reusable (`tower_nnx_reusable.py`) | 322 | Invents custom `Residual`, `Serial`, `Stack`, `Scan`, and `Ensemble` wrappers (2.8x NodeJAX's file size) and still abandons that protocol at `maml_fit` |
 
 The [`ttt`](../examples/comparisons/ttt/) benchmark isolates reusable online test-time training inside an outer meta-learner, testing each framework's `TTT` wrapper on both a stateless `MLP` predictor and a recurrent `RNN` predictor (1024 meta-weights each, verified in [`ttt_common.py`](../examples/comparisons/ttt/ttt_common.py)):
@@ -47,11 +47,11 @@ Changing normalization statistics to reset per recording exposes who actually ow
 | Framework | Independent edits | Failure mode when one edit is missed |
 | :--- | ---: | :--- |
 | NodeJAX (`chunk_nodejax.py`, 260 lines) | 1 | `state_reinit(Norm(), 'recording')` on the owning `Node`; unclaimed boundary names raise an immediate error |
-| Haiku (`chunk_haiku.py`, 251 lines) | 1 | Reset logic lives inside one outer rollout function by string key; reusing the block in another rollout or trainer silently drops the reset |
-| Flax NNX (`chunk_nnx.py`, 274 lines) | 2 | Inference and training scans diverge silently |
-| PyTorch (`chunk_torch.py`, 326 lines) | 2 | Imperative buffer-reset loops diverge between evaluation and training |
-| Flax Linen (`chunk_linen.py`, 294 lines) | 4 | Unchecked string collection paths and manual init dicts silently compute wrong statistics |
-| Equinox (`chunk_equinox.py`, 313 lines) | 6 | Initialization, step return tuples, and outer carries still type-check and run with stale state |
+| Haiku (`chunk_haiku.py`, 247 lines) | 1 | Reset logic lives inside one outer rollout function by string key; reusing the block in another rollout or trainer silently drops the reset |
+| Flax NNX (`chunk_nnx.py`, 266 lines) | 2 | Inference and training scans diverge silently |
+| PyTorch (`chunk_torch.py`, 310 lines) | 2 | Imperative buffer-reset loops diverge between evaluation and training |
+| Flax Linen (`chunk_linen.py`, 290 lines) | 4 | Unchecked string collection paths and manual init dicts silently compute wrong statistics |
+| Equinox (`chunk_equinox.py`, 310 lines) | 6 | Initialization, step return tuples, and outer carries still type-check and run with stale state |
 
 In NNX, Linen, Equinox, and PyTorch, state lifetimes are encoded implicitly in surrounding loop plumbing rather than on the stateful unit. Omitting one reset line produces a valid program that silently computes the wrong trajectory, forcing a reader to audit every enclosing loop body.
 
@@ -62,7 +62,7 @@ The [`mode`](../examples/comparisons/mode/) benchmark trains a `Dropout` + `Batc
 - PyTorch (`mode_torch.py`, 71 lines) and Flax NNX (`mode_nnx.py`, 71 lines) mutate mode booleans in place on shared module instances, leaving stochastic machinery and mutable stat slots alive on the object behind flag discipline.
 - Haiku (`mode_haiku.py`, 79 lines) pollutes every forward call signature with a threaded `is_training: bool` flag.
 - Equinox (`mode_equinox.py`, 108 lines) rewrites boolean leaves via `eqx.nn.inference_mode` while still forcing every caller to thread `eqx.nn.State` in and out by hand and pass `key=None`.
-- NodeJAX (`mode_nodejax.py`, 71 lines) builds a distinct evaluation `Node` via `nn.eval_mode(final)` (`final.specialize(**{'*.train': False})` plus `tree_freeze(..., tag='running_stats')`). `Dropout` specializes to the identity so the evaluator rejects `rng` keys outright, and `BatchNorm` statistics freeze into constants (`not evaluator.cyclic`).
+- NodeJAX (`mode_nodejax.py`, 70 lines) builds a distinct evaluation `Node` via `nn.eval_mode(final)` (`final.specialize(**{'*.train': False})` plus `tree_freeze(..., tag='running_stats')`). `Dropout` specializes to the identity so the evaluator rejects `rng` keys outright, and `BatchNorm` statistics freeze into constants (`not evaluator.cyclic`).
 
 ## 4. Reusable transforms and leaky module protocols (`residual` and `lift`)
 
@@ -90,7 +90,7 @@ In NodeJAX, policies (feed-forward or `GRU`), physical plants, `nn.EMA` target n
 
 ## 6. Deferred configuration, priming, and weight tying (`generics`, `imu`, and `tie`)
 
-In [`generics`](../examples/comparisons/generics/), width, depth, ensemble size, and inner `Block` temperature are left unspecified while assembling `serial(entry=nn.Linear(), blocks=stack(Block()), readout=nn.Linear(1))`, then resolved by path via `.specialize(...)` (`generics_nodejax.py`, 104 lines, `THREADING_TAX = 0`). NNX (`generics_nnx.py`, 139 lines), PyTorch (`generics_torch.py`, 143 lines), and Equinox (`generics_equinox.py`, 183 lines) cannot compose an unfinished architecture at all, forwarding 5 configuration arguments through intermediate `__init__` chains that never use them (`THREADING_TAX = 5`). Keras 3 (`generics_keras.py`, 250 lines) matches NodeJAX on dataflow-inferred fan-in via lazy `build(input_shape)`, while still forwarding 4 architectural hyperparameters through Python builder functions (`THREADING_TAX = 4`).
+In [`generics`](../examples/comparisons/generics/), width, depth, ensemble size, and inner `Block` temperature are left unspecified while assembling `serial(entry=nn.Linear(), blocks=stack(Block()), readout=nn.Linear(1))`, then resolved by path via `.specialize(...)` (`generics_nodejax.py`, 104 lines, `THREADING_TAX = 0`). NNX (`generics_nnx.py`, 139 lines), PyTorch (`generics_torch.py`, 141 lines), and Equinox (`generics_equinox.py`, 182 lines) cannot compose an unfinished architecture at all, forwarding 5 configuration arguments through intermediate `__init__` chains that never use them (`THREADING_TAX = 5`). Keras 3 (`generics_keras.py`, 250 lines) matches NodeJAX on dataflow-inferred fan-in via lazy `build(input_shape)`, while still forwarding 4 architectural hyperparameters through Python builder functions (`THREADING_TAX = 4`).
 
 In [`imu`](../examples/comparisons/imu/), chaining two input-primed finite derivatives, white noise, Ornstein-Uhlenbeck drift, and quantization (`Derivative >> Derivative >> Noise >> Drift >> Quantize`) is a single `>>` expression in NodeJAX (`imu_nodejax.py`, 90 lines) whose priming, physical state container, and call-time `KeyStream` splitting derive from the leaves. NNX (`imu_nnx.py`, 101 lines) wires priming samples and named `nnx.Rngs` streams manually inside `IMU.__init__`, while Equinox (`imu_equinox.py`, 115 lines) repeats the stage topology across `IMUState`, `IMU.init`, and `IMU.step` plus manual step-key splitting so inserting one stateful stage requires four coordinated edits.
 

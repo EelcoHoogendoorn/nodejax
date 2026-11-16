@@ -1,4 +1,4 @@
-"""A step promoted to a system: its first field becomes its state."""
+"""State-carry conversion (`cyclic`) turning a stateless transition step into a cyclic `Node`."""
 
 from __future__ import annotations
 
@@ -11,14 +11,13 @@ from nodejax.transforms.transform import transform
 
 @transform(preserves='param,state')
 def cyclic(step: Node) -> Node:
-    """The cyclic form of a step whose output is the successor of its first
-    field.
+    """Moves `step`'s first declared `apply` field into cyclic `state` and threads its output as the next carry.
 
-    The step's first field becomes the state, a call's output is that
-    state's successor, and the remaining fields are the call's own. The
-    initial condition is a state input under the first field's name, or a
-    bound state. A step with one field gives a system with no call fields,
-    ticking on its own. Parameters stay the step's.
+    Any remaining fields on `step` stay runtime `apply` inputs, while the first
+    field's name becomes a required state-initialization field on `init(...)`
+    (unless `step` already carries bound state). A single-argument `step(s) ->
+    next_s` becomes a zero-input autonomous system that can step under `scan(
+    ..., n=length)` or `repeat(..., n)`.
     """
     if step.cyclic:
         raise TypeError(

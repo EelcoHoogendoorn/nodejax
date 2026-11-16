@@ -10,7 +10,7 @@ members form a committee. Time rollout sits inside task-local adaptation,
 which sits inside outer meta-training. The inner update remains differentiable
 so the outer gradient passes through it.
 
-The files use each framework's native formulation. NodeJAX composes component
+The files use each framework's native formulation. NodeJAX composes Node
 transforms whose param and state behavior comes from one contract. Flax NNX
 uses graph-aware `vmap`, `scan`, and gradient transforms over Modules, with
 `StateAxes` at sites that need an axis policy. The reusable NNX variant factors
@@ -37,8 +37,8 @@ MEMBERS = 3                     # committee width, mean-mixed
 
 
 def make_tasks(key: jax.Array):
-    """Support and query sequences for TASKS tasks, each an EMA with its
-    own decay."""
+    """Generates support and query sequences for `TASKS` tasks, each an EMA
+    with its own decay."""
     k1, k2, k3 = jax.random.split(key, 3)
     alphas = jax.random.uniform(k1, (TASKS,), minval=0.6, maxval=0.95)
     sup_x = jax.random.normal(k2, (TASKS, K, T))

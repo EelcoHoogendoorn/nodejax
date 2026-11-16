@@ -27,12 +27,11 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from examples.comparisons.chunk import chunk_common as task
-from typing import Any as PyTree
 
 
 class Norm(eqx.Module):
-    """Running per-feature normalizer. Its statistics live in the State,
-    under an index it owns."""
+    """Normalizes features using running statistics stored in `eqx.nn.State`
+    under a module-owned `StateIndex`."""
 
     index: eqx.nn.StateIndex
 
@@ -47,17 +46,16 @@ class Norm(eqx.Module):
 
 
 class RNN(eqx.Module):
-    """The recurrent cell, with WEIGHTS. Its hidden state is an ORDINARY
-    VALUE, in and out, because the caller's scan carries it. Two kinds of
-    state in one model, and which kind a piece goes in is decided by whether
-    the scan carries it.
+    """Applies the recurrent cell with weights stored as module fields while
+    receiving and returning `hidden` as an explicit scan carry. Two kinds of
+    state live in one model, and which kind a piece goes in is decided by
+    whether the scan carries it.
 
-    The weights are FIELDS, which is to say the module IS its parameters: an
-    eqx.Module is a pytree of them, and the key arrives at the constructor,
-    which is the equinox convention. Adding them costs nothing at the scans,
-    because the module was already closed over rather than threaded. It costs
-    later instead, when training needs the parameters separated from
-    everything else in the same pytree by a filter."""
+    The weights are PyTree fields on the `eqx.Module` itself, and the key
+    arrives at the constructor following the Equinox convention. Adding them
+    costs nothing at the scans because the module was already closed over
+    rather than threaded. It costs later instead, when training needs the
+    parameters separated from everything else in the same pytree by a filter."""
 
     wx: jnp.ndarray
     wh: jnp.ndarray
@@ -71,11 +69,11 @@ class RNN(eqx.Module):
 
 
 class Step(eqx.Module):
-    """The two composed, the ordinary way: submodules as fields.
+    """Composes `Norm` and `RNN` as submodule fields on one step module.
 
-    Composing costs a level of PATH. Everything that reaches for the
+    Composing adds a level of attribute path. Everything that reaches for the
     statistics from outside now goes through `model.norm.index` rather than
-    `model.norm.index`, and the boundary lines are all outside."""
+    `model.index`, and the boundary lines are all outside."""
 
     norm: Norm
     rnn: RNN
@@ -89,9 +87,8 @@ class Step(eqx.Module):
         return self.rnn(hidden, normalized), state
 
 
-def run(seq: jax.Array=task.SEQ):
-    """The whole chunked run as one program: lax.scan over chunks of lax.scan
-    over steps.
+def run(seq: jax.Array = task.SEQ):
+    """Runs the chunked sequence as nested `lax.scan` over chunks and steps.
 
     Nothing is lifted and nothing is annotated, because equinox state is an
     ordinary pytree value and both scans carry it the way they carry anything
@@ -113,8 +110,8 @@ def run(seq: jax.Array=task.SEQ):
     return outs.reshape(-1, task.H)
 
 
-def run_recordings(seq: jax.Array=task.SEQ):
-    """TWO boundaries, and a piece of state answering each.
+def run_recordings(seq: jax.Array = task.SEQ):
+    """Runs nested recording and chunk scans with manual per-recording resets.
 
     Nothing declares anything, so the caller writes both, in both places, and
     the two do not look alike. The chunk boundary is the snapshot read at the
@@ -130,8 +127,8 @@ def run_recordings(seq: jax.Array=task.SEQ):
     Nothing relates the key to the carry it initializes; the pairing is that
     both happen to be written on the same line.
 
-    It works this cleanly only because the two lifetimes live in different
-    KINDS of thing: `hidden` is a plain value the caller already owns, and the
+    This stays short only because the two lifetimes live in different
+    representations: `hidden` is a plain value the caller already owns, and the
     statistics are in the State. Give a real model two lifetimes inside the
     State and the recording body becomes pytree surgery, re-initing some
     subtrees from init and keeping others, at every boundary, with nothing
@@ -152,7 +149,7 @@ def run_recordings(seq: jax.Array=task.SEQ):
 
     def recording(state, xs):
         chunks, key = xs                                 # the key rides the xs
-        # the RECORDING boundary: carry drawn afresh, statistics kept
+        # the recording boundary: carry drawn afresh, statistics kept
         (_, state), outs = jax.lax.scan(chunk, (task.carry_init(key), state), chunks)
         return state, outs
 
@@ -160,12 +157,13 @@ def run_recordings(seq: jax.Array=task.SEQ):
     return outs.reshape(-1, task.H)
 
 
-def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
-    """FOURTH question: train the weights through the chunked rollout.
+def train(recordings: bool = False, seq: jax.Array = task.SEQ):
+    """Trains the weights through the chunked rollout via `eqx.partition`.
 
-    Equinox's one pytree comes due here. A module IS its parameters, and it is
-    also everything else it holds, so differentiating means splitting the tree
-    first: eqx.partition on a PREDICATE, then eqx.combine inside the loss.
+    Equinox's one pytree comes due here. A module holds its parameters and
+    everything else on the same tree, so differentiating means splitting the
+    tree first: `eqx.partition` on a predicate, then `eqx.combine` inside the
+    loss.
 
     The predicate is `is_inexact_array`, which is a guess that happens to be
     right for this model. It says nothing about parameters; it says "float
@@ -175,14 +173,14 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
 
     The statistics escape it only because they live in the State rather than
     in the module, which is the same accident that made the recording boundary
-    a clean line. Put them in the module and the predicate reaches them."""
+    a short line. Put them in the module and the predicate reaches them."""
     model, state0 = eqx.nn.make_with_state(Step)(task.PARAM_KEY)
     hidden = task.carry_init(task.INIT_KEY)
     chunks = seq.reshape(-1, task.CHUNK, task.W)
 
     def rollout(m, state):
-        """The lifetimes are the caller's lines, so they are written again
-        here: a fresh carry at the top of the recording body when there are
+        """Repeats the caller's lifetime logic inside the loss evaluation:
+        a fresh carry at the top of the recording body when there are
         recordings. Nothing declared it the first time and nothing carries it
         over, which is the cost this column pays twice."""
         def chunk(carry, xs):
@@ -201,7 +199,7 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
 
         def recording(st, xs):
             chunk_data, key = xs
-            # the RECORDING boundary: carry drawn afresh, statistics kept
+            # the recording boundary: carry drawn afresh, statistics kept
             (_, st), outs = jax.lax.scan(chunk, (task.carry_init(key), st),
                                          chunk_data)
             return st, outs
@@ -219,7 +217,7 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
     # Python loop over jax code is not something a real user would put up with
     def step(params, _):
         loss, grads = jax.value_and_grad(loss_fn)(params)
-        # HAND-ROLLED SGD: these frameworks own no optimizer, optax being
+        # hand-rolled SGD: these frameworks own no optimizer, optax being
         # the ecosystem's, and this loop owns its own arithmetic instead
         return jax.tree.map(lambda w, g: w - task.LR * g, params, grads), loss
 
@@ -227,9 +225,8 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
     return losses
 
 
-
 def train_sessions():
-    """FIFTH question: recording and session in one scan nest.
+    """Trains across recording and session boundaries in three nested scans.
 
     The same shape as haiku's: three lax.scans the caller owns, each lifetime
     the constant entering at its scan's top. equinox contributes the module
@@ -258,7 +255,7 @@ def train_sessions():
             return jnp.mean((outs - t) ** 2), (h2, s2)
 
         (loss, (h2, s2)), grads = jax.value_and_grad(loss_fn, has_aux=True)(p)
-        # HAND-ROLLED MOMENTUM, same note: the velocity is the caller's
+        # hand-rolled momentum, same note: the velocity is the caller's
         # pytree because nothing in the framework owns the training loop
         vel = jax.tree.map(lambda v, g: task.MU * v + g, vel, grads)
         p = jax.tree.map(lambda w, v: w - task.LR * v, p, vel)
@@ -267,13 +264,13 @@ def train_sessions():
     def over_recordings(carry, xt):
         p, vel, state = carry
         (p, vel, state, _), losses = jax.lax.scan(
-            over_chunks, (p, vel, state, hidden0), xt)        # RECORDING: hidden dies
+            over_chunks, (p, vel, state, hidden0), xt)        # recording: hidden dies
         return (p, vel, state), losses
 
     def over_sessions(p, xt):
-        vel0 = jax.tree.map(jnp.zeros_like, p)   # SESSION: momentum restarts
+        vel0 = jax.tree.map(jnp.zeros_like, p)   # session: momentum restarts
         (p, _, _), losses = jax.lax.scan(
-            over_recordings, (p, vel0, state0), xt)            # SESSION: recalibrated
+            over_recordings, (p, vel0, state0), xt)            # session: recalibrated
         return p, losses
 
     _, losses = jax.lax.scan(over_sessions, params0,

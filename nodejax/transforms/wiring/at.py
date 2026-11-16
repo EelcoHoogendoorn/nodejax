@@ -1,22 +1,20 @@
+"""Single-field `Struct` routing (`at`) for serial pipelines."""
+
 from __future__ import annotations
 
 from nodejax.core.node import Node
-from nodejax.transforms.transform import transform
 from nodejax.core.wrapper import Wrapper
+from nodejax.transforms.transform import transform
 
 
 @transform(preserves='param')
 def at(inner: Node, field: str) -> Node:
-    """Route a node onto one field of a Struct input: the output is the
-    input Struct with `field` replaced by the node's output, every
-    other field passed through untouched. Pipes chain whole signals;
-    at() lets a chain act on one strand of a structured signal while
-    the rest ride alongside.
+    """Applies `inner` to `input[field]` of an open `Struct` input and passes sibling fields through unchanged.
 
-    Type-preserving and transparent: param and state are the inner
-    node's own, a supplied init input is projected to the field, and
-    the wrapper keeps the inner node's name, so pipe member keys and
-    state paths read as if the node were placed directly."""
+    Retains `inner`'s parameter tree, state tree, and `name` transparently so
+    member keys and parameter paths in an enclosing `>>` pipeline read as if
+    `inner` were placed directly.
+    """
 
     def param(contract, param_input, rng):
         current = contract.members.inner.for_input(

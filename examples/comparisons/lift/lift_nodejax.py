@@ -1,7 +1,7 @@
 """NodeJAX's native stack under the lifted-stack parity contract.
 
 The layer owns parameters, mutable state, apply-time randomness, and aux.
-``stack`` constructs one independent row per layer and scans those rows while
+`stack` constructs one independent row per layer and scans those rows while
 feeding each clean output to the next layer.
 
 Run directly:
@@ -74,8 +74,8 @@ def _raises(call) -> bool:
 
 
 def _nests(key, apply_key) -> bool:
-    """A stack of stacks: the product of a transform is a layer like any
-    other, so the family composes with itself."""
+    """Checks whether `stack` composes with itself when nested, since the
+    product of `stack` is a Node like any other."""
     try:
         tower = _build(stack(NoisyStatefulLayer(), 2), key)
         tower.apply(input=jnp.linspace(-1.0, 1.0, WIDTH), rng=apply_key)
@@ -118,12 +118,12 @@ def StatefulLayer():
 
 @node
 def OtherStateLayer():
-    """State of the library\'s other kind.
+    """Carries unbatched running state marked with `'single_batch_state'`.
 
     NodeJAX has one state role, so the second kind is a tag on the same
-    role rather than a second type. ``single_batch_state`` marks state that
+    role rather than a second type. `'single_batch_state'` marks state that
     must not gain an axis when the node is mapped, which is what running
-    statistics need and what ``nn.BatchNorm`` uses.
+    statistics need and what `nn.BatchNorm` uses.
     """
     def param(rng):
         return Struct(
@@ -141,7 +141,7 @@ def OtherStateLayer():
 
 
 #: Each context, the layer that presents it, and what that layer needs at
-#: apply. Every layer owns parameters, since a layer axis is what ``stack``
+#: apply. Every layer owns parameters, since a layer axis is what `stack`
 #: ranges over.
 _CONTEXTS = (
     ('plain', BareLayer, False, False),
@@ -153,7 +153,7 @@ _CONTEXTS = (
 
 
 def _contexts(param_key, apply_key) -> tuple[str, ...]:
-    """Which member contexts ``stack`` carries."""
+    """Reports which member contexts `stack` carries."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     carried = []
     for name, build, stateful, draws in _CONTEXTS:
@@ -173,9 +173,9 @@ def _contexts(param_key, apply_key) -> tuple[str, ...]:
 
 
 def _state_gets_gradient(param_key) -> bool:
-    """Whether a gradient reaches the running statistic.
+    """Checks whether a gradient reaches the running statistic.
 
-    It cannot. ``param`` and ``state`` are separate trees, so a gradient
+    It cannot. `param` and `state` are separate trees, so a gradient
     taken against the parameters has nowhere to put one for state.
     """
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)

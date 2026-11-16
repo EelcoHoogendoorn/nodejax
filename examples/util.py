@@ -1,11 +1,11 @@
-"""Grab-bag helpers for the examples and tests: things the DEMONSTRATIONS
-share, deliberately not the library's. A loss function is a modeling
-choice, so the library ships none; the examples share one spelling."""
+"""Provides shared loss helpers used across worked examples and tests."""
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 
 def mse(pred: jax.Array, target: jax.Array) -> jax.Array:
+    """Computes the mean squared error between `pred` and `target`."""
     return jnp.mean((pred - target) ** 2)

@@ -1,4 +1,4 @@
-"""Semantic transform families with one flat public import surface."""
+"""Re-exports the NodeJAX transform algebra across axes, iteration, learning, policy, structure, and wiring."""
 
 from nodejax.transforms.axes import batch, ensemble, reduce, unbatched
 from nodejax.transforms.iteration import (carried, iterated, repeat, repeated, scan,

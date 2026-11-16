@@ -1,4 +1,4 @@
-"""Discard Aux from a concrete runtime output."""
+"""Re-exports `drop_aux` for stripping `Aux` payloads from concrete runtime outputs."""
 
 from __future__ import annotations
 

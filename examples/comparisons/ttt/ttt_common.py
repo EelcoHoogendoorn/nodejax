@@ -15,7 +15,7 @@ EXPECTED_WEIGHTS = 2 * (VOCAB * HIDDEN + HIDDEN * HIDDEN + HIDDEN * VOCAB)
 
 
 def make_tasks(rs: np.random.RandomState, n_tasks: int) -> np.ndarray:
-    """Sample `n_tasks` token sequences of shape `(n_tasks, STREAM)` (`int32`)."""
+    """Samples `n_tasks` token sequences of shape `(n_tasks, STREAM)` (`int32`)."""
     logits = CONCENTRATION * rs.standard_normal((n_tasks, VOCAB, VOCAB))
     probs = np.exp(logits)
     probs /= probs.sum(-1, keepdims=True)
@@ -30,7 +30,7 @@ def make_tasks(rs: np.random.RandomState, n_tasks: int) -> np.ndarray:
 
 
 def query_nll_numpy(logits, targets) -> float:
-    """Compute mean query-region next-token negative log-likelihood in NumPy."""
+    """Computes mean query-region next-token negative log-likelihood in NumPy."""
     arr = np.asarray(logits, dtype=np.float64)
     tgt = np.asarray(targets, dtype=np.int64)
     shifted = arr - arr.max(axis=-1, keepdims=True)
@@ -41,7 +41,7 @@ def query_nll_numpy(logits, targets) -> float:
 
 def report(framework: str, variant: str, n_weights: int, finite: bool,
            nll_before: float, nll_after: float) -> None:
-    """Assert weight parity, finiteness, and held-out improvement, then print summary."""
+    """Asserts weight parity, finiteness, and held-out improvement, then prints a summary."""
     assert n_weights == EXPECTED_WEIGHTS, (
         f'{framework}/{variant}: expected {EXPECTED_WEIGHTS} meta-weights, got {n_weights}'
     )

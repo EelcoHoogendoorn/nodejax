@@ -3,7 +3,7 @@
 Twelve behaviours are the parity contract and are asserted, so a column
 that fails one stops rather than printing a prettier number.
 
-``nests`` is measured and printed instead. It is the one criterion the
+`nests` is measured and printed instead. It is the one criterion the
 columns disagree on, and asserting it would only make the failing column
 crash; reporting it puts the difference in the output where it can be
 compared. A transform whose own product is not an acceptable member is
@@ -15,10 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-#: The member contexts every column offers its transform. A member always
+#: The member contexts every column passes to its transform. A member always
 #: owns parameters, since that is what a layer axis ranges over; what varies
 #: is whether it carries state and whether it draws at apply. The last one is
-#: the framework's OTHER mechanism for mutable state, which each of the three
+#: the framework's other mechanism for mutable state, which each of the three
 #: has in a different form: a tag in nodejax, a Variable subclass in NNX, a
 #: separate State object in Equinox.
 CONTEXTS = ('plain', 'rng', 'state', 'state+rng', 'other-state')
@@ -34,7 +34,7 @@ OTHER_DROPOUT_SEED = 11
 
 @dataclass
 class Evidence:
-    """Observable behavior required from each reusable implementation."""
+    """Records observable parity outcomes for each reusable stack implementation."""
 
     parameter_shape: tuple[int, ...]
     state_shape: tuple[int, ...]
@@ -62,7 +62,7 @@ class Evidence:
 
 
 def verify(label: str, evidence: Evidence) -> Evidence:
-    """Assert the parity contract and print one compact summary."""
+    """Asserts the parity contract and prints one compact summary."""
     assert evidence.parameter_shape == (DEPTH, WIDTH)
     assert evidence.state_shape == (DEPTH, WIDTH)
     assert evidence.aux_state_shape == (DEPTH, WIDTH)

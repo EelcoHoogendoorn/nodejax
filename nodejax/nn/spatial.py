@@ -1,11 +1,11 @@
-"""Spatial pooling and resizing blocks."""
+"""Defines 2D spatial pooling and resizing Leaf factories."""
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 
-from nodejax.core.node import Node
+from nodejax.core.pnode import PNode
 from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
 
@@ -19,8 +19,8 @@ def _pair(value: int | tuple[int, int]) -> tuple[int, int]:
 @node
 def MaxPool(window: int | tuple[int, int] = 2,
             stride: int | tuple[int, int] | None = None,
-            padding: str = 'VALID') -> Node:
-    """Maximum pooling over one `(height, width, channels)` feature map."""
+            padding: str = 'VALID') -> PNode:
+    """Computes sliding-window maxima over one `(height, width, channels)` feature map."""
     window_shape = _pair(window)
     stride_shape = _pair(window if stride is None else stride)
 
@@ -40,8 +40,8 @@ def MaxPool(window: int | tuple[int, int] = 2,
 @node
 def AvgPool(window: int | tuple[int, int] = 2,
             stride: int | tuple[int, int] | None = None,
-            padding: str = 'VALID') -> Node:
-    """Average pooling that excludes padded cells from edge averages."""
+            padding: str = 'VALID') -> PNode:
+    """Computes sliding-window means over one `(height, width, channels)` feature map, excluding padded positions."""
     window_shape = _pair(window)
     stride_shape = _pair(window if stride is None else stride)
 
@@ -64,15 +64,15 @@ def AvgPool(window: int | tuple[int, int] = 2,
 
 
 @node
-def GlobalAvgPool() -> Node:
-    """Reduce the spatial axes of one feature map, preserving channels."""
+def GlobalAvgPool() -> PNode:
+    """Averages the two leading spatial axes of one `(height, width, channels)` feature map."""
     return Leaf(lambda input: jnp.mean(input, axis=(0, 1)))
 
 
 @node
 def Upsample(scale: int | tuple[int, int] = 2,
-             method: str = 'nearest') -> Node:
-    """Resize one feature map by an integer spatial scale."""
+             method: str = 'nearest') -> PNode:
+    """Multiplies the spatial dimensions of one `(height, width, channels)` feature map by `scale`."""
     scale_shape = _pair(scale)
     if scale_shape[0] < 1 or scale_shape[1] < 1:
         raise ValueError('upsample scale must be positive')
@@ -87,8 +87,8 @@ def Upsample(scale: int | tuple[int, int] = 2,
 
 @node
 def Downsample(scale: int | tuple[int, int] = 2,
-               method: str = 'nearest') -> Node:
-    """Resize one feature map down by an integer spatial scale."""
+               method: str = 'nearest') -> PNode:
+    """Divides the spatial dimensions of one `(height, width, channels)` feature map by integer `scale`."""
     scale_shape = _pair(scale)
     if scale_shape[0] < 1 or scale_shape[1] < 1:
         raise ValueError('downsample scale must be positive')

@@ -1,12 +1,6 @@
-"""Simulation, neural network, and reinforcement learning in one Node tree.
+"""Couples PBD rope dynamics, FOC motor-actuator stacks, and RL/MPPI controllers into one Node tree.
 
-NodeJAX is a functional, JAX-native object model meant to work the same in
-any domain. This example combines three that were written without each
-other: the position-based dynamics of ``examples.pbd``, the motor
-controller of ``examples.actuator``, and the learners of ``examples.rl``.
-A rope on a motor-driven arm is the plant; a recurrent policy commands
-the motors; SHAC and PPO train it and MPPI plans on it, each from one
-program, with nothing adapted at the seams.
+Combines `examples.pbd`, `examples.actuator`, and `examples.rl` without adapter layers: a two-link arm driven by `ActuatorStack` joints swings a PBD particle rope toward sampled 2D targets under recurrent `SHAC`, `PPO`, and receding-horizon `MPPI` controllers.
 """
 
 from examples.whip.plant import (

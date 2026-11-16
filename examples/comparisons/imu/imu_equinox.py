@@ -48,7 +48,7 @@ class Quantizer(eqx.Module):
 
 
 class IMUState(eqx.Module):
-    """Explicit state container holding one field per stateful stage."""
+    """Holds one explicit state field per stateful stage."""
 
     d1_last: jax.Array
     d2_last: jax.Array

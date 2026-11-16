@@ -24,9 +24,8 @@ from examples.comparisons.generics.generics_common import (
 
 
 class Block(nn.Module):
-    """The leaf. `temperature` is an ordinary Python attribute: torch
-    keeps no register of what is configuration and what is data, so it
-    is simply not a Parameter and nothing checks that."""
+    """Applies a same-width linear layer followed by temperature-scaled `tanh`.
+    `temperature` sits on an unchecked Python attribute outside `Parameter`."""
 
     def __init__(self, width: int, temperature: float):
         super().__init__()
@@ -38,8 +37,8 @@ class Block(nn.Module):
 
 
 class Tower(nn.Module):
-    """entry -> depth blocks -> readout. `temperature` is here to reach
-    Block and for nothing else."""
+    """Chains `entry -> depth blocks -> readout`, forwarding `temperature` only
+    so `Block` receives it."""
 
     def __init__(self, in_dim: int, width: int, depth: int, temperature: float):
         super().__init__()
@@ -56,8 +55,8 @@ class Tower(nn.Module):
 
 
 class Committee(nn.Module):
-    """`members` towers, averaged. Four of the five configuration
-    parameters below are pure threading."""
+    """Averages `members` towers while forwarding four unused config parameters
+    down to `Tower`."""
 
     def __init__(self, in_dim: int, width: int, depth: int, members: int,
                  temperature: float):
@@ -74,15 +73,15 @@ THREADING_TAX = 5
 
 
 def configured(config: dict) -> Committee:
-    """Exercise 1: the caller unpacks the dict and the constructor chain
-    re-states every value at every level."""
+    """Unpacks `config` into positional constructor arguments for Exercise 1,
+    since every level restates what it forwards."""
     torch.manual_seed(PARAM_KEY)
     return Committee(IN_DIM, config['width'], config['depth'],
                      config['members'], config['temperature'])
 
 
 def fit(model: Committee, rows: torch.Tensor, targets: torch.Tensor) -> tuple:
-    """Torch's own idiom: an eager Python loop over steps."""
+    """Trains `model` with an eager Python step loop."""
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     losses = []
     for _ in range(TRAIN_STEPS):
@@ -95,10 +94,9 @@ def fit(model: Committee, rows: torch.Tensor, targets: torch.Tensor) -> tuple:
 
 
 def retempered(model: Committee, temperature: float) -> Committee:
-    """Exercise 2: an assignment, as in nnx, and with the same two
-    costs. The walk is hand-written and grows with the architecture,
-    and the assignment mutates, so keeping the old configuration means
-    copying the whole model first."""
+    """Deep-copies `model` and assigns `temperature` on every `Block` in a
+    hand-written nested loop that grows with the architecture, since direct
+    attribute assignment mutates the existing module in place."""
     import copy
 
     flipped = copy.deepcopy(model)
@@ -127,7 +125,7 @@ def main() -> None:
         shift = float(torch.mean(torch.abs(flipped(rows) - before)))
 
     # exercise 3: named_modules() walks the tree and named_parameters()
-    # walks the weights, but neither reports the CONFIGURATION: a plain
+    # walks the weights, but neither reports the configuration: a plain
     # attribute is in no register, so what the model was built with
     # survives only in whatever dict the caller kept.
     print('[torch] the configuration, hand-walked off the model:')

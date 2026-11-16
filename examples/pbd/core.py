@@ -1,31 +1,21 @@
-"""Position-based dynamics over any entity record, from Node transforms.
+"""Defines entity-agnostic constraint projection, index gather/scatter, and Gauss-Seidel/Jacobi solver schedules.
 
-Three things vary independently. The entities are a record, a Struct with a
-leading entity axis, whose fields say what kind of body it is: particles or
-rigid bodies. A constraint is a Node on the few entities it touches, the
-physics. A schedule is how that Node is applied over a constraint set:
-``gauss_seidel`` one after another through ``stack``, ``jacobi`` all at
-once through ``ensemble`` with the corrections summed, ``red_black`` two
-Jacobi passes in turn. ``Index`` gathers the entities a constraint touches
-and scatters them back, and is the only place that knows about indices.
-
-The entity collection is passed as data through individual constraint and
-substep operations. At the outer timestep boundary, ``pbd_step`` and
-``xpbd_step`` wrap ``PBDStep`` in ``cyclic``, promoting the collection
-to state.
+Separates three orthogonal choices: the entity `Struct` with a leading entity axis (`Particle` or `Body`), the local `Constraint` `Node` acting on the subset of entities it couples, and the solver schedule (`gauss_seidel` via `stack`, `jacobi` via `ensemble` and `reduce`, or `red_black` via two alternating `jacobi` passes). `Index` isolates entity-axis gather and scatter operations, while `pbd_step` and `xpbd_step` wrap `PBDStep` in `cyclic` so the entity collection becomes carried state across outer timesteps.
 """
 
-from typing import Any
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 
 from nodejax import (
     Aux,
+    BaseNode,
     Composite,
     Leaf,
     Node,
     PNode,
+    PyTree,
     Struct,
     Wrapper,
     ensemble,
@@ -40,21 +30,21 @@ from nodejax import (
 
 @node
 def Index() -> Node:
-    """Indexed gather and scatter operations over entity PyTrees."""
-    def param(indices):
+    """Provides indexed `gather`, `scatter`, and `scatter_add` methods over entity PyTrees."""
+    def param(indices: PyTree) -> PyTree:
         return indices
 
     def apply(param, entities):
         raise TypeError('Index is used through gather, scatter, and scatter_add')
 
-    def gather(param, entities):
+    def gather(param, entities: PyTree) -> PyTree:
         return tree_take(entities, param)
 
-    def scatter(param, entities, local):
+    def scatter(param, entities: PyTree, local: PyTree) -> PyTree:
         return jax.tree.map(
             lambda whole, part: whole.at[param].set(part), entities, local)
 
-    def scatter_add(param, entities, delta):
+    def scatter_add(param, entities: PyTree, delta: PyTree) -> PyTree:
         return jax.tree.map(
             lambda whole, part: whole.at[param].add(part), entities, delta)
 
@@ -63,9 +53,9 @@ def Index() -> Node:
 
 
 @node
-def IndexedConstraint(index: Node, constraint: Node) -> Node:
-    """Gather, project, and scatter-set one described constraint."""
-    def apply(self, entities):
+def IndexedConstraint(index: BaseNode, constraint: BaseNode) -> Node | PNode:
+    """Gathers the entities addressed by `index`, projects `constraint`, and scatters the updated entities back."""
+    def apply(self, entities: PyTree) -> PyTree:
         gathered = self.index.gather(entities)
         projected = self.constraint(gathered)
         return self.index.scatter(entities, projected)
@@ -74,10 +64,9 @@ def IndexedConstraint(index: Node, constraint: Node) -> Node:
 
 
 @node
-def IndexedConstraintCorrection(index: Node, constraint: Node) -> Node:
-    """Compute displacement corrections from one constraint, zero elsewhere."""
-
-    def apply(self, entities):
+def IndexedConstraintCorrection(index: BaseNode, constraint: BaseNode) -> Node | PNode:
+    """Computes sparse entity-level displacement deltas induced by one indexed `constraint`."""
+    def apply(self, entities: PyTree) -> PyTree:
         gathered = self.index.gather(entities)
         projected = self.constraint(gathered)
         diff = jax.tree.map(
@@ -92,9 +81,9 @@ def IndexedConstraintCorrection(index: Node, constraint: Node) -> Node:
 
 
 @node
-def Displaced(corrections: Node) -> Node:
-    """Displace an entity collection by summed constraint corrections."""
-    def apply(self, entities):
+def Displaced(corrections: BaseNode) -> Node | PNode:
+    """Adds summed constraint displacements from `corrections(entities)` back onto `entities`."""
+    def apply(self, entities: PyTree) -> PyTree:
         delta = self.corrections(entities)
         return jax.tree.map(
             lambda entity_leaf, delta_leaf: entity_leaf + delta_leaf,
@@ -105,31 +94,34 @@ def Displaced(corrections: Node) -> Node:
     return Wrapper(corrections=corrections)(apply)
 
 
-def gauss_seidel(constraints: Struct, constraint: Node) -> PNode:
-    """Apply ``constraint`` to the constraints one after another via ``stack``."""
+def gauss_seidel(constraints: Struct, constraint: BaseNode) -> PNode:
+    """Projects `constraint` sequentially across `constraints` via `stack`."""
     projection = IndexedConstraint(index=Index(), constraint=constraint)
     return stack(projection, n=tree_len(constraints)).bind(constraints)
 
 
-def tree_sum(tree, axis=0):
-    """Sum each array leaf in a PyTree across ``axis``."""
+def tree_sum(tree: PyTree, axis: int = 0) -> PyTree:
+    """Sums each array leaf in `tree` along `axis`."""
     return jax.tree.map(lambda leaf: jnp.sum(leaf, axis=axis), tree)
 
 
-def safe_norm(v: jax.Array, eps: float = 1e-12) -> jax.Array:
-    """Safe Euclidean norm with non-zero gradient at the origin."""
-    return jnp.sqrt(jnp.maximum(jnp.sum(v ** 2), eps))
+def safe_norm(vector: jax.Array, eps: float = 1e-12) -> jax.Array:
+    """Computes `sqrt(max(sum(vector ** 2), eps))` with a finite gradient at the origin."""
+    return jnp.sqrt(jnp.maximum(jnp.sum(vector ** 2), eps))
 
 
-def tree_dot(a: Any, b: Any) -> jax.Array:
-    """Inner product between two matching PyTrees of arrays."""
-    return sum(jnp.vdot(x, y) for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b)))
+def tree_dot(left: PyTree, right: PyTree) -> jax.Array:
+    """Computes the scalar inner product across corresponding array leaves of `left` and `right`."""
+    return sum(
+        jnp.vdot(left_leaf, right_leaf)
+        for left_leaf, right_leaf in zip(jax.tree.leaves(left), jax.tree.leaves(right))
+    )
 
 
 @node
-def Constraint(objective: Node) -> Node:
-    """Least-action constraint projection over any entity record."""
-    def apply(self, pair):
+def Constraint(objective: BaseNode) -> Node | PNode:
+    """Projects a local entity tuple onto `objective(pair.coords) == 0` weighted by `pair.inv_inertia` and `compliance`."""
+    def apply(self, pair: PyTree) -> tuple[PyTree, Aux]:
         error, grad = jax.value_and_grad(self.objective)(pair.coords)
         delta = jax.tree.map(jnp.multiply, pair.inv_inertia, grad)
         denom = tree_dot(grad, delta) + self.objective.param.compliance
@@ -140,18 +132,16 @@ def Constraint(objective: Node) -> Node:
     return Wrapper(objective=objective)(apply)
 
 
-def jacobi(constraints: Struct, constraint: Node) -> Node:
-    """Apply ``constraint`` to every constraint from the same positions and add up
-    the corrections: an ``ensemble`` of one correction per constraint, summed
-    by ``reduce``."""
+def jacobi(constraints: Struct, constraint: BaseNode) -> Node | PNode:
+    """Evaluates all `constraints` concurrently from the same entity poses via `ensemble` and sums their corrections."""
     corrections = ensemble(
         IndexedConstraintCorrection(Index(), constraint), n=tree_len(constraints)
     ).bind(constraints)
     return Displaced(corrections >> reduce(tree_sum))
 
 
-def red_black(constraints: Struct, constraint: Node) -> Node:
-    """Jacobi over two colors in turn, the even constraints then the odd ones."""
+def red_black(constraints: Struct, constraint: BaseNode) -> Node | PNode:
+    """Runs two alternating `jacobi` passes over even-indexed and odd-indexed `constraints`."""
     indices = jnp.arange(tree_len(constraints))
     return serial(
         even=jacobi(tree_take(constraints, indices[::2]), constraint),
@@ -161,18 +151,18 @@ def red_black(constraints: Struct, constraint: Node) -> Node:
 
 @node
 def PBDStep(
-    predict: Node,
-    solve: Node,
-    finalize: Node,
-) -> Node:
-    """One PBD timestep: predict free motion from force, solve constraints, and update velocity."""
+    predict: BaseNode,
+    solve: BaseNode,
+    finalize: BaseNode,
+) -> Node | PNode:
+    """Executes one PBD timestep by predicting unconstrained motion, solving constraints, and recovering velocities."""
     members = Composite(
         predict=predict,
         solve=solve,
         finalize=finalize,
     )
 
-    def apply(self, entities, force):
+    def apply(self, entities: PyTree, force: PyTree) -> PyTree:
         predicted = self.predict(entities, force)
         projected = self.solve(predicted)
         return self.finalize(entities, projected)

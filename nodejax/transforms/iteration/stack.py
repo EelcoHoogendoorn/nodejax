@@ -1,24 +1,28 @@
+"""Homogeneous depth composition (`stack`) compiled as a single `jax.lax.scan`.
+
+`stack` composes `n` identically structured layers with independent parameter
+and state slices stacked along leading axis 0 so XLA compiles the entire depth
+stack once instead of unrolling `n` separate Python layer graphs.
+"""
+
 from __future__ import annotations
 
 from nodejax.core.node import Node
-from nodejax.transforms.transform import transform, vmap_init, vmap_param
-from nodejax.transforms.iteration._common import scanned_apply, scanned_initialize
 from nodejax.core.wrapper import Wrapper
+from nodejax.transforms.iteration._common import scanned_apply, scanned_initialize
+from nodejax.transforms.transform import transform, vmap_init, vmap_param
 
 
 @transform
 def stack(layer: Node, n: int) -> Node:
-    """Compose ``n`` independently parameterized copies of ``layer``.
+    """Chains `n` independently parameterized copies of `layer` sequentially via `jax.lax.scan`.
 
-    Each layer receives the previous layer's output. Parameters and state, when
-    present, gain a leading axis of length ``n``; the external input and output
-    retain the original layer's shape. A node with neither is still valid and
-    simply has no per-layer values to store.
-
-    Arguments passed to ``parameterize`` are shared across the layers, while
-    each randomized parameter initialization receives its own key. To use an
-    existing set of per-layer parameters instead, bind the stacked parameter
-    tree directly with ``stack(layer, n).bind(param)``.
+    Unlike `repeat`, which shares one parameter tree across `n` steps, `stack`
+    gives parameter and state trees a leading axis of length `n` while keeping
+    external input and output shapes equal to a single `layer`. Calling
+    `parameterize(...)` tiles explicit overrides across all `n` layers and
+    splits PRNG keys per layer, while `stack(layer, n).bind(param)` attaches an
+    already-stacked parameter tree directly.
     """
     if type(n) is not int or n < 1:
         raise TypeError(f'stack depth must be a positive int, got {n!r}')

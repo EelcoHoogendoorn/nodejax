@@ -1,20 +1,17 @@
-"""Model Predictive Path Integral control with an injected terminal critic.
+"""Implements Model Predictive Path Integral control with an injected terminal critic.
 
-The Nodes here own the MPPI operations and receive their collaborators
-assembled: proposal batches, plant rollouts, critic batches, repeated
-refinements, and training transforms, so the tree shows the candidate,
-planning, control, and training axes where they are chosen. The canonical
-assembly is here too: ``mppi_controller`` builds the receding planner from a
-critic and a plant, ``mppi_iteration`` builds one critic-fitting iteration
-around it, and ``mppi_training`` runs a program and returns what it trained.
-A plant-specific file supplies the plant, the critic, the command range, the
-data, and the numbers.
+Composes candidate proposal batches, open-loop plant rollouts, terminal critic
+batches, repeated plan refinements, and TD-lambda critic updates from explicit
+collaborators. Exposes `mppi_controller` for receding-horizon planning,
+`mppi_iteration` for online critic fitting under an EMA target critic, and
+`mppi_training` for running a compiled critic-learning loop.
 """
 
 import math
 
 import jax
 import jax.numpy as jnp
+import optax
 
 from nodejax import (
     Aux,
@@ -22,6 +19,7 @@ from nodejax import (
     Composite,
     Leaf,
     Node,
+    PNode,
     Struct,
     Wrapper,
     batch,
@@ -43,7 +41,7 @@ from examples.rl.losses import bootstrapped_costs, mse, td_lambda
 
 
 def mppi_weights(costs: jax.Array, temperature: float) -> jax.Array:
-    """Softmax costs shaped (candidate,) into weights normalized over candidates."""
+    """Normalizes `(candidate,)` rollout costs into softmax weights at `temperature`."""
     return jax.nn.softmax(-costs / temperature)
 
 
@@ -52,14 +50,8 @@ def GaussianProposal(
     noise_scale: float,
     correlation: float = 0.0,
     clean: BaseNode = nn.identity,
-) -> Node:
-    """Perturb one open-loop plan with optionally correlated Gaussian noise.
-
-    Input and output are arrays shaped ``[time]``. ``clean`` must map one
-    ``[time]`` array to another. Correlation is the AR(1) coefficient along
-    time. Candidate populations are expressed by batching this Node at the
-    assembly site.
-    """
+) -> Node | PNode:
+    """Perturbs one `[time, *command]` open-loop plan with AR(1)-correlated Gaussian noise and applies `clean`."""
     if not math.isfinite(correlation) or not 0.0 <= correlation < 1.0:
         raise ValueError('GaussianProposal correlation must be in [0, 1)')
 
@@ -83,24 +75,18 @@ def GaussianProposal(
 
 @node
 def MPPIStep(
-    proposal: Node,
-    rollouts: Node,
-    critics: Node,
+    proposal: BaseNode,
+    rollouts: BaseNode,
+    critics: BaseNode,
     *,
     discount: float,
     temperature: float,
-) -> Node:
-    """Refine one explicit plan from one fixed initial plant state.
+) -> Node | PNode:
+    """Refines one open-loop `controls` sequence from a fixed `initial_state`.
 
-    ``proposal`` maps controls shaped ``[time, *command]`` to candidates
-    shaped ``[candidate, time, *command]``, the command scalar or a vector.
-    ``rollouts`` accepts that candidate array and one initial plant state; it
-    returns ``cost`` shaped ``[candidate, time]`` and a matching
-    ``next_state`` pytree. The rollout Node owns any environment inputs and
-    axis preparation. ``critics`` maps the candidate-axis terminal state
-    pytree to values shaped ``[candidate]``. The current plan is included as
-    an additional candidate. The output is ``Struct(initial_state,
-    controls)`` with controls shaped like the input.
+    Concatenates the warm plan with `proposal(controls)` candidates, evaluates open-loop
+    `rollouts` and terminal `critics`, and returns softmax-weighted `controls` paired
+    with `initial_state`.
     """
     members = Composite(
         proposal=proposal,
@@ -131,15 +117,8 @@ def MPPIStep(
 
 
 @node
-def RecedingMPPI(plan: Node, refinements: Node) -> Node:
-    """Refine a stored plan, execute its first command, then shift it.
-
-    ``plan`` is a cyclic Node whose state is the current ``[time, *command]``
-    plan and whose input replaces that state. ``refinements`` accepts
-    ``initial_state`` and ``controls`` shaped like the plan and returns
-    ``Struct(initial_state, controls)`` with the same shapes. This Node accepts
-    one plant-state pytree and returns one command, the plan's first.
-    """
+def RecedingMPPI(plan: BaseNode, refinements: BaseNode) -> Node | PNode:
+    """Refines a carried `[time, *command]` `plan` from the current plant state, emits its first command, and shifts the tail."""
     members = Composite(plan=plan, refinements=refinements)
 
     def apply(self, input):
@@ -157,32 +136,15 @@ def RecedingMPPI(plan: Node, refinements: Node) -> Node:
 
 @node
 def MPPIIteration(
-    sampler: Node,
-    target_critic: Node,
-    critic_trainer: Node,
-    ema_critic: Node,
+    sampler: BaseNode,
+    target_critic: BaseNode,
+    critic_trainer: BaseNode,
+    ema_critic: BaseNode,
     *,
-    discount: float,  # per-step discount on cost and on the critic's value
-    trace: float,  # TD-lambda trace; 0 is one-step, 1 is Monte Carlo
+    discount: float,  # per-step discount on cost and critic value
+    trace: float,  # TD-lambda trace where 0 is one-step and 1 is Monte Carlo
 ) -> Node:
-    """Sample one control chunk, fit its critic, and update the EMA target.
-
-    ``SHACIteration`` has this same apply with a policy trainer in the sampler's
-    place; the two stay separate so each example reads on its own.
-    ``sampler`` accepts ``initial_plant_state`` leaves shaped (world, time, ...)
-    and ``disturbance`` shaped (world, time). It also accepts the target
-    critic's parameter pytree through its externalized ``critics`` field and
-    returns a trajectory whose state leaves begin (world, time, ...) and whose
-    ``cost`` is shaped (world, time). ``target_critic`` values that trajectory's
-    next states, its whole parameter tree arriving in its ``critic`` field.
-    ``critic_trainer`` is cyclic, exposes the fitted parameters as
-    ``params()``, and accepts trajectory state as ``input`` plus the
-    TD-lambda target array as ``target``. ``ema_critic`` smooths those
-    parameters into the target critic, which is the one value function the
-    planner steers by and the targets are formed under; the fitted critic
-    reaches the planner only through it, so one fit cannot move the next
-    batch of data.
-    """
+    """Samples one closed-loop control chunk under the EMA target critic, fits `critic_trainer` to TD-lambda targets, and updates `ema_critic`."""
     members = Composite(
         sampler=sampler,
         target_critic=target_critic,
@@ -217,19 +179,8 @@ def MPPIIteration(
 
 
 @node
-def CandidateRollouts(rollouts: Node) -> Node:
-    """Roll one start out open loop under every candidate plan.
-
-    ``candidates`` is shaped (candidate, time, *command), while
-    ``initial_state`` is one unbatched plant-state pytree. Returned state
-    leaves begin (candidate, time, ...), and ``cost`` is shaped
-    (candidate, time).
-
-    The wrapped Node is ``batch(scanned(OpenLoopStep))``: batch consumes
-    candidates and scan consumes time, the order the plans arrive in. The
-    one start is repeated over candidates, and the disturbance is zero at
-    every step.
-    """
+def CandidateRollouts(rollouts: BaseNode) -> Node | PNode:
+    """Tiles a single `initial_state` across `(candidate, time, *command)` `candidates` and evaluates open-loop `rollouts` with zero disturbance."""
     def apply(self, initial_state, candidates):
         return self.rollouts(
             command=candidates,
@@ -246,20 +197,19 @@ def mppi_controller(
     *,
     clean: BaseNode,  # projects each candidate plan onto the admissible command range
     noise_scale: float,  # proposal noise std in command units
-    noise_correlation: float,  # AR(1) coefficient of that noise along the plan; 0 is white
-    temperature: float,  # softmax temperature over candidate costs; lower trusts the best more
-    discount: float,  # per-step discount on rollout cost and on the critic's terminal value
+    noise_correlation: float,  # AR(1) coefficient along the plan where 0 is white noise
+    temperature: float,  # softmax temperature over candidate costs
+    discount: float,  # per-step discount on rollout cost and terminal critic value
     n_candidates: int,
     n_refinements: int,  # MPPI refinements of the warm plan per control step
-    n_steps_per_plan: int,  # horizon in control steps; one command per step
-    command_shape: tuple = (),  # the shape of one command: () for a scalar
-) -> Node:
-    """Assemble the receding MPPI controller from a critic and a plant.
+    n_steps_per_plan: int,  # horizon in control steps
+    command_shape: tuple[int, ...] = (),  # shape of one command, () for scalar
+) -> Node | PNode:
+    """Assembles a receding-horizon MPPI controller from `critic` and `plant`.
 
-    Every control step perturbs the carried plan into candidates, rolls each
-    out open loop, scores them with the discounted cost plus the critic's
-    terminal value, and moves the plan toward the exponentially weighted
-    mean; the first command is executed and the plan shifts.
+    Perturbs the carried plan into `n_candidates` trajectories, scores them with
+    discounted running costs plus terminal `critic` values across `n_refinements`
+    iterations, emits the first command, and shifts the warm plan forward.
     """
     candidate_plans = Leaf(lambda input: tile(input, n_candidates), name='candidate_plans')
     proposal = candidate_plans >> batch(
@@ -282,27 +232,22 @@ def mppi_controller(
 
 
 def mppi_iteration(
-    controller: Node,
+    controller: BaseNode,
     critic: Node,
     plant: BaseNode,
     *,
-    critic_optimizer,  # Optax transformation for the critic parameters
-    ema_critic_decay: float,  # EMA decay of the target critic's parameters
-    discount: float,  # per-step discount on cost and on the critic's value
-    trace: float,  # TD-lambda trace; 0 is one-step, 1 is Monte Carlo
+    critic_optimizer: optax.GradientTransformation,
+    ema_critic_decay: float,  # EMA decay of the target critic parameters
+    discount: float,  # per-step discount on cost and critic value
+    trace: float,  # TD-lambda trace where 0 is one-step and 1 is Monte Carlo
     n_worlds: int,
-    n_steps_per_iteration: int,  # physical steps every world runs per iteration
+    n_steps_per_iteration: int,  # physical steps run per world per iteration
     n_critic_updates: int,  # critic fits per iteration
 ) -> Node:
-    """Assemble one critic-fitting iteration around a receding controller.
+    """Assembles one critic-fitting MPPI iteration around `controller`, `critic`, and `plant`.
 
-    The returned iteration accepts ``initial_plant_state`` leaves shaped
-    (world, time, ...) and ``disturbance`` shaped (world, time).
-
-    The controller plans under the EMA target critic, whose parameters reach
-    it as data through the planner's critic batch, and the sampled
-    trajectories fit the online critic to TD-lambda targets under that same
-    target critic.
+    Externalizes the planner's critic parameters so `controller` plans under the EMA
+    target critic while `critic` fits TD-lambda targets computed under that same target.
     """
     sampler = externalize(
         batch(scanned(PlannedStep(controller, plant)), n=n_worlds),
@@ -329,15 +274,7 @@ def mppi_training(
     parameter_key: jax.Array,
     training_key: jax.Array,
 ) -> Struct:
-    """Run an MPPI critic-training program and return what it trained.
-
-    ``program`` carries an MPPI iteration over its data. The result holds the
-    iteration bound to its final state, from which a caller binds a critic
-    to the EMA state, and the history: per iteration the mean cost, the
-    critic's last fitting loss, and ``critic_explained``, the share of the
-    targets' variance that loss leaves explained, one for a perfect fit,
-    zero for a constant, which is what says whether the critic learns.
-    """
+    """Parameterizes and executes an MPPI critic-training `program`, returning the final iteration state and loss history."""
     final, aux = split_aux(
         jax.jit(program.parameterize(rng=parameter_key).apply)(rng=training_key),
     )

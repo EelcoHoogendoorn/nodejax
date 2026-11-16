@@ -37,7 +37,7 @@ from examples.comparisons.tower.tower_common import (
 
 
 class ResidualCell(keras.Layer):
-    """One recurrent depth layer."""
+    """Applies one recurrent residual depth layer."""
 
     def build(self, _):
         self.wx = self.add_weight(
@@ -58,7 +58,7 @@ class ResidualCell(keras.Layer):
 
 
 class TowerCell(keras.Layer):
-    """Project, normalize, traverse the residual depth stack, and read out."""
+    """Projects, normalizes, traverses the residual depth stack, and reads out."""
 
     output_size = 1
 

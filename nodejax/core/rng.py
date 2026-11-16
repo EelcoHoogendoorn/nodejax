@@ -1,10 +1,13 @@
-"""Random-key streams for authored code and transform composition."""
+"""Provides invocation-local PRNG streams for authored Nodes and T3 transforms.
+
+Authored `param`, `init`, and `apply` functions receive `KeyStream` and draw subkeys via `rng.next()`. T3 transform bodies carry `MaybeKeyStream`, a JAX PyTree that unifies deterministic (`empty`) and stochastic (`keyed`) execution so `child`, `split`, `broadcast`, and `axis` allocate subkeys only when the wrapped `Contract` role declares `takes_rng=True`.
+"""
 
 from __future__ import annotations
 
-from typing import Any
-
 import jax
+
+from nodejax.core.types import PyTree
 
 
 class _NoRng:
@@ -16,7 +19,6 @@ _NO_RNG = _NoRng()
 
 
 def _check_raw_key(key: jax.Array, where: str) -> None:
-    """Require one unbatched JAX PRNG key at a public boundary."""
     try:
         data = jax.random.key_data(key)
     except (TypeError, ValueError) as exc:
@@ -26,30 +28,24 @@ def _check_raw_key(key: jax.Array, where: str) -> None:
 
 
 class KeyStream:
-    """The invocation-local mutable RNG stream passed to authored code."""
+    """Supplies sequential PRNG subkeys within one `param`, `init`, or `apply` call."""
 
-    def __init__(self, key: Any):
+    def __init__(self, key: jax.Array):
         self._key = key
 
     def __repr__(self) -> str:
         return 'KeyStream()'
 
-    def next(self):
-        """Draw one key and advance the stream."""
+    def next(self) -> jax.Array:
+        """Splits the internal key, advances the stream, and returns one fresh subkey."""
         self._key, key = jax.random.split(self._key)
         return key
 
 
 class MaybeKeyStream:
-    """A keyed-or-empty RNG capability used by compiled transform code.
+    """Wraps an optional `KeyStream` as a JAX PyTree for uniform transform plumbing."""
 
-    It keeps deterministic and stochastic canonical calls uniform. ``child``
-    and ``axis`` allocate entropy only when the called role declares that it
-    needs it. Ordinary authored functions never receive this object; a keyed
-    capability is narrowed to :class:`KeyStream` at that boundary.
-    """
-
-    def __init__(self, key: Any = _NO_RNG):
+    def __init__(self, key=_NO_RNG):
         self._stream = (key if type(key) is KeyStream else
                         None if key is _NO_RNG else KeyStream(key))
 
@@ -60,29 +56,23 @@ class MaybeKeyStream:
         return 'MaybeKeyStream(keyed)' if self else 'MaybeKeyStream(empty)'
 
     def _require(self) -> KeyStream:
-        """Narrow a keyed capability for ordinary authored code."""
         if self._stream is None:
             raise TypeError('random key required, but this RNG is empty')
         return self._stream
 
-    def next(self):
-        """Draw one key, failing when this capability is empty."""
+    def next(self) -> jax.Array:
+        """Draws one subkey, raising `TypeError` when this stream is empty."""
         return self._require().next()
 
-    def child(self, takes_rng: bool) -> 'MaybeKeyStream':
-        """Allocate the capability required by one child call."""
+    def child(self, takes_rng: bool) -> MaybeKeyStream:
+        """Returns a fresh keyed stream when `takes_rng` is `True`, or an empty stream otherwise."""
         if type(takes_rng) is not bool:
             raise TypeError('MaybeKeyStream.child takes_rng must be a bool')
         return (MaybeKeyStream(self.next()) if takes_rng
                 else MaybeKeyStream())
 
-    def split(self, count: int) -> tuple['MaybeKeyStream', int | None]:
-        """Split this capability over an axis.
-
-        Empty capabilities stay empty and broadcast because they have no JAX
-        leaves. A keyed capability is consumed as the root of ``count``
-        independent axis streams.
-        """
+    def split(self, count: int) -> tuple[MaybeKeyStream, int | None]:
+        """Splits a keyed stream into `count` axis-mapped streams `(stream, 0)`, or broadcasts `(empty, None)`."""
         if type(count) is not int or count < 0:
             raise TypeError(
                 'MaybeKeyStream.split count must be a non-negative int')
@@ -90,13 +80,13 @@ class MaybeKeyStream:
             return self.broadcast()
         return MaybeKeyStream(jax.random.split(self.next(), count)), 0
 
-    def broadcast(self) -> tuple['MaybeKeyStream', None]:
-        """Broadcast this capability unchanged over an axis."""
+    def broadcast(self) -> tuple[MaybeKeyStream, None]:
+        """Pairs this stream with `in_axes=None` so `vmap` broadcasts it unchanged."""
         return self, None
 
     def axis(self, takes_rng: bool, count: int | None, *,
-             split: bool = True) -> tuple['MaybeKeyStream', int | None]:
-        """Allocate one child's split or broadcast axis capability."""
+             split: bool = True) -> tuple[MaybeKeyStream, int | None]:
+        """Returns `(stream, in_axis)` for a mapped child role according to `takes_rng` and `split`."""
         if type(takes_rng) is not bool:
             raise TypeError('MaybeKeyStream.axis takes_rng must be a bool')
         if type(split) is not bool:
@@ -122,8 +112,7 @@ jax.tree_util.register_pytree_node(
     MaybeKeyStream, _rng_flatten, _rng_unflatten)
 
 
-def _reject_no_rng(tree, where: str) -> None:
-    """Keep the private empty marker and RNG capabilities out of model data."""
+def _reject_no_rng(tree: PyTree, where: str) -> None:
     capabilities = (KeyStream, MaybeKeyStream)
     leaves = jax.tree.leaves(tree, is_leaf=lambda value:
                             value is _NO_RNG or type(value) in capabilities)

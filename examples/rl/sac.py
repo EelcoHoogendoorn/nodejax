@@ -1,27 +1,19 @@
-"""Soft Actor-Critic over a replay Buffer that is ordinary Node state.
+"""Implements Soft Actor-Critic over a cyclic replay `Buffer` carried as ordinary Node state.
 
-The buffer's currency is one chunk per row: an observation sequence with
-one step of overlap, the commands and costs taken along it, and the policy
-state at the chunk start. A feed-forward policy leaves the stored state
-empty and unread, while a recurrent policy resumes from it, so one code
-path serves both lifecycles with no fork anywhere.
+Stores one chunk per replay row containing an observation sequence with one step
+of overlap, the commands and costs along it, and the initial policy state. A
+feed-forward policy leaves the stored policy state empty while a recurrent policy
+resumes from it, allowing one replay path to serve both lifecycles.
 
-One iteration collects fresh chunks through a sampler whose policy
-parameters arrive as data, inserts them, draws every minibatch of the
-iteration in one gather, and scans one gradient update over them. One
-gradient update holds the actor, critic, and temperature trainers, the
-target critic, and the EMA that feeds it. The actor trainer differentiates
-a replay that values its fresh commands with the online critic, whose
-parameters arrive as data; the critic fits the soft Bellman target formed
-from that same replay one step later under the target critic; the
-temperature steps on the replay's log-probabilities. Actor, critic, and
-temperature update from the pre-update snapshot of each other's
-parameters, which the call order expresses. The assembly builds all of it
-from a policy, a critic, and a plant with stock transforms.
+Each `SACIteration` collects fresh chunks under an externalized policy, writes
+them into `Buffer`, gathers all minibatches for the iteration, and scans
+`SACUpdate` across them to step the actor, critic, entropy temperature, and EMA
+target critic.
 """
 
 import jax
 import jax.numpy as jnp
+import optax
 
 from nodejax import (
     Aux,
@@ -30,6 +22,7 @@ from nodejax import (
     Leaf,
     LossFn,
     Node,
+    PNode,
     PyTree,
     Struct,
     Wrapper,
@@ -49,8 +42,8 @@ from examples.rl.replay import Buffer
 
 
 @node
-def SampledCommand(policy: Node) -> Node:
-    """Replay one stored observation, drawing a fresh command."""
+def SampledCommand(policy: BaseNode) -> Node | PNode:
+    """Evaluates `policy` on one stored `observation` and samples a fresh command and log-probability."""
     def apply(self, observation, rng):
         proposal = self.policy(observation)
         drawn = self.policy.sample(proposal, rng=rng.next())
@@ -65,11 +58,7 @@ def SampledCommand(policy: Node) -> Node:
 
 @node
 def Temperature(initial: float) -> Node:
-    """A learned entropy temperature, stored as its logarithm.
-
-    Applying it reads the temperature back; ``value`` is the same read as a
-    method, so a holder of trained weights never touches the stored form.
-    """
+    """Stores a learned entropy temperature as its logarithm and returns its exponentiated value."""
     def param():
         return jnp.log(jnp.asarray(initial))
 
@@ -80,13 +69,8 @@ def Temperature(initial: float) -> Node:
 
 
 @node
-def temperature_loss(target_entropy: float) -> Node:
-    """Configure the temperature objective from sampled log-probabilities.
-
-    The gradient with respect to the stored logarithm raises the temperature
-    while the policy's entropy sits below the target and lowers it above.
-    ``logprob`` is shaped (chunk, time + 1); both axes are averaged.
-    """
+def temperature_loss(target_entropy: float) -> PNode:
+    """Computes the dual entropy-temperature objective from `(chunk, time + 1)` log-probabilities toward `target_entropy`."""
     def apply(temperature: jax.Array, logprob: jax.Array) -> jax.Array:
         return -jnp.log(temperature) * (jnp.mean(logprob) + target_entropy)
 
@@ -94,32 +78,14 @@ def temperature_loss(target_entropy: float) -> Node:
 
 
 def entropy_regularized_cost(output: Struct, temperature: jax.Array) -> tuple[jax.Array, Aux]:
-    """SAC's actor objective: critic cost plus entropy pressure.
-
-    ``output`` is a valued replay, fresh commands with their
-    log-probabilities and critic costs shaped (chunk, time + 1), while
-    ``temperature`` is scalar. Both replay axes are averaged. Only the
-    commands carry gradient into the cost, and that path is the actor's
-    signal. The policy's mean entropy estimate rides on aux.
-    """
+    """Computes SAC's actor objective averaging critic `output.cost` plus `temperature * output.logprob`."""
     loss = jnp.mean(output.cost + temperature * output.logprob)
     return loss, Aux(entropy=-jnp.mean(output.logprob))
 
 
 @node
-def ValuedReplay(replay: Node, critic: Node) -> Node:
-    """Replay stored observations with fresh commands and cost each one.
-
-    Observation leaves begin (chunk, time + 1, ...), and ``initial`` is one
-    policy-state pytree per chunk whose leaves begin (chunk, ...). ``replay``
-    is the sampling step under ``scan``, batched over chunks, so its state is
-    the policy's per chunk; bound to ``initial`` at the call, it resumes the
-    memory observed during collection and produces fresh commands and
-    log-probabilities on the observation axes. ``critic`` maps observation
-    and command on those same axes to a cost. Externalizing ``critic`` lets
-    a caller supply the online critic's parameters on every call and keeps
-    them out of this Node's own parameter tree.
-    """
+def ValuedReplay(replay: BaseNode, critic: BaseNode) -> Node | PNode:
+    """Replays `(chunk, time + 1, ...)` observations from `initial` policy states and scores fresh commands with `critic`."""
     members = Composite(replay=replay, critic=critic)
 
     def apply(self, observation, initial):
@@ -135,29 +101,19 @@ def ValuedReplay(replay: Node, critic: Node) -> Node:
 
 @node
 def SACUpdate(
-    actor_trainer: Node,
-    target_critic: Node,
-    critic_trainer: Node,
-    temperature_trainer: Node,
-    ema_critic: Node,
+    actor_trainer: BaseNode,
+    target_critic: BaseNode,
+    critic_trainer: BaseNode,
+    temperature_trainer: BaseNode,
+    ema_critic: BaseNode,
     *,
-    discount: float,  # per-step discount on the soft Bellman target
+    discount: float,
 ) -> Node:
-    """One SAC gradient update over one replayed minibatch of chunks.
+    """Executes one SAC gradient update over a replayed minibatch of chunks.
 
-    Observation leaves begin (chunk, time + 1, ...), command leaves begin
-    (chunk, time, ...), ``cost`` is shaped (chunk, time), and ``initial`` is one
-    recorded policy-state pytree per chunk whose leaves begin (chunk, ...).
-
-    ``actor_trainer`` differentiates a valued replay under an externalized
-    ``critic`` and returns the fresh commands and log-probabilities it
-    stepped through. ``target_critic`` costs the replayed tail, its whole
-    parameter tree arriving in its ``critic`` field. ``critic_trainer``
-    fits the critic to the soft Bellman target and ``temperature_trainer``
-    steps the temperature on the replay's log-probabilities; both expose
-    what they hold as ``params()``. ``ema_critic`` smooths the critic's
-    parameters into the target critic. The output is the replay of the
-    pre-update forward pass; the temperature rides on aux.
+    Differentiates `actor_trainer` through `ValuedReplay` under the online critic,
+    forms soft Bellman targets one step ahead under `target_critic` and `ema_critic`,
+    and steps `critic_trainer` and `temperature_trainer`.
     """
     members = Composite(
         actor_trainer=actor_trainer,
@@ -177,7 +133,7 @@ def SACUpdate(
             critic=critic_param,
             temperature=alpha,
         )
-        # The Bellman target reads the same replay one step later.
+        # Bellman target reads the same replay shifted forward by one step.
         tail = tree_tail(Struct(
             observation=observation,
             command=replayed.command,
@@ -197,8 +153,7 @@ def SACUpdate(
         return replayed, Aux(temperature=alpha)
 
     def init(param):
-        """Start the target critic at the critic's initial weights, so the
-        update initializes without a minibatch."""
+        """Initializes `ema_critic` directly from `critic_trainer`'s initial parameters without requiring a minibatch."""
         critic_state = critic_trainer.bind(param.critic_trainer).init()
         fitted = critic_trainer.bind(param.critic_trainer, state=critic_state)
         return Struct(
@@ -214,30 +169,14 @@ def SACUpdate(
 
 @node
 def SACIteration(
-    sampler: Node,
-    buffer: Node,
-    update: Node,
+    sampler: BaseNode,
+    buffer: BaseNode,
+    update: BaseNode,
     *,
-    n_updates: int,  # gradient updates per iteration, the update's scan length
-    n_chunks_per_minibatch: int,  # buffer rows one gradient update consumes
+    n_updates: int,
+    n_chunks_per_minibatch: int,
 ) -> Node:
-    """One off-policy SAC iteration: collect, store, and update from replay.
-
-    Every call starts a fresh sampled rollout from ``initial_plant_state``
-    leaves shaped (world, ...). ``disturbance`` is shaped (world, chunk, time),
-    and sampled-record leaves begin (world, chunk, time, ...). The (world,
-    chunk) axes are flattened into the replay buffer's row axis while time
-    remains within each row.
-
-    ``sampler`` rolls the policy out over chunks and worlds, its policy
-    parameters arriving in its ``policy`` field, and records the
-    observation, the policy state each step saw, the command, the cost, and
-    the next observation. ``buffer`` stores one chunk per row and draws
-    minibatches through ``sample``. ``update`` is one gradient update
-    scanned over the iteration's minibatches; it holds the policy the
-    sampler runs, read through its actor trainer. The output is the
-    collected rollout; the mean cost per step rides on aux.
-    """
+    """Collects one chunked rollout across worlds, writes chunks to `buffer`, and scans `update` over sampled minibatches."""
     members = Composite(sampler=sampler, buffer=buffer, update=update)
 
     def apply(self, initial_plant_state, disturbance, rng):
@@ -247,9 +186,8 @@ def SACIteration(
             policy=self.update.actor_trainer.params().replay,
         )
 
-        # One overlap step lets a single replay pass serve both the fresh commands and the
-        # shifted Bellman targets. The buffer's currency is one chunk per row: flattening the
-        # (world, chunk) axes decorrelates sampling across both.
+        # Appending one overlap observation lets a single replay pass supply both
+        # current-step actor commands and next-step Bellman targets.
         last = jax.tree.map(lambda value: value[:, :, -1:], record.next_observation)
         sequence = jax.tree.map(
             lambda head, end: jnp.concatenate((head, end), axis=2),
@@ -265,8 +203,7 @@ def SACIteration(
         )
         self.buffer(rows.replace(initial=chunk_starts))
 
-        # One gather supplies every minibatch of the iteration; all draws see the buffer with
-        # this iteration's chunks inserted.
+        # Gather all minibatches for this iteration after inserting the new chunks.
         drawn = self.buffer.sample(n_updates * n_chunks_per_minibatch, rng=rng.next())
         self.update(bundle=tree_reshape(drawn, (n_updates, n_chunks_per_minibatch)))
         return record, Aux(mean_cost=jnp.mean(record.cost))
@@ -277,30 +214,25 @@ def SACIteration(
 def sac_iteration(
     policy: Node,
     critic: Node,
-    plant: Node,
+    plant: BaseNode,
     *,
-    critic_loss: LossFn | BaseNode,  # fits critic output to the soft Bellman target
-    transition: PyTree,  # one zero transition: observation, command, cost of a step
-    capacity: int,  # replay rows held
-    discount: float,  # per-step discount on the soft Bellman target
-    actor_optimizer,  # Optax transformation for the policy parameters
-    critic_optimizer,  # Optax transformation for the critic parameters
-    temperature_optimizer,  # Optax transformation for the temperature
-    ema_critic_decay: float,  # EMA decay of the target critic's parameters
-    target_entropy: float,  # entropy the temperature steers the policy toward
+    critic_loss: LossFn | BaseNode,
+    transition: PyTree,
+    capacity: int,
+    discount: float,
+    actor_optimizer: optax.GradientTransformation,
+    critic_optimizer: optax.GradientTransformation,
+    temperature_optimizer: optax.GradientTransformation,
+    ema_critic_decay: float,
+    target_entropy: float,
     initial_temperature: float,
     n_worlds: int,
-    n_chunks: int,  # chunks collected per world per iteration
-    n_steps_per_chunk: int,  # chunk length, also the replay's truncation depth
-    n_updates: int,  # gradient updates per iteration
-    n_chunks_per_minibatch: int,  # buffer rows one gradient update consumes
+    n_chunks: int,
+    n_steps_per_chunk: int,
+    n_updates: int,
+    n_chunks_per_minibatch: int,
 ) -> Node:
-    """Assemble one SAC iteration from a policy, a critic, and a plant.
-
-    ``critic_loss`` fits the state-command cost Node to a target and may
-    declare ``aux``. The transition resolves the policy and critic contracts;
-    the buffer takes its row shape from what the iteration inserts.
-    """
+    """Assembles one off-policy SAC iteration from `policy`, `critic`, and `plant`."""
     policy = policy.with_input(transition.observation)
     critic = critic.with_input(Struct(
         observation=transition.observation,
@@ -353,13 +285,7 @@ def sac_training(
     parameter_key: jax.Array,
     training_key: jax.Array,
 ) -> Struct:
-    """Run a SAC program and return what it trained.
-
-    ``program`` carries a SAC iteration over its data. The result holds the
-    trained policy, read out of the actor trainer's trained model, the
-    iteration bound to its final state, from which a caller binds a critic
-    to the fitted parameters, and the history.
-    """
+    """Parameterizes and executes a SAC `program`, returning the trained policy, final iteration, and training history."""
     final, aux = split_aux(
         jax.jit(program.parameterize(rng=parameter_key).apply)(rng=training_key),
     )

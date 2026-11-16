@@ -1,56 +1,51 @@
-"""The complete low-level definition value.
+"""Canonical low-level definition records for NodeJAX computations.
 
-`Def` is program information.  Public Nodes, bound Nodes, the T3 Contract
-view, and authored scopes all project the same value; none owns a second copy
-of its facts.
+`Def` stores all static program facts for a Node in one immutable-by-convention
+record. Public views (`Node`, `PNode`, `PSNode`), the T3 `Contract` surface,
+and authored scopes all project the same `Def` without duplicating its
+metadata, member tree, or executable calls.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Callable
 
 from nodejax.frozendict import frozendict
 from nodejax.struct import Struct
 
+if TYPE_CHECKING:
+    from nodejax.core.contract import Contract, ContractCalls
+
 
 @dataclass(eq=False, frozen=True)
 class Captures:
-    """Bound member values retained by a structural construction.
+    """Stores pre-bound member parameters and states alongside `Def.members`.
 
-    ``Def.members`` always stores definitions.  When a ``PNode`` or
-    ``PSNode`` is used as a member, its already-bound values cannot live in
-    that definition tree: parameters and state are JAX data, not program
-    structure.  ``Captures`` records those values beside the tree, keyed by
-    the immediate member name.
-
-    A capture becomes that member role's construction default.  Unless the
-    caller replaces it, parent parameterization or initialization reuses the
-    captured value instead of running the member constructor again.  Captured
-    state that stores RNG keys is rekeyed when a fresh parent state is formed.
-    Roles not present here remain open and are assembled normally from the
-    parent's parameter and state inputs. The two role maps are immutable, but
-    retain mapping semantics because their member-name keys are dynamic.
-
-    Captures belong to the particular act of composition, not to the member
-    ``Def`` itself.  Rebinding the definition tree clears them so a rewritten
-    member starts from its own unbound construction stages.
+    `Def.members` holds `Def` records only because parameters and state are JAX
+    values rather than static program structure. When a `PNode` or `PSNode` is
+    registered as a member, `Captures` retains its bound values keyed by immediate
+    member name and supplies them as construction defaults unless the caller
+    overrides that member. Captured states carrying PRNG keys are rekeyed whenever
+    fresh parent state is initialized, and rebinding the member tree clears all
+    captures.
     """
 
     param: frozendict = field(default_factory=frozendict)
     state: frozendict = field(default_factory=frozendict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if type(self.param) is not frozendict or type(self.state) is not frozendict:
             raise TypeError('captured param and state must be frozendicts')
 
 
 @dataclass(eq=False)
 class Construction:
-    """The canonical factory call and accumulated descendant specializations.
+    """Records a factory call and accumulated descendant specializations for replay.
 
-    ``arguments`` are public statics. ``replay_arguments`` are forwarded only
-    when the factory is replayed and are not specialization addresses.
+    `arguments` holds public static arguments addressable by `specialize`, whereas
+    `replay_arguments` holds extra positional or keyword values forwarded only when
+    replaying the factory.
     """
 
     factory: Callable
@@ -59,13 +54,13 @@ class Construction:
     wildcards: frozendict = field(default_factory=frozendict)
     replay_arguments: Struct = field(default_factory=Struct)
 
-    def copy(self, **changes) -> 'Construction':
+    def copy(self, **changes) -> Construction:
         return replace(self, **changes)
 
 
 @dataclass(eq=False)
 class Layout:
-    """How member-shaped definitions relate to their bound value trees."""
+    """Describes how a definition's member tree maps onto dense and sparse value trees."""
 
     kind: str = 'leaf'
     transparent_member: str | None = None
@@ -74,7 +69,7 @@ class Layout:
     destructurable_state: bool = True
     externalized_param_paths: frozenset[str] = frozenset()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.param_members is not None:
             self.param_members = frozenset(self.param_members)
         self.externalized_param_paths = frozenset(self.externalized_param_paths)
@@ -82,24 +77,24 @@ class Layout:
 
 @dataclass(eq=False)
 class Def:
-    """All information defining one NodeJAX computation.
+    """Holds the complete static definition of one NodeJAX computation.
 
-    Equality and hashing use object identity. A Def is JAX static data and may
-    close over arrays, for which structural dataclass equality is unsuitable.
+    Equality and hashing use object identity so `Def` values act as JAX static
+    data even when their closures retain array constants.
     """
 
     name: str
-    calls: Any
+    calls: ContractCalls
     members: Struct = field(default_factory=Struct)
     methods: frozendict = field(default_factory=frozendict)
     tags: frozenset[str] = frozenset()
     boundaries: frozendict = field(default_factory=frozendict)
     construction: Construction | None = None
-    tree: Callable[[Struct], 'Def'] | None = None
+    tree: Callable[[Struct], Def] | None = None
     captures: Captures = field(default_factory=Captures)
     layout: Layout = field(default_factory=Layout)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         from nodejax.core.contract import ContractCalls
 
         if type(self.calls) is not ContractCalls:
@@ -118,7 +113,7 @@ class Def:
         if type(self.layout) is not Layout:
             self.layout = Layout(**self.layout)
 
-    def copy(self, **changes) -> 'Def':
+    def copy(self, **changes) -> Def:
         return replace(self, **changes)
 
     @property
@@ -130,12 +125,12 @@ class Def:
         return self.calls.init is not None
 
     @property
-    def contract(self):
+    def contract(self) -> Contract:
         from nodejax.core.contract import Contract
         return Contract(self)
 
-    def bind_members(self, members: Struct) -> 'Def':
-        """Re-enter the explicit tree-binding stage with named member Defs."""
+    def bind_members(self, members: Struct) -> Def:
+        """Rebuilds the definition with a replacement `Struct` of member `Def` values."""
         if type(members) is not Struct:
             raise TypeError('tree binding accepts a Struct of Def values')
         expected = set(self.members.__keys__)

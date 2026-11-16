@@ -15,17 +15,15 @@ import optax
 from flax import nnx
 
 from examples.comparisons.chunk import chunk_common as task
-from typing import Any as PyTree
 
-# Params broadcast, everything else carries. One annotation, by TYPE, and the
-# only thing either scan has to be told.
+# Params broadcast, everything else carries. One annotation by Variable type,
+# reused across the rollout scans.
 AXES = nnx.StateAxes({nnx.Param: None, nnx.Variable: nnx.Carry})
 
 
 class Norm(nnx.Module):
-    """Running per-feature normalizer. Its statistics are nnx.Variable, which
-    is module state: mutated in place, and crossing a scan because the lift
-    says nnx.Variable carries."""
+    """Normalizes features using mutable `nnx.Variable` running statistics that
+    carry across scans when `AXES` maps `nnx.Variable` to `nnx.Carry`."""
 
     def __init__(self):
         _, mean, var = task.cold()
@@ -39,13 +37,12 @@ class Norm(nnx.Module):
 
 
 class RNN(nnx.Module):
-    """The recurrent cell, with WEIGHTS. They are nnx.Param, which is what the
-    lift broadcasts rather than carries, and the key arrives through nnx.Rngs
-    at construction.
+    """Applies the recurrent cell with `nnx.Param` weights broadcast by `AXES`
+    and initialized via `nnx.Rngs` at construction.
 
-    Its hidden state is NOT module state: the scan carries it, in and out.
-    Two kinds of state in one model, and which kind a piece goes in is decided
-    by whether the scan carries it."""
+    Its hidden state is not module state: the scan carries it in and out.
+    Two kinds of state live in one model, and which kind a piece goes in is
+    decided by whether the scan carries it."""
 
     def __init__(self, rngs: nnx.Rngs):
         wx, wh, b = task.weights(rngs.params())
@@ -56,12 +53,12 @@ class RNN(nnx.Module):
 
 
 class Step(nnx.Module):
-    """The two composed, the ordinary way: submodules as attributes.
+    """Composes `Norm` and `RNN` as submodule attributes on one step module.
 
-    Composing costs nothing here, which is the clearest single difference from
-    the linen file: there, making Norm a submodule added a level to two dict
-    literals in other functions and broke a path fetch that returned defaults
-    instead of raising."""
+    Composing requires no manual dictionary nesting here, unlike `chunk_linen`:
+    there, making `Norm` a submodule added a level to two dict literals in
+    other functions and broke a path fetch that returned defaults instead of
+    raising."""
 
     def __init__(self, rngs: nnx.Rngs):
         self.norm, self.rnn = Norm(), RNN(rngs)
@@ -74,8 +71,8 @@ def _model():
     return Step(nnx.Rngs(params=task.PARAM_KEY))
 
 
-def run(seq: jax.Array=task.SEQ):
-    """The whole chunked run: nnx.scan over chunks of nnx.scan over steps."""
+def run(seq: jax.Array = task.SEQ):
+    """Runs the chunked sequence as nested `nnx.scan` over chunks and steps."""
     model = _model()
 
     @nnx.scan(in_axes=(nnx.Carry, AXES, 0), out_axes=(nnx.Carry, 0))
@@ -92,12 +89,12 @@ def run(seq: jax.Array=task.SEQ):
     return outs.reshape(-1, task.H)
 
 
-def run_recordings(seq: jax.Array=task.SEQ):
-    """TWO boundaries, and a piece of state answering each.
+def run_recordings(seq: jax.Array = task.SEQ):
+    """Runs nested `nnx.scan` loops over recordings, chunks, and steps.
 
-    Both are lines in bodies. The recording one rebuilds the carry, the chunk
-    one reads the child's statistics; nothing declares either, and nothing
-    relates them to the lifetimes they are supposed to have."""
+    Both boundaries are lines inside loop bodies. The recording body rebuilds
+    the carry while `Norm` statistics carry via `AXES`; nothing declares either
+    lifetime on the module itself."""
     model = _model()
 
     @nnx.scan(in_axes=(nnx.Carry, AXES, 0), out_axes=(nnx.Carry, 0))
@@ -111,7 +108,7 @@ def run_recordings(seq: jax.Array=task.SEQ):
 
     @nnx.scan(in_axes=(nnx.Carry, AXES, 0), out_axes=(nnx.Carry, 0))
     def over_recordings(_, m, chunks):
-        hidden = task.carry_init(task.INIT_KEY)         # the RECORDING boundary
+        hidden = task.carry_init(task.INIT_KEY)         # the recording boundary
         _, outs = over_chunks(hidden, m, chunks)
         return None, outs
 
@@ -119,22 +116,20 @@ def run_recordings(seq: jax.Array=task.SEQ):
     return outs.reshape(-1, task.H)
 
 
-def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
-    """FOURTH question: train the weights through the chunked rollout.
+def train(recordings: bool = False, seq: jax.Array = task.SEQ):
+    """Trains the weights through the chunked rollout with `nnx.Optimizer`.
 
-    Two things nnx does differently here, one good and one sharp.
+    Two NNX properties show up here:
 
-    THE GOOD: nnx.value_and_grad differentiates with respect to nnx.Param and
-    nothing else, by TYPE, so the statistics sitting in the same object are
-    not reached and nothing had to say so. Same annotation vocabulary as the
-    scans, doing the same job for a different transform.
+    1. `nnx.value_and_grad` differentiates with respect to `nnx.Param` by
+       Variable type, leaving `nnx.Variable` statistics on the same module
+       untouched without manual filtering.
 
-    THE SHARP: the module is MUTABLE, so its statistics survive from one
-    training step to the next. The reference defines a step as an independent
-    rollout from cold, so this needs the reset written out, and forgetting it
-    does not raise: the loss still falls, to 0.3092 instead of 0.3114. That is
-    torch's leak, in a jax framework, and it arrives with reference semantics
-    rather than with buffers."""
+    2. Because the module is mutable, its running statistics persist from one
+       training step to the next unless reset manually. Each training step here
+       is an independent rollout from cold state, and forgetting the manual
+       reset does not raise: the loss still falls, to `0.3092` instead of
+       `0.3114`, leaking state across steps via reference mutation."""
     model = _model()
     _, cold_mean, cold_var = task.cold()
     chunks = seq.reshape(-1, task.CHUNK, task.W)
@@ -155,7 +150,7 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
 
         @nnx.scan(in_axes=(nnx.Carry, AXES, 0), out_axes=(nnx.Carry, 0))
         def over_recordings(_, mm, groups):
-            hidden = task.carry_init(task.INIT_KEY)      # the RECORDING boundary
+            hidden = task.carry_init(task.INIT_KEY)      # the recording boundary
             _, outs = over_chunks(hidden, mm, groups)
             return None, outs
 
@@ -168,15 +163,15 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
 
     # the framework's own optimizer, under the framework's own scan: model
     # and nnx.Optimizer ride as two carried objects, since the optimizer
-    # stopped holding the model in flax 0.11. For TRAINING the params must
-    # CARRY, so this lift's StateAxes says everything does, where the
+    # stopped holding the model in flax 0.11. During training the params must
+    # carry, so this lift's StateAxes says everything does, where the
     # rollout scans broadcast them
     optimizer = nnx.Optimizer(model, optax.sgd(task.LR), wrt=nnx.Param)
     train_axes = nnx.StateAxes({...: nnx.Carry})
 
     @nnx.scan(in_axes=(train_axes, train_axes, 0), out_axes=0)
     def train_loop(m, opt, _):
-        # STEP: each step is an independent rollout from cold, so the stats
+        # each step is an independent rollout from cold, so the stats
         # reset here; forget it and the loss still falls, to the wrong number
         m.norm.mean[...], m.norm.var[...] = cold_mean, cold_var
         loss, grads = loss_fn(m)
@@ -186,15 +181,12 @@ def train(recordings: PyTree=False, seq: jax.Array=task.SEQ):
     return train_loop(model, optimizer, jnp.arange(task.TRAIN_STEPS))
 
 
-
 def train_sessions():
-    """FIFTH question: recording and session in one scan nest.
+    """Trains across recording and session boundaries in three nested scans.
 
-    Three nested nnx.scans, the same shape as everyone else's, with the model
-    and the framework's own nnx.Optimizer riding as two carried objects. The
-    lifetimes are in-body lines, and the optimizer's restart is nnx at its
-    most nnx: its state selected BY TYPE and zeroed, the same vocabulary that
-    picks what trains and what carries everywhere else in this file."""
+    Three nested `nnx.scan` loops carry the model and `nnx.Optimizer` as two
+    carried objects. The lifetime resets are in-body lines, and the optimizer
+    momentum reset selects `OptState` by Variable type and zeroes it."""
     from flax.nnx.training.optimizer import OptState
 
     model = _model()
@@ -224,15 +216,15 @@ def train_sessions():
 
     @nnx.scan(in_axes=(train_axes, train_axes, 0), out_axes=0)
     def over_recordings(m, opt, xt):
-        # RECORDING: the hidden dies; a new recording is a new signal
+        # recording: the hidden dies; a new recording is a new signal
         _, losses = over_chunks(hidden0, m, opt, xt)
         return losses
 
     @nnx.scan(in_axes=(train_axes, train_axes, 0), out_axes=0)
     def over_sessions(m, opt, xt):
-        # SESSION: the calibration re-measures from cold
+        # session: the calibration re-measures from cold
         m.norm.mean[...], m.norm.var[...] = cold_mean, cold_var
-        # SESSION: the optimizer state restarts, selected by TYPE and zeroed
+        # session: the optimizer state restarts, selected by type and zeroed
         nnx.update(opt, jax.tree.map(jnp.zeros_like, nnx.state(opt, OptState)))
         return over_recordings(m, opt, xt)
 

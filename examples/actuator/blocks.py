@@ -1,20 +1,4 @@
-"""Controller building blocks.
-
-THE PID IS A PIPELINE: optional behavior is a pipe member you include
-or don't —
-
-    position_ctrl = wrap() >> PID(dt, dwrap=angle) >> Clamp()
-    current_ctrl  = PID(dt)                       # bare core, DQ signals
-
-The core is signal-polymorphic with no subclassing: its integral and
-last-error states derive from the init input value, so the same def
-runs scalars or DQ pairs.
-
-Numerics: rate limits in units/second, integrator decay exp(-decay*dt),
-anti-windup by clamping the I-term in output units and back-converting,
-wrap-aware derivative. Sensors are cyclic nodes carrying rng state
-(auto-advanced): one key enters at init and the streams run themselves.
-"""
+"""Defines rotary angle wrapping, state observers, noisy sensors, and parameter-bag Leaves for FOC control."""
 
 from __future__ import annotations
 
@@ -22,34 +6,32 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.struct import Struct
-from nodejax import Node, node, ambient, Leaf
+from nodejax import Node, PNode, PyTree, node, Leaf
 
 from examples.actuator.dq import DQ
 from examples.actuator.utils import wrap as angle_wrap
 
 
 @node
-def wrap() -> Node:
-    """Optional pipeline stage: angle-wrap the incoming error (rotary)."""
+def wrap() -> PNode:
+    """Wraps rotary angle errors into `[-pi, pi]` as an inline pipeline stage."""
     return Leaf(lambda input: angle_wrap(input))
 
 
 @node
 def Observer(dt: float) -> Node:
-    """Predict-correct EMA observer for position and velocity, with
-    angle wrapping; time constants are params (per-step alpha =
-    1/(1+tau)). The velocity is a filtered difference of successive
-    measurements, so the position filter's lag never reaches it: differencing
-    against the filtered position instead folds that lag into the velocity
-    as a spurious spike whenever the mechanism accelerates."""
-    def param(tau_pos=0.1, tau_vel=0.1):
+    """Tracks rotor position and velocity with an angle-wrapped predict-correct filter.
+
+    Warm-initializes `Struct(position=input, velocity=0.0, measured=input)` at the first measured angle. Differences consecutive raw measurements (`angle_wrap(measured - state.measured) / dt`) rather than filtered positions so position-filter lag does not inject acceleration spikes into `velocity`.
+    """
+    def param(tau_pos: float = 0.1, tau_vel: float = 0.1) -> Struct:
         return Struct(tau_pos=tau_pos, tau_vel=tau_vel)
 
-    def init(param, input):
-        """Primed at the first measured position, at rest."""
+    def init(param, input) -> Struct:
+        """Initializes position and previous measurement at `input` with zero velocity."""
         return Struct(position=input, velocity=0.0, measured=input)
 
-    def apply(param, state, input):
+    def apply(param, state, input) -> tuple[Struct, Struct]:
         measured = input
         a_pos = 1.0 / (1.0 + param.tau_pos)
         a_vel = 1.0 / (1.0 + param.tau_vel)
@@ -67,16 +49,16 @@ def Observer(dt: float) -> Node:
 
 @node
 def Encoder() -> Node:
-    """Absolute encoder with calibration params and rng state."""
-    def param(resolution: float=2000.0, noise_std: float=0.1,
-              phase_offset: float=0.0) -> Struct:
+    """Simulates a quantized absolute rotary encoder with phase offset and additive count noise."""
+    def param(resolution: float = 2000.0, noise_std: float = 0.1,
+              phase_offset: float = 0.0) -> Struct:
         return Struct(resolution=resolution, noise_std=noise_std,
                       phase_offset=phase_offset)
 
     def init(rng) -> Struct:
         return Struct(rng=rng)
 
-    def apply(param, state, input):
+    def apply(param, state, input) -> tuple[Struct, jax.Array]:
         rad_to_counts = param.resolution / (2.0 * jnp.pi)
         counts = (input + param.phase_offset) * rad_to_counts
         counts = counts + jax.random.normal(state.rng) * param.noise_std
@@ -88,14 +70,14 @@ def Encoder() -> Node:
 
 @node
 def CurrentSensor() -> Node:
-    """DQ current sensor with noise scale as param and rng as state."""
-    def param(noise_std: float=0.1) -> Struct:
+    """Adds independent Gaussian measurement noise of standard deviation `noise_std` to a `DQ` current pair."""
+    def param(noise_std: float = 0.1) -> Struct:
         return Struct(noise_std=noise_std)
 
     def init(rng) -> Struct:
         return Struct(rng=rng)
 
-    def apply(param, state, input):
+    def apply(param, state, input) -> tuple[Struct, DQ]:
         noise_d, noise_q = (
             jax.random.normal(state.rng, shape=(2,)) * param.noise_std)
         return state, input + DQ(noise_d, noise_q)
@@ -105,41 +87,32 @@ def CurrentSensor() -> Node:
 
 @node
 def Noisy() -> Node:
-    """Scalar gaussian sensor with noise scale as param and rng as state.
-    Compose sensors as pipelines: voltage_est = Noisy() >> EMA(dt)."""
-    def param(noise_std: float=0.1) -> Struct:
+    """Adds scalar Gaussian measurement noise of standard deviation `noise_std` to `input`."""
+    def param(noise_std: float = 0.1) -> Struct:
         return Struct(noise_std=noise_std)
 
     def init(rng) -> Struct:
         return Struct(rng=rng)
 
-    def apply(param, state, input):
+    def apply(param, state, input) -> tuple[Struct, jax.Array]:
         return state, input + jax.random.normal(state.rng) * param.noise_std
 
     return Leaf(apply, init=init, param=param)
 
 
 @node
-def Bag(**fields) -> Node:
-    """A leaf holding raw params whose behavior is DIFFUSE.
+def Bag(**fields: PyTree) -> Node:
+    """Stores a `Struct` of named scalar or array parameters for an enclosing Composite to read across multiple expressions.
 
-    The one right home for params that are not themselves nodes is a
-    leaf — the irreducible bottom of a node tree, where behavior turns
-    into actual arrays. Most such params have a clean transform (a
-    clamp, a blend, a weighted sum) and are ordinary leaf nodes with a
-    real apply. This is the leaf for the remaining case: a coefficient
-    an enclosing composite reads across many expressions, with no single
-    apply surface of its own to name — so its apply trivially echoes the
-    bundle and the behavior lives in the reader. Factory fields are the
-    construction defaults; parameterize overrides declared fields
-    (unknown fields rejected)."""
-    def param(**given):
+    Accepts default field values at factory construction and overrides declared fields during `parameterize` while rejecting unknown field names.
+    """
+    def param(**given: PyTree) -> Struct:
         unknown = set(given) - set(fields)
         if unknown:
             raise TypeError(f'Bag has no field(s) {sorted(unknown)}; declared: {sorted(fields)}')
         return Struct(**{**fields, **given})
 
-    def apply(param, input):
+    def apply(param, input) -> Struct:
         return param
 
     return Leaf(apply, param=param)

@@ -1,4 +1,4 @@
-"""Run recurrent PPO from angle-only observations and save its phase-space plot."""
+"""Trains a recurrent PPO policy from angle-only observations on the pendulum and plots phase trajectories."""
 
 import jax
 import jax.numpy as jnp
@@ -35,7 +35,7 @@ N_ITERATIONS = 1200
 
 
 def angle_only_swing_up() -> None:
-    """Train the partially observed policy, evaluate it, and save its plot."""
+    """Trains the angle-only recurrent PPO policy, evaluates it on downward starts, and saves its phase portrait."""
     import matplotlib
 
     matplotlib.use('Agg')

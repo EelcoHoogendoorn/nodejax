@@ -1,21 +1,10 @@
-"""Tune the actuator's estimator and loops on the whip by differential
-evolution, with no gradient anywhere.
+"""Tunes actuator observer time constants, loop gains, and sensor filters on the whip via differential evolution.
 
-The genome is a handful of the actuator stack's parameters, searched in
-log space: the observer's two time constants, the velocity loop's gains,
-the current loop's gains, and the two sensor filters. It starts from the
-values the plant carries. A candidate is scored by rolling the whip out
-open loop under a stroke sequence from a few start angles and adding up
-how badly the joints track their velocity setpoints, how far the
-observers' estimates sit from the truth, and how much the torque chatters
-tick to tick. The optimizer is the evolution node of
-``examples/test_evolution.py``, driving the same plant the learners train
-on.
-
-The genome names its parameters by path into the plant's parameter tree.
-That is the one place this example spells the tree by hand; a declared
-form for searching a scattered subset of a tree's parameters does not
-exist yet.
+Searches eight log-space actuator parameters by rolling the whip out open-loop
+under reversing strokes from multiple start angles and scoring velocity tracking
+error, observer error, and torque chatter with `differential_evolution` from
+`examples/test_evolution.py`. Each genome field maps by dotted path into the
+plant's parameter tree via `replace_by_path`.
 """
 
 import time
@@ -40,29 +29,26 @@ GENOME = {  # genome field -> the plant parameter it sets, searched as a log
     'current_filter_tau': '.actuator.current_ctrl.estimator.filter.ema.tau',
     'bus_filter_tau': '.actuator.current_ctrl.bus_est.ema.tau',
 }
-LOG_FLOOR = 1e-3  # a gene the plant holds at zero starts here, since zero has no log
+LOG_FLOOR = 1e-3  # clamps zero-valued plant parameters before taking logs
 LOG_BOUNDS = (jnp.log(1e-4), jnp.log(1e4))
 CHATTER_WEIGHT = 0.5
-N_STEPS = 100  # a second of strokes at the policy's clock
+N_STEPS = 100  # one second of strokes at the policy clock
 STROKE_PERIOD = 25  # policy steps between reversals
-STROKE_SETPOINT = 30.0  # rad/s at the shoulder, the elbow at half and opposite
+STROKE_SETPOINT = 30.0  # rad/s at the shoulder, with the elbow at half and opposite sign
 START_ANGLES = (0.3, 1.5, 2.8)
 POPULATION = 16
 N_GENERATIONS = 40
 
 
 def stroke_commands() -> jax.Array:
-    """Shoulder strokes reversing every ``STROKE_PERIOD`` steps, the elbow
-    following at half amplitude and opposite sign, shaped (time, joint)."""
+    """Builds `(time, joint)` shoulder strokes reversing every `STROKE_PERIOD` steps with half-amplitude opposing elbow setpoints."""
     sign = jnp.where((jnp.arange(N_STEPS) // STROKE_PERIOD) % 2 == 0, 1.0, -1.0)
     return jnp.stack((STROKE_SETPOINT * sign, -0.5 * STROKE_SETPOINT * sign), axis=-1)
 
 
 @node
 def Genome() -> Node:
-    """The genome as a Leaf whose parameters are the logs of the tuned
-    values; it has no behavior of its own, the plant it is written into
-    has all of it."""
+    """Holds log-space tuned actuator parameters as a parametric Leaf for evolutionary search."""
     def param(tau_pos, tau_vel, velocity_kp, velocity_ki,
               current_kp, current_ki, current_filter_tau, bus_filter_tau) -> Struct:
         return Struct(
@@ -77,7 +63,7 @@ def Genome() -> Node:
 
 
 def parameter_at(param: Struct, path: str) -> jax.Array:
-    """The leaf of a parameter tree at a dotted ``path``."""
+    """Reads the parameter leaf at dotted `path` from `param`."""
     value = param
     for name in path.strip('.').split('.'):
         value = value[name]
@@ -85,26 +71,25 @@ def parameter_at(param: Struct, path: str) -> jax.Array:
 
 
 def plant_genome(base: PNode) -> Struct:
-    """The genome's values as ``base`` carries them."""
+    """Extracts the untuned genome parameter values from `base`."""
     return Struct(**{name: parameter_at(base.param, path) for name, path in GENOME.items()})
 
 
 def initial_genome(base: PNode) -> PSNode:
-    """The genome bound to the logs of the values ``base`` carries."""
+    """Initializes `Genome` with the log-clamped parameter values carried by `base`."""
     logs = {name: jnp.log(jnp.maximum(value, LOG_FLOOR))
             for name, value in plant_genome(base).__items__}
     return Genome().parameterize(**logs).initialize()
 
 
 def tuned_plant(base: PNode, genome: Struct) -> PNode:
-    """``base`` with the genome's values written into its parameters."""
+    """Returns `base` with exponentiated `genome` values written into its parameter tree."""
     updates = {GENOME[name]: jnp.exp(genome[name]) for name in GENOME}
     return base.node.bind(replace_by_path(base.param, updates))
 
 
 def scenario_cost(plant: PNode, command: jax.Array) -> Struct:
-    """Roll ``plant`` out under ``command`` from every start angle: the
-    tracking, estimate, and chatter terms, each averaged, and their sum."""
+    """Evaluates `plant` under `command` across all start angles and averages tracking, estimation, and chatter costs."""
     def one_start(angle):
         state = plant.init(rng=jax.random.PRNGKey(0), start=plant.start(angle=angle, target=TARGET))
         program = scan(plant, n=N_STEPS).bind(state=state)
@@ -122,8 +107,7 @@ def scenario_cost(plant: PNode, command: jax.Array) -> Struct:
 
 
 def tune(base: PNode, n_generations: int = N_GENERATIONS, population: int = POPULATION) -> Struct:
-    """Evolve the genome of ``base`` for ``n_generations``; the tuned values
-    by name, the initial ones, and the champion's cost per generation."""
+    """Evolves the actuator genome of `base` for `n_generations` and returns tuned values, initial values, and loss history."""
     def fitness(candidate: PNode, element: Struct) -> jax.Array:
         return scenario_cost(tuned_plant(base, candidate.param), element.input).total
 
@@ -144,6 +128,7 @@ def tune(base: PNode, n_generations: int = N_GENERATIONS, population: int = POPU
 
 
 def main() -> None:
+    """Tunes the whip actuator parameters by differential evolution and plots the cost curve."""
     base = whip_plant().parameterize()
     started = time.perf_counter()
     result = tune(base)

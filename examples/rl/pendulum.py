@@ -1,14 +1,15 @@
-"""The weakly actuated pendulum shared by the control examples.
+"""Defines the weakly actuated inverted pendulum shared across the control examples.
 
-Upright is angle zero. The actuator saturates well below gravity, so
-no policy can lift the mass directly: swinging up means pumping energy
-across many steps, which is what makes this tiny plant a real test of
-credit over time. The plant is an ordinary stateful Node: transitions
-differentiate, the physical state has named fields, and ``observe`` is
-a node method giving a controller's view of the state.
+Sets upright equilibrium at angle zero with torque saturation well below peak
+gravity so swing-up requires pumping energy across many steps. Models the plant
+as a differentiable cyclic Node with named physical state fields and an
+`observe` method returning the controller view.
 """
 
+from __future__ import annotations
+
 import math
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +20,7 @@ from nodejax import (
     Leaf,
     Node,
     PNode,
+    PyTree,
     Struct,
     node,
     tree_last,
@@ -26,6 +28,9 @@ from nodejax import (
 )
 from nodejax import nn
 from examples.rl.control import mean_rollout
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
 
 
 DT = 0.1
@@ -36,8 +41,8 @@ VELOCITY_SCALE = 2.0
 
 
 @node
-def PendulumFeatures() -> Node:
-    """Periodic coordinates and signed energy error for any controller."""
+def PendulumFeatures() -> PNode:
+    """Computes periodic angle coordinates, scaled velocity, and signed energy error."""
 
     def apply(input):
         cosine = jnp.cos(input.angle)
@@ -62,10 +67,7 @@ def PendulumMean(
     hidden: int,
     features: BaseNode | None = None,
 ) -> Node:
-    """Pendulum observation to Gaussian mean, optionally with memory.
-
-    ``features`` narrows what the policy sees; the default reads the full
-    observation."""
+    """Maps pendulum observations through `features`, `memory`, and an MLP head to a command mean."""
     members = Composite(
         features=features or PendulumFeatures(),
         encoder=nn.Linear(hidden) >> nn.silu,
@@ -87,7 +89,7 @@ def PendulumMean(
 
 @node
 def PendulumCritic(residual: Node) -> Node:
-    """A pendulum value prior corrected by an injected scalar model."""
+    """Combines an analytic phase-cost prior with a zero-centered learned `residual` value model."""
     members = Composite(
         features=PendulumFeatures(),
         residual=residual,
@@ -114,13 +116,8 @@ def PendulumCritic(residual: Node) -> Node:
 
 
 @node
-def AngleFeatures() -> Node:
-    """Periodic coordinates of the angle alone.
-
-    For a controller denied the velocity: consecutive angles are then the
-    only route to it, so this is the honest workload for a policy with
-    memory. Consumers of the full observation ignore the velocity field.
-    """
+def AngleFeatures() -> PNode:
+    """Extracts `(cos(angle), sin(angle))` while omitting angular velocity for partial-observability policies."""
     def apply(input):
         return jnp.stack(
             (jnp.cos(input.angle), jnp.sin(input.angle)),
@@ -135,13 +132,13 @@ def Pendulum(
     dt: float = DT,
     max_torque: float = MAX_TORQUE,
     static_friction: float = 0.0,
-) -> Node:
-    """Weak actuator, upright angle zero, and named physical state fields."""
+) -> PNode:
+    """Simulates a torque-limited inverted pendulum with optional Coulomb static friction."""
     if not math.isfinite(static_friction) or static_friction < 0.0:
         raise ValueError('static friction must be finite and non-negative')
 
     def init(start=Struct(angle=jnp.zeros(()), velocity=jnp.zeros(()))):
-        """The plant's state is where it starts, at rest unless told otherwise."""
+        """Initializes pendulum state from `start`, defaulting to upright rest."""
         return start
 
     def apply(state, command, disturbance):
@@ -169,7 +166,7 @@ def Pendulum(
         )
 
     def observe(state) -> Struct:
-        """What a controller may see: for this plant, the full state."""
+        """Returns the full physical state as the controller observation."""
         return state
 
     return Leaf(apply, init=init, methods={'observe': observe})
@@ -183,12 +180,7 @@ def PendulumTrainingData(
     n_chunks: int,
     n_steps_per_chunk: int,
 ) -> PNode:
-    """Independent starts and disturbances for one collection-driven run.
-
-    A fresh plant start is drawn independently for every (iteration, world).
-    ``initial_plant_state`` leaves are shaped (iteration, world, ...), and
-    ``disturbance`` is shaped (iteration, world, chunk, time).
-    """
+    """Samples independent `(iteration, world)` pendulum start states and zero `(iteration, world, chunk, time)` disturbances."""
     def apply(rng):
         sample = jax.random.uniform(rng.next(), (2, iterations, n_worlds))
         return Struct(
@@ -210,7 +202,7 @@ def pendulum_evaluation(
     starts: Struct,
     steps: int,
 ) -> Struct:
-    """Summarize a deterministic Pendulum rollout from injected starts."""
+    """Summarizes mean cost and worst-case terminal angle and velocity for a deterministic rollout from `starts`."""
     trajectory = mean_rollout(
         policy,
         plant,
@@ -231,8 +223,7 @@ RANDOM_TRAJECTORY_COLOR = '#293746'
 
 
 def phase_grid(resolution: int = 61) -> Struct:
-    """A meshed phase plane over one angle wrap and the plotting
-    velocity range, as state fields ready for a batched policy."""
+    """Builds a meshed `(angle, velocity)` phase-plane grid over one angle wrap."""
     import numpy as np
     angles, velocities = np.meshgrid(
         np.linspace(-np.pi, np.pi, resolution),
@@ -241,8 +232,8 @@ def phase_grid(resolution: int = 61) -> Struct:
     return Struct(angle=jnp.asarray(angles), velocity=jnp.asarray(velocities))
 
 
-def phase_portrait(axis, grid: Struct) -> None:
-    """Draw the common analytic background for real phase trajectories."""
+def phase_portrait(axis: Axes, grid: Struct) -> None:
+    """Draws passive energy contours and equilibrium markers on `axis`."""
     import numpy as np
 
     angles = np.asarray(grid.angle)
@@ -274,12 +265,12 @@ def phase_portrait(axis, grid: Struct) -> None:
 
 
 def phase_surface(
-    axis,
+    axis: Axes,
     grid: Struct,
     values: jax.Array,
     label: str,
 ) -> None:
-    """Draw a scalar surface over the pendulum phase plane."""
+    """Draws a filled contour surface of `values` over the pendulum phase plane."""
     import numpy as np
 
     angles = np.asarray(grid.angle)
@@ -324,16 +315,15 @@ def phase_surface(
 
 
 def overlay_trajectories(
-    axis,
+    axis: Axes,
     state: Struct,
-    colors=None,
+    colors: PyTree = None,
     *,
     linewidth: float = 2.0,
     alpha: float = 1.0,
     mark_starts: bool = True,
 ) -> None:
-    """Overlay closed-loop rollouts shaped (world, time), splitting at the
-    angle wrap."""
+    """Overlays `(world, time)` closed-loop rollouts on `axis`, splitting segments across angle wraps."""
     import matplotlib.pyplot as plt
     import numpy as np
     from matplotlib.collections import LineCollection
@@ -371,8 +361,8 @@ def overlay_trajectories(
         )
 
 
-def overlay_phase_trajectories(axis, state: Struct) -> None:
-    """Draw colored downward references and thin sampled trajectories."""
+def overlay_phase_trajectories(axis: Axes, state: Struct) -> None:
+    """Overlays colored downward-start reference rollouts alongside thin sampled rollouts."""
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -409,7 +399,7 @@ def overlay_phase_trajectories(axis, state: Struct) -> None:
 
 
 def downward_starts() -> Struct:
-    """Hanging starts near the stable equilibrium, the hard side."""
+    """Returns six hanging start states near the downward equilibrium."""
     angle = jnp.asarray((
         -jnp.pi,
         -jnp.pi + 0.05,
@@ -426,7 +416,7 @@ def phase_starts(
     random_trajectories: int = 24,
     velocity_limit: float = PHASE_VELOCITY_LIMIT,
 ) -> Struct:
-    """Downward references followed by reproducible random phase states."""
+    """Concatenates downward reference starts with `random_trajectories` uniformly sampled phase states."""
     angle_key, velocity_key = jax.random.split(key)
     random = Struct(
         angle=jax.random.uniform(

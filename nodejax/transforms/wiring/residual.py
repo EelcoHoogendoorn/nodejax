@@ -1,18 +1,15 @@
+"""Additive skip-connection wrapper (`residual`)."""
+
 from __future__ import annotations
 
-from typing import Any
-from nodejax.core.wrapper import (Wrapper)
 from nodejax.core.ambient import node
-from nodejax.core.node import (Node)
-from nodejax.core.pnode import (PNode)
+from nodejax.core.node import BaseNode
+from nodejax.core.wrapper import Wrapper
 
 
 @node
-def residual(body: Node) -> Node:
-    """x + f(x): the skip connection around any shape-preserving node.
-
-    The body takes exactly what the residual is handed, so a resolved
-    body's input is the residual's own declared input."""
+def residual(body: BaseNode) -> BaseNode:
+    """Adds `input` to `body(input)` around a shape-preserving `body` Node while retaining `body`'s input spec."""
     wrapped = Wrapper(body=body)
 
     def apply(self, input):

@@ -1,8 +1,13 @@
-"""The parameter-and-state-bound public view."""
+"""Parameter-and-state-bound public view (`PSNode`) registered as a JAX PyTree.
+
+A `PSNode` binds both sparse `param` and sparse `state` trees as PyTree children
+under `.param` and `.state` attribute keys while holding `Def` as static
+metadata. Calling `psnode(x)` advances one step and returns `(next_psnode,
+output)` without mutating the receiver, making `PSNode` directly usable as a
+`jax.lax.scan` carry or interactive rollout handle.
+"""
 
 from __future__ import annotations
-
-from typing import Any
 
 import jax
 
@@ -10,27 +15,29 @@ from nodejax.core.binding import _UNSET, _bind_method, _bind_public_call
 from nodejax.core.definition import Def
 from nodejax.core.node import BaseNode
 from nodejax.core.pnode import PNode
+from nodejax.core.types import PyTree
 
 
 class PSNode(BaseNode):
-    """A definition with parameter and live state trees bound as JAX data."""
+    """Binds sparse `param` and `state` trees to a `Def` as JAX PyTree data."""
 
     bound = True
     state_bound = True
 
-    def __init__(self, definition: Def, param, state):
+    def __init__(self, definition: Def, param, state) -> None:
         super().__init__(definition)
         self.param = self.contract._sparse_param(param)
         self.state = self.contract._sparse_state(state)
 
-    def _binding_items(self):
+    def _binding_items(self) -> tuple[tuple[str, PyTree], ...]:
         return (('param', self.param), ('state', self.state))
 
-    def _with_definition(self, definition: Def) -> 'PSNode':
+    def _with_definition(self, definition: Def) -> PSNode:
         return PSNode(definition, self.param, self.state)
 
     def _transfer_bindings(
-            self, target: BaseNode, preserves=('param', 'state'),
+            self, target: BaseNode,
+            preserves: tuple[str, ...] = ('param', 'state'),
             strict: bool = False, operation: str = 'operation') -> BaseNode:
         preserved = frozenset(preserves)
         if strict and 'state' not in preserved and self.cyclic:
@@ -49,28 +56,33 @@ class PSNode(BaseNode):
 
     @property
     def pnode(self) -> PNode:
+        """Drops the bound `state` tree and returns the underlying `PNode`."""
         return PNode(self._def, self.param)
 
-    def reset(self, *args, **fields) -> 'PSNode':
+    def reset(self, *args: PyTree, **fields: PyTree) -> PSNode:
+        """Re-runs state initialization while keeping `param` fixed, returning a fresh `PSNode`."""
         return self.pnode.initialize(*args, **fields)
 
-    def apply(self, *args, **fields):
+    def apply(self, *args: PyTree, **fields: PyTree) -> tuple[PSNode, PyTree]:
+        """Advances one step from `self.state` and returns `(next_psnode, output)`."""
         formed, rng = _bind_public_call(self, args, fields)
         state, output = self.contract.apply(
             self.param, self.state, formed, rng)
         return PSNode(self._def, self.param, state), output
 
-    def __call__(self, *args, **fields):
+    def __call__(self, *args: PyTree, **fields: PyTree) -> tuple[PSNode, PyTree]:
         return self.apply(*args, **fields)
 
-    def scan(self, *args, **fields):
+    def scan(self, *args: PyTree, **fields: PyTree) -> tuple[PSNode, PyTree]:
+        """Scans an input sequence along leading axis 0 under `jax.jit`, returning `(next_psnode, outputs)`."""
         from nodejax.transforms.iteration.scan import scan
 
         runner = scan(self.pnode)
         formed, rng = _bind_public_call(runner, args, fields)
         return _session_scan(self, formed, rng)
 
-    def bind(self, param=_UNSET, *, state=_UNSET):
+    def bind(self, param=_UNSET, *, state=_UNSET) -> PSNode:
+        """Replaces `param`, `state`, or both and returns the updated `PSNode`."""
         return PSNode(
             self._def,
             self.param if param is _UNSET else param,
@@ -80,7 +92,7 @@ class PSNode(BaseNode):
     def __getattr__(self, name: str):
         if name in self._def.methods:
             from nodejax.core.author_view import AuthorNode
-            # Methods see the dense slices an authored apply sees.
+            # Authored `@node.method` functions receive the dense parameter and state trees.
             return _bind_method(
                 self._def.methods[name],
                 param=lambda: self.contract._dense_param(self.param),
@@ -91,8 +103,7 @@ class PSNode(BaseNode):
             return self._member(name)
         transparent = self._def.layout.transparent_member
         if transparent is not None:
-            # A transparent wrapper adds no level to the tree, so its
-            # member's attributes are reached without naming it.
+            # Transparent wrappers forward member lookup without adding a tree level.
             return getattr(self._member(transparent), name)
         methods = tuple(self._def.methods)
         available = f'; authored methods: {methods}' if methods else ''
@@ -100,8 +111,7 @@ class PSNode(BaseNode):
             f'PSNode {self.name!r} has no attribute {name!r}; '
             f'values live under .param and .state{available}')
 
-    def _member(self, name: str) -> 'PSNode':
-        """The member view with its parameter and state slices."""
+    def _member(self, name: str) -> PSNode:
         if not self._def.layout.destructurable_param:
             raise AttributeError(
                 f'{self.name!r} maps parameters over an axis; '
@@ -124,7 +134,7 @@ class PSNode(BaseNode):
             state = getattr(self.state, name) if member.cyclic else ()
         return PSNode(member, param, state)
 
-    def __rshift__(self, other):
+    def __rshift__(self, other: PyTree) -> BaseNode:
         from nodejax.core.compose import _compose
         return _compose(self, other)
 
@@ -134,13 +144,13 @@ class PSNode(BaseNode):
 
 
 @jax.jit
-def _session_scan(session: PSNode, inputs, rng):
+def _session_scan(bound: PSNode, inputs: PyTree, rng) -> tuple[PSNode, PyTree]:
     from nodejax.transforms.iteration.scan import scan
 
-    runner = scan(session.pnode)
+    runner = scan(bound.pnode)
     state, outputs = runner.contract.apply(
-        runner.param, session.state, inputs, rng)
-    return PSNode(session._def, session.param, state), outputs
+        runner.param, bound.state, inputs, rng)
+    return PSNode(bound._def, bound.param, state), outputs
 
 
 def _flatten(node: PSNode):

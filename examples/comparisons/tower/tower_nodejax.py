@@ -27,8 +27,8 @@ def Up(hidden: int) -> Node:
 
 @node
 def Norm(hidden: int, momentum: float) -> Node:
-    """Streaming Norm: per-feature running mean and variance over TIME,
-    ordinary cyclic state. Every transform in the tower routes it off
+    """Maintains per-feature running mean and variance over time as cyclic
+    state. Every transform in the tower routes it off
     the contract: scan carries it, batch gives each sequence its own
     stats, train_step holds it in model state, finetune leaves it to
     its own dynamics while the gradient step adapts params."""
@@ -67,14 +67,14 @@ def Readout(hidden: int) -> Node:
 
 
 def mse(out: jax.Array, target: jax.Array) -> jax.Array:
-    """Score the committee's clean mean output."""
+    """Computes mean squared error against `target`."""
     return jnp.mean((out - target) ** 2)
 
 
 def tower() -> Node:
-    """The whole program, one tree: residual cells stacked over depth, the
-    member rolled over time, the rollouts widened into a committee with a
-    mean head and its population sown, the committee's WHOLE ADAPTATION as
+    """Builds the whole program as one tree: residual cells stacked over depth,
+    each member rolled over time, rollouts widened into a committee with a
+    mean head and its population in aux, the committee's whole adaptation as
     the inner loop, batched over tasks, meta-trained over a sequence of task
     batches, and the run over all of it. Second-order gradients flow
     through every level, and no line here knows which level it serves.
@@ -84,7 +84,7 @@ def tower() -> Node:
     members stepping in lockstep and members rolling independently are the
     same computation when nothing couples them inside the step. This one
     reads as what the rivals spell: each member rolls, the committee
-    averages rollouts, and the sown population arrives (MEMBERS, T)."""
+    averages rollouts, and the aux population arrives (MEMBERS, T)."""
     rnn = stack(residual(RNN(HIDDEN)), n=LAYERS)
     member = Up(HIDDEN) >> Norm(HIDDEN, MOMENTUM) >> rnn >> Readout(HIDDEN)
     committee = ensemble(scanned(member), n=MEMBERS) >> reduce(jnp.mean)

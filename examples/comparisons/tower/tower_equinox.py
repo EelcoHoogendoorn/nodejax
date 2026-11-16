@@ -10,7 +10,7 @@ carries over time, what carries across adaptation and meta steps) is
 hand-encoded in each scan's carry and xs. The census: the depth scan
 threads (per-layer params, per-layer hidden) explicitly; the time scan
 carries the (LAYERS, HIDDEN) state block beside the norm stats; the
-inner adaptation scans the WHOLE COMMITTEE as its carry, one sgd step
+inner adaptation scans the whole committee as its carry, one sgd step
 per support sequence, each step differentiating through the member
 vmap and rollout's two scans; the meta scan carries (params, optimizer
 state) and differentiates through all of it, second order; the task
@@ -20,7 +20,7 @@ state touches every level that encloses it.
 The committee is the layer trick a second time, the constructor
 lifted over a member axis, its mean taken where the members meet; the
 residual is a line in the depth body. The population the committee
-computed dies at the reduction, there being no aux stream to sow it
+computed dies at the reduction, there being no aux stream to emit it
 on.
 
 Run directly:  python -m examples.comparisons.tower.tower_equinox
@@ -34,7 +34,7 @@ import optax
 from examples.comparisons.tower.tower_common import (
     HIDDEN, LAYERS, MEMBERS, META_STEPS, INNER_LR, OUTER_LR, MOMENTUM,
     make_tasks)
-from typing import Any as PyTree
+PyTree = object
 
 
 def norm_step(stats: PyTree, x: jax.Array):

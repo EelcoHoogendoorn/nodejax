@@ -1,15 +1,18 @@
-"""Supported building blocks for authoring NodeJAX transforms.
+"""T3 decorator and `vmap`/`scan` contract helpers for authoring NodeJAX transforms.
 
-This module is deliberately opt-in. Regular users choose ready-made
-transforms from :mod:`nodejax.transforms`; transform authors use this small
-surface instead of importing framework-private helpers.
+`@transform` wraps a `Node -> Node` builder so construction is recorded for
+`specialize` and bound `PNode` or `PSNode` views reattach preserved trees
+according to `preserves` and `internalizes`. Companion helpers (`vmap_param`,
+`vmap_init`, `vmap_prime`, `vmap_apply`, `scan_inputs`, `scan_steps`) map or
+scan `Contract` roles while handling empty stateless/non-parametric trees and
+`MaybeKeyStream` splitting uniformly.
 """
 
 from __future__ import annotations
 
 import inspect
 from functools import wraps
-from typing import Any, Callable
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -22,6 +25,7 @@ from nodejax.core.pnode import PNode
 from nodejax.core.psnode import PSNode
 from nodejax.core.rng import MaybeKeyStream
 from nodejax.core.spec import add_axis, axis_count, element_spec
+from nodejax.core.types import PyTree
 from nodejax.frozendict import frozendict
 from nodejax.struct import Struct
 from nodejax.tree import tree_first
@@ -30,8 +34,8 @@ from nodejax.tree import tree_first
 _NO_STATE = object()
 
 
-def bind(contract: Contract, param, *, state=_NO_STATE):
-    """Construct a public bound view from a T3 Contract and value trees."""
+def bind(contract: Contract, param, *, state=_NO_STATE) -> PNode | PSNode:
+    """Attaches `param` (and optional `state`) to `contract`, returning a `PNode` or `PSNode`."""
     if type(contract) is not Contract:
         raise TypeError('transform.bind expects a Contract')
     if state is _NO_STATE:
@@ -39,8 +43,7 @@ def bind(contract: Contract, param, *, state=_NO_STATE):
     return PSNode(contract._def, param, state)
 
 
-def _split_and_tile(tree, count: int):
-    """Tile construction data; split an authored stored ``rng`` field."""
+def _split_and_tile(tree: PyTree, count: int) -> PyTree:
     if type(tree) is Struct:
         return Struct(**{
             name: (jax.random.split(value, count) if name == 'rng'
@@ -54,12 +57,14 @@ def _split_and_tile(tree, count: int):
 
 
 def vmap_apply(inner: Contract, param, state, input, rng: MaybeKeyStream, *,
-               param_axis: Any, state_axis: Any, input_axis: Any,
-               axis_name: str, count: int | None = None) -> tuple[Any, Any]:
-    """Apply one node over declared parameter, state, and input axes.
+               param_axis: PyTree, state_axis: PyTree, input_axis: PyTree,
+               axis_name: str,
+               count: int | None = None) -> tuple[PyTree, PyTree]:
+    """Evaluates `inner.apply` under `jax.vmap` across declared parameter, state, and input axes.
 
-    An axis declaration for an absent role is ignored. Transform bodies state
-    their mapping policy; the helper owns canonical empty-role handling.
+    Axis declarations for absent parameter or state roles collapse to `None`
+    automatically, and stochastic `apply` roles split `rng` across the mapped
+    extent.
     """
     param_axis = param_axis if inner.parametric else None
     state_axis = state_axis if inner.cyclic else None
@@ -90,8 +95,8 @@ def vmap_apply(inner: Contract, param, state, input, rng: MaybeKeyStream, *,
 
 def vmap_init(inner: Contract, outer: Contract, rng: MaybeKeyStream,
               param, state_input: Struct, *,
-              count: int, param_axis: int | None) -> Any:
-    """Initialize one non-priming state per mapped member."""
+              count: int, param_axis: int | None) -> PyTree:
+    """Initializes `count` mapped member states via `jax.vmap` or tiling when deterministic."""
     param_axis = param_axis if inner.parametric else None
     shape = outer.input_spec
     contract = (inner if shape is None else
@@ -111,8 +116,8 @@ def vmap_init(inner: Contract, outer: Contract, rng: MaybeKeyStream,
 def vmap_prime(inner: Contract, param, state_input: Struct, input,
                rng: MaybeKeyStream, *, count: int,
                param_axis: int | None, input_axis: int | None,
-               state_axis: Any, axis_name: str | None = None) -> Any:
-    """Prime one state per mapped member under an optional named axis."""
+               state_axis: PyTree, axis_name: str | None = None) -> PyTree:
+    """Primes `count` mapped member states against `input` under an optional named `vmap` axis."""
     param_axis = param_axis if inner.parametric else None
     state_axis = state_axis if inner.cyclic else None
     rngs, rng_axis = rng.axis(inner.init_takes_rng, count)
@@ -131,8 +136,8 @@ def vmap_prime(inner: Contract, param, state_input: Struct, input,
 
 
 def vmap_param(inner: Contract, outer: Contract, rng: MaybeKeyStream,
-               param_input: Struct, *, count: int) -> Any:
-    """Construct ``count`` independent parameter rows."""
+               param_input: Struct, *, count: int) -> PyTree:
+    """Initializes `count` independent parameter rows along leading axis 0."""
     shape = outer.input_spec
     contract = (inner if shape is None else
                 inner._resolve_def(shape, bundled=True).contract)
@@ -160,10 +165,11 @@ def scan_inputs(
     input: Struct,
     length: int | None = None,
 ) -> Struct:
-    """Validate that every input field carries one common sequence axis.
+    """Checks that all leaves in `input` share a common leading sequence axis matching `length`.
 
-    A step with no input fields scans for a declared ``length``: a system
-    ticking on its own."""
+    When `input` has no array leaves, `length` must be supplied explicitly so
+    an autonomous zero-input system knows how many steps to run.
+    """
     leaves = jax.tree.leaves(input)
     if not leaves:
         if length is None:
@@ -187,8 +193,9 @@ def scan_inputs(
 
 
 def scan_steps(step: Contract, param, state, inputs, rng: MaybeKeyStream, *,
-               record: bool = False, length: int | None = None):
-    """Run one stateful node over a sequence with per-step RNG streams."""
+               record: bool = False,
+               length: int | None = None) -> tuple[PyTree, PyTree]:
+    """Scans `step` across `inputs` via `jax.lax.scan` with per-step RNG splitting."""
     inputs = scan_inputs(step, inputs, length)
     leaves = jax.tree.leaves(inputs)
     count = leaves[0].shape[0] if leaves else length
@@ -219,16 +226,15 @@ def _preserved_roles(preserves) -> tuple[str, ...]:
 
 def transform(builder: Callable | None = None, *, preserves=(),
               internalizes: str | None = None) -> Callable:
-    """Record a node transform and lift the bindings it preserves.
+    """Decorates a `Node` transform, records construction for `specialize`, and lifts preserved bindings.
 
-    ``preserves=()`` accepts only an unbound :class:`Node` because the
-    transform changes parameter or state layout. ``'param'`` also accepts a
-    :class:`PNode` and reattaches its parameters. ``'param,state'`` does the
-    same for a :class:`PSNode` and its state. ``internalizes='state'`` also
-    accepts a :class:`PSNode` whose state the builder consumes as the start
-    of the run it owns: the builder receives the bound view itself and only
-    the parameters are reattached to the result. Otherwise the decorated
-    builder receives an unbound Node.
+    With `preserves=()`, the transform alters parameter or state layout and
+    accepts only an unbound `Node`. Setting `preserves='param'` also accepts a
+    `PNode` and reattaches its parameter tree, while `preserves='param,state'`
+    additionally reattaches state on a `PSNode`. Setting `internalizes='state'`
+    accepts a `PSNode`, passes the bound view into `builder` as the initial
+    carry of the transformed run, and reattaches only `param` on the returned
+    view.
     """
     roles = _preserved_roles(preserves)
     if internalizes not in (None, 'state'):

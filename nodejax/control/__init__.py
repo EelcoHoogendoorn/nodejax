@@ -1,15 +1,4 @@
-"""Control-loop combinators, controllers, filters, and plant blocks.
-
-Factories return components with explicit params and state where the modeled
-system requires them. Lowercase loop functions transform components into
-larger closed-loop components.
-
-Organized into modular subfiles:
-- pid: PID, PD
-- loops: feedback, closed_loop, observed_loop
-- blocks: signal nonlinearities, filters, gain, integration, and noise
-- systems: FirstOrder, StateSpace
-"""
+"""Provides feedback-loop combinators, PID controllers, signal-conditioning filters, and discrete plant models."""
 
 from nodejax.control.pid import PID, PD
 from nodejax.transforms.wiring import sum_junction        # block-diagram vocabulary

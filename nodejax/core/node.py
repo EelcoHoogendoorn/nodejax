@@ -1,26 +1,34 @@
-"""Public definition views.
+"""Unbound public view and shared `BaseNode` behavior over a `Def`.
 
-The complete program is a :class:`nodejax.core.definition.Def`.  ``Node`` is its
-unbound public view; the bound sibling views live in ``pnode`` and ``psnode``.
-No contract storage or structural reconstruction machinery belongs here.
+Every completed NodeJAX program is an immutable `Def`. `BaseNode` exposes the
+structural inspection, static specialization, and input or parameter binding
+methods shared by all public views, while `Node` represents the unbound view
+before parameter values are attached (`PNode` and `PSNode` hold the bound
+views). Non-parametric definitions skip `Node` at construction time and return
+an empty-parameter `PNode` directly so stateless pure Nodes can be called
+immediately.
 """
 
 from __future__ import annotations
 
 from functools import cached_property
-from typing import Any, Callable
+from typing import Callable, TYPE_CHECKING
 
 from nodejax.core.binding import (
     _UNSET, _as_bundle, _bind_rng, validate_param_input,
 )
 from nodejax.core.contract import Contract
 from nodejax.core.definition import Def
+from nodejax.core.types import PyTree
 from nodejax.frozendict import frozendict
 from nodejax.struct import Struct
 
+if TYPE_CHECKING:
+    from nodejax.core.pnode import PNode
+    from nodejax.core.psnode import PSNode
 
-def _view(definition: Def):
-    """Return the ordinary public view appropriate for one definition."""
+
+def _view(definition: Def) -> Node | PNode:
     if definition.parametric:
         return Node(definition)
     from nodejax.core.pnode import PNode
@@ -28,12 +36,12 @@ def _view(definition: Def):
 
 
 class BaseNode:
-    """Small common public view over one complete definition."""
+    """Provides the shared structural and binding interface over a completed `Def`."""
 
     bound = False
     state_bound = False
 
-    def __init__(self, definition: Def):
+    def __init__(self, definition: Def) -> None:
         if type(definition) is not Def:
             raise TypeError(f'{type(self).__name__} expects a Def')
         self._def = definition
@@ -48,6 +56,7 @@ class BaseNode:
 
     @cached_property
     def members(self) -> Struct:
+        """Exposes direct child definitions as a `Struct` of unbound `Node` views."""
         return Struct(**{
             name: Node(definition)
             for name, definition in self._def.members.__items__
@@ -55,10 +64,12 @@ class BaseNode:
 
     @property
     def contract(self) -> Contract:
+        """Exposes the low-level dense execution `Contract` of the underlying `Def`."""
         return self._def.contract
 
     @property
-    def node(self) -> 'Node':
+    def node(self) -> Node:
+        """Drops any bound parameter or state trees and returns the unbound `Node`."""
         return Node(self._def)
 
     @property
@@ -73,26 +84,25 @@ class BaseNode:
     def cyclic(self) -> bool:
         return self._def.cyclic
 
-    def _binding_items(self) -> tuple[tuple[str, Any], ...]:
-        """Runtime bindings carried by this view, in ladder order."""
+    def _binding_items(self) -> tuple[tuple[str, PyTree], ...]:
         return ()
 
-    def _with_definition(self, definition: Def) -> 'BaseNode':
-        """Return the unbound view over a replacement definition."""
+    def _with_definition(self, definition: Def) -> BaseNode:
         return Node(definition)
 
     def _transfer_bindings(
-            self, target: 'BaseNode', preserves=('param', 'state'),
-            strict: bool = False, operation: str = 'operation') -> 'BaseNode':
-        """An unbound view contributes no bindings to ``target``."""
+            self, target: BaseNode,
+            preserves: tuple[str, ...] = ('param', 'state'),
+            strict: bool = False, operation: str = 'operation') -> BaseNode:
         return target
 
-    def with_input(self, input_spec: Any = _UNSET, /, *,
-                   bundle: Struct = _UNSET) -> 'Node':
-        """Re-enter input binding and discard later runtime bindings.
+    def with_input(self, input_spec: PyTree = _UNSET, /, *,
+                   bundle: Struct = _UNSET) -> Node | PNode:
+        """Resolves input-dependent shapes against an example or spec and discards bound trees.
 
-        A positional value is one computed wire. ``bundle=`` supplies an
-        already formed multi-field call, matching the public apply spelling.
+        A positional argument supplies a single input value or `ArraySpec`,
+        whereas `bundle=` supplies a multi-field `Struct` matching a keyword
+        `apply` call.
         """
         if input_spec is not _UNSET and bundle is not _UNSET:
             raise TypeError('pass one input wire or bundle=, not both')
@@ -103,14 +113,14 @@ class BaseNode:
         return _view(self.contract._resolve_def(
             bundle, replace_evidence=True, bundled=True))
 
-    def specialize(self, **overrides: Any) -> 'Node':
-        """Replay canonical construction with accumulated static overrides."""
+    def specialize(self, **overrides: PyTree) -> Node:
+        """Replays recorded construction with dotted-path static overrides and drops bindings."""
         from nodejax.core.construction import specialize
         return Node(specialize(self._def, overrides))
 
-    def parameterize(self, param_input: Any = _UNSET, /,
-                     **fields) -> 'PNode':
-        """Re-enter parameter binding and discard any bound state."""
+    def parameterize(self, param_input: PyTree = _UNSET, /,
+                     **fields: PyTree) -> PNode:
+        """Initializes parameter trees from explicit overrides and `rng`, returning a `PNode`."""
         key = fields.pop('rng', _UNSET)
         if param_input is not _UNSET and fields:
             raise TypeError('pass one parameter bundle or loose fields')
@@ -143,7 +153,7 @@ class BaseNode:
         from nodejax.core.printing import statics_by_path
         return statics_by_path(self)
 
-    def __rshift__(self, other):
+    def __rshift__(self, other: PyTree) -> BaseNode:
         from nodejax.core.compose import _compose
         return _compose(self, other)
 
@@ -153,16 +163,20 @@ class BaseNode:
         return f'{type(self).__name__}({self.name}{suffix})'
 
 
-def _is_node(value: Any) -> bool:
-    """Whether ``value`` implements the concrete BaseNode hierarchy."""
+def _is_node(value: PyTree) -> bool:
     return issubclass(type(value), BaseNode)
 
 
 class Node(BaseNode):
-    """Unbound public definition view."""
+    """Exposes a parametric `Def` prior to parameter initialization.
+
+    Calling a `Node` invokes `parameterize(...)` and returns a `PNode`. Direct
+    `bind`, `init`, and `apply` methods also accept an explicit `param` tree
+    without constructing a persistent `PNode` first.
+    """
 
     @property
-    def node(self) -> 'Node':
+    def node(self) -> Node:
         return self
 
     def __getattr__(self, name: str):
@@ -175,22 +189,25 @@ class Node(BaseNode):
             return getattr(Node(getattr(self._def.members, transparent)), name)
         raise AttributeError(f'Node {self.name!r} has no attribute {name!r}')
 
-    def bind(self, param=(), *, state=_UNSET):
+    def bind(self, param=(), *, state=_UNSET) -> PNode | PSNode:
+        """Attaches an existing `param` tree (and optional `state` tree) to produce `PNode` or `PSNode`."""
         if state is _UNSET:
             from nodejax.core.pnode import PNode
             return PNode(self._def, param)
         from nodejax.core.psnode import PSNode
         return PSNode(self._def, param, state)
 
-    def apply(self, param, *args, **fields):
+    def apply(self, param, *args: PyTree, **fields: PyTree) -> PyTree:
+        """Evaluates one step against an explicit `param` tree (and positional `state` when cyclic)."""
         from nodejax.core.pnode import PNode
         return PNode(self._def, param).apply(*args, **fields)
 
-    def init(self, param, state_input: Any = _UNSET, /, *,
-             input=_UNSET, **fields):
+    def init(self, param, state_input: PyTree = _UNSET, /, *,
+             input=_UNSET, **fields: PyTree) -> PyTree:
+        """Computes a fresh sparse `state` tree using an explicit `param` tree."""
         from nodejax.core.pnode import PNode
         return PNode(self._def, param).init(
             state_input, input=input, **fields)
 
-    def __call__(self, *args, **fields):
+    def __call__(self, *args: PyTree, **fields: PyTree) -> PNode:
         return self.parameterize(*args, **fields)

@@ -1,7 +1,4 @@
-"""Plots and animations of the whip: an open-loop swing, a rollout as a
-GIF, the actuator's readouts along a policy rollout, and training curves
-against wall time. Scripting over the example's data; nothing here is a
-Node."""
+"""Renders plots and animations of whip trajectories, actuator readouts, and training curves."""
 
 import os
 
@@ -19,7 +16,7 @@ from examples.whip.whip import (
 )
 
 def plot_swing(swing: Struct, command: jax.Array, filename: str = 'whip_open_loop.png') -> str:
-    """Draw the rope over time and the traces of the swing."""
+    """Draws the rope trajectory and joint traces of an open-loop swing."""
     import matplotlib
 
     matplotlib.use('Agg')
@@ -99,17 +96,17 @@ def plot_swing(swing: Struct, command: jax.Array, filename: str = 'whip_open_loo
 
 
 def animate_rollout(
-    positions,
-    target,
+    positions: jax.Array,
+    target: jax.Array | tuple[float, ...],
     filename: str,
     *,
     stride: int = 1,
     fps: int = 30,
 ) -> str:
-    """Write a GIF of one rope trajectory, ``positions`` shaped (time,
-    particle, 2), every ``stride`` steps a frame, the tip's trail so far
-    drawn beneath it and ``target`` marked with the circle inside which a
-    hit earns at least half credit."""
+    """Writes a GIF of one `(time, particle, 2)` rope trajectory sampled every `stride` steps.
+
+    Draws the cumulative tip trail alongside `target` and its half-credit radius.
+    """
     import matplotlib
 
     matplotlib.use('Agg')
@@ -153,13 +150,12 @@ def plot_actuator_readouts(
     world: int,
     filename: str = 'whip_actuator_readouts.png',
 ) -> str:
-    """Draw what the actuator saw and did along one closed-loop rollout:
-    per joint the policy's velocity setpoint, the controller's estimate, and
-    the true joint velocity, then true against estimated currents, torque
-    and duty, the bus, the temperatures, and what the strokes bought, the
-    tip's speed and its distance to the target. ``evaluation`` holds ``state``
-    shaped (world, time), ``mechanical`` the joints read off it, and
-    ``command`` and ``action`` shaped (world, time, joint)."""
+    """Draws actuator states, controller estimates, and tip kinematics for one closed-loop rollout.
+
+    Plots velocity setpoints, observer estimates, winding currents, motor torques,
+    PWM duty, shared bus voltage, winding temperatures, and tip distance for `world`
+    from `evaluation`.
+    """
     import matplotlib
 
     matplotlib.use('Agg')
@@ -273,12 +269,12 @@ def plot_actuator_readouts(
     return output
 
 
-def plot_training_curves(runs: dict, filename: str) -> str:
-    """Draw the mean cost per step over training against wall time, one
-    curve per run: ``runs`` maps a label to a record of ``curve``, a vector
-    over training rounds, and ``seconds``, the wall time of the whole run.
-    The rounds are spread evenly along that time; a run is one compiled
-    program, so compilation is inside it and no finer clock exists."""
+def plot_training_curves(runs: dict[str, Struct], filename: str) -> str:
+    """Plots mean step cost over training rounds mapped linearly onto total wall time.
+
+    Each entry in `runs` maps a label to a record with `curve` and `seconds` fields;
+    since each run executes as a single compiled program, compilation time is included.
+    """
     import matplotlib
 
     matplotlib.use('Agg')

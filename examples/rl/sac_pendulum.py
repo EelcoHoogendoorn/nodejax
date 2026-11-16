@@ -1,4 +1,4 @@
-"""Train Soft Actor-Critic on Pendulum and save its phase-space plot."""
+"""Trains Soft Actor-Critic on the pendulum and plots closed-loop phase trajectories."""
 
 import jax
 import jax.numpy as jnp
@@ -64,7 +64,7 @@ N_EVALUATION_STEPS = 300
 
 @node
 def PendulumQ(hidden: int) -> Node:
-    """Pendulum state-command cost-to-go for the soft Bellman backup."""
+    """Predicts pendulum state-command cost-to-go for the soft Bellman backup."""
     members = Composite(
         features=PendulumFeatures(),
         body=(
@@ -84,7 +84,7 @@ def PendulumQ(hidden: int) -> Node:
 
 
 def pendulum_transition() -> Struct:
-    """Return one zero transition fixing the replay row fields and shapes."""
+    """Returns a zero transition fixing the replay row fields and shapes."""
     observation = Struct(angle=jnp.zeros(()), velocity=jnp.zeros(()))
     return Struct(
         observation=observation,
@@ -94,7 +94,7 @@ def pendulum_transition() -> Struct:
 
 
 def pendulum_policy(memory: BaseNode) -> Node:
-    """Build the bounded Gaussian policy with an explicit memory lifecycle."""
+    """Builds a tanh-squashed Gaussian policy wrapping `memory` inside `PendulumMean`."""
     return SquashedGaussian(
         PendulumMean(memory=memory, hidden=HIDDEN),
         StateIndependentLogStd(initial=INITIAL_LOG_STD),
@@ -103,20 +103,15 @@ def pendulum_policy(memory: BaseNode) -> Node:
 
 
 def pendulum_critic() -> Node:
-    """Build the minimum-valued critic ensemble."""
+    """Builds a twin-critic `PendulumQ` ensemble reduced by `jnp.min`."""
     return (
         ensemble(PendulumQ(hidden=HIDDEN), n=N_CRITIC_MEMBERS)
         >> reduce(jnp.min)
     )
 
 
-def pendulum_critic_loss(reduced_cost: jax.Array, target: jax.Array, *, aux) -> jax.Array:
-    """Fit every ensemble member while the critic returns their minimum.
-
-    ``reduced_cost`` is the critic's ordinary output. Training reads the
-    retained population beside the architecture so SAC itself remains
-    independent of whether its critic is an ensemble.
-    """
+def pendulum_critic_loss(reduced_cost: jax.Array, target: jax.Array, *, aux: Struct) -> jax.Array:
+    """Fits every critic ensemble member in `aux.reduce_min.population` against `target`."""
     member_costs = aux.reduce_min.population
     return mse(member_costs, target[..., None])
 
@@ -131,7 +126,7 @@ def pendulum_training_program(
     n_steps_per_chunk: int = N_STEPS_PER_CHUNK,
     n_chunks_per_minibatch: int = N_CHUNKS_PER_MINIBATCH,
 ) -> Node:
-    """Assemble the complete Pendulum SAC training Node tree."""
+    """Assembles the complete pendulum SAC training Node."""
     iteration = sac_iteration(
         policy,
         critic,
@@ -166,7 +161,7 @@ def plot_phase_space(
     filename: str = 'sac_pendulum_phase_space.png',
     title: str = 'SAC pendulum: real rollouts from sampled starts',
 ) -> str:
-    """Plot real closed-loop trajectories under the trained mean policy."""
+    """Plots closed-loop pendulum rollouts under the deterministic mean of `policy`."""
     import os
     import matplotlib
 
@@ -194,7 +189,7 @@ def plot_phase_space(
 
 
 def swing_up() -> None:
-    """Train the canonical SAC policy, evaluate it, and save its plot."""
+    """Trains the feed-forward SAC policy, evaluates it on downward starts, and saves its phase portrait."""
     trained = sac_training(
         pendulum_training_program(
             pendulum_policy(nn.identity),

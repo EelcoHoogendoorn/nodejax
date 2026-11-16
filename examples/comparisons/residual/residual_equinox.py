@@ -1,36 +1,36 @@
 """An attempt at a reusable residual wrapper in Equinox.
 
 Equinox supplies a useful common layer convention. Ordinary layers return an
-output. ``eqx.nn.StatefulLayer`` marks a layer that instead receives an
-external ``eqx.nn.State`` and returns ``(output, state)``. The residual can
+output. `eqx.nn.StatefulLayer` marks a layer that instead receives an
+external `eqx.nn.State` and returns `(output, state)`. The residual can
 delegate that declaration, forward every call argument mechanically, and add
-only to the output. Native state initialization through ``make_with_state``,
+only to the output. Native state initialization through `make_with_state`,
 RNG, ordinary modules, aux marked by this file, and self-composition all work.
 
 That is genuine composition within the Sequential-compatible layer protocol.
-It is not a set-and-forget wrapper over every ``eqx.Module``. A Module may use
+It is not a set-and-forget wrapper over every `eqx.Module`. A Module may use
 any call and return structure. A body that carries state by returning a
-successor Module is not a ``StatefulLayer``, so its pair is indistinguishable
+successor Module is not a `StatefulLayer`, so its pair is indistinguishable
 from an ordinary structured output. RNN cells use their own positional hidden
 state. Other Modules may publish methods or attributes that the wrapper does
-not reproduce. Aux also needs the local ``WithAux`` marker used below. That
+not reproduce. Aux also needs the local `WithAux` marker used below. That
 marker survives another residual which knows about it, but an ordinary next
 layer receives the marker itself rather than the clean output.
 
-Native state updates are functional, but ``State.set`` invalidates the old
+Native state updates are functional, but `State.set` invalidates the old
 State. A member can therefore consume it before the residual discovers that its
 output cannot be added. A failed wrapper call then has no successor to return,
-and the caller's old State is no longer valid.
+and the caller's old State is invalidated.
 
 Construction remains outside the value. Wrapping one configured Module is
 ordinary Equinox, but a later stack or ensemble that needs fresh copies must
 receive a factory which constructs the member and residual together. The
 order of those operations is therefore not uniformly Module to Module.
 
-The comparison next door makes the split concrete. Its Equinox layer stack
-uses returned successor Modules because native ``StateIndex`` values do not
-provide independent per-layer slots when constructed under ``filter_vmap``.
-This residual uses native ``State`` because it is the sound choice here. Each
+The companion `lift/` comparison makes the split concrete. Its Equinox layer
+stack uses returned successor Modules because native `StateIndex` values do not
+provide independent per-layer slots when constructed under `filter_vmap`.
+This residual uses native `State` because it is the sound choice here. Each
 transform works within its chosen state protocol, but the two protocols do
 not compose with each other.
 
@@ -46,7 +46,7 @@ Run directly:
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -65,8 +65,8 @@ from examples.comparisons.residual.residual_common import (
 
 
 class WithAux(NamedTuple):
-    value: Any
-    aux: Any
+    value: object
+    aux: object
 
 
 class BodyAux(NamedTuple):
@@ -82,7 +82,7 @@ def _split_output(output):
 
 
 class Residual(eqx.nn.StatefulLayer):
-    """x + f(x) for a member following Equinox's Sequential layer protocol."""
+    """Computes `x + f(x)` for a member following Equinox's Sequential protocol."""
 
     inner: eqx.Module
 
@@ -131,7 +131,7 @@ class BareBody(eqx.Module):
 
 
 class SuccessorBody(eqx.Module):
-    """The alternative returned-successor state convention used by the stack comparison."""
+    """Carries state via the returned-successor convention from `lift_equinox`."""
 
     weight: jax.Array
     mean: jax.Array
@@ -151,7 +151,7 @@ def _build(key: jax.Array):
 
 
 def _nests() -> bool:
-    """Whether the wrapper accepts its own deterministic and stochastic products."""
+    """Checks whether the wrapper accepts its own deterministic and stochastic products."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     param_key = jax.random.PRNGKey(PARAM_SEED)
     try:
@@ -165,7 +165,7 @@ def _nests() -> bool:
 
 
 def _preserves_native_state() -> bool:
-    """Whether native Equinox state still works through the wrapper and Sequential."""
+    """Checks whether native Equinox state advances through the wrapper and Sequential."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     param_key = jax.random.PRNGKey(PARAM_SEED)
     apply_key = jax.random.PRNGKey(DROPOUT_SEED)
@@ -184,7 +184,7 @@ def _preserves_native_state() -> bool:
 
 
 def _preserves_successor_state() -> bool:
-    """Whether the same wrapper understands the returned-successor convention."""
+    """Checks whether the wrapper handles the returned-successor convention."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     param_key = jax.random.PRNGKey(PARAM_SEED)
     successor, expected = SuccessorBody(param_key)(inputs)
@@ -202,10 +202,10 @@ def _preserves_successor_state() -> bool:
 
 
 def _state_gets_gradient(param_key, apply_key) -> bool:
-    """Whether a gradient reaches the member\'s running statistic.
+    """Checks whether a gradient reaches the member's running statistic.
 
-    It does not. ``make_with_state`` removes the running statistic from the
-    Module pytree and puts it in a separate ``eqx.nn.State`` value, so
+    It does not. `make_with_state` removes the running statistic from the
+    Module pytree and puts it in a separate `eqx.nn.State` value, so
     differentiating the Module reaches only the weight.
     """
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)

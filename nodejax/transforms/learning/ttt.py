@@ -1,29 +1,37 @@
-"""Test-time-training cells and their input/target assembly strategies."""
+"""Online test-time-training (`ttt`) wrappers and self-supervised pair builders.
+
+A `train_step` Node already emits the pre-update prediction and carries adapted
+weights in state, so `ttt` wraps a `train_step` directly as an online adaptive
+cell while `supervised_ttt`, `next_step_ttt`, and `reconstruction_ttt` select
+how each step's `(input, target)` pair is formed:
+
+- `supervised_ttt` consumes externally supplied `(input, target)` pairs.
+- `next_step_ttt` delays the stream by one step (`next_step`) so the previous
+  observation predicts the current observation.
+- `reconstruction_ttt` duplicates each observation (`reconstruction`) as both
+  `input` and `target` for bottleneck or denoising adaptation.
+"""
 
 from __future__ import annotations
 
-from nodejax.struct import Struct
+from nodejax.core.ambient import node
+from nodejax.core.authoring import Leaf
 from nodejax.core.node import BaseNode
 from nodejax.core.pnode import PNode
-from nodejax.core.wrapper import (Wrapper)
-from nodejax.core.authoring import Leaf
-from nodejax.core.ambient import node
+from nodejax.core.wrapper import Wrapper
+from nodejax.struct import Struct
 from nodejax.transforms.learning.train_step import _require_train_step
 
 
 @node
 def reconstruction() -> PNode:
-    """Use each value as both input and target.
-
-    This is useful only when a bottleneck, corruption, or other constraint
-    prevents the learner from implementing the identity directly.
-    """
-    return Leaf(lambda input: Struct(input=input, target=input),)
+    """Duplicates each `input` into `Struct(input=input, target=input)` for reconstruction objectives."""
+    return Leaf(lambda input: Struct(input=input, target=input))
 
 
 @node
 def next_step() -> PNode:
-    """Pair the previous value as input with the current value as target."""
+    """Carries the previous `input` in state and emits `Struct(input=previous, target=current)`."""
     def init(input):
         return input
     def apply(state, input):
@@ -33,11 +41,7 @@ def next_step() -> PNode:
 
 @node
 def ttt(step: BaseNode) -> BaseNode:
-    """Mark a ``train_step`` node as a test-time-training step.
-
-    Each call emits the prediction made before its update and carries the
-    adapted weights in state. Inputs are ``Struct(input=..., target=...)``.
-    """
+    """Labels a `train_step` Node as an online test-time-training cell carrying adapted weights in state."""
     step_node = _require_train_step(step, 'ttt')
     marked = Wrapper(step=step_node)(
         name=f'ttt({step_node.name})')
@@ -45,18 +49,18 @@ def ttt(step: BaseNode) -> BaseNode:
 
 
 @node
-def supervised_ttt(step: BaseNode):
-    """Consume externally assembled ``input``/``target`` pairs."""
+def supervised_ttt(step: BaseNode) -> BaseNode:
+    """Adapts `step` online from externally supplied `(input, target)` pairs."""
     return ttt(step)
 
 
 @node
-def next_step_ttt(step: BaseNode):
-    """Train each value to predict the following value."""
+def next_step_ttt(step: BaseNode) -> BaseNode:
+    """Chains `next_step()` into `ttt(step)` so each observation adapts `step` to predict the next one."""
     return next_step() >> ttt(step)
 
 
 @node
-def reconstruction_ttt(step: BaseNode):
-    """Train each value to reconstruct itself."""
+def reconstruction_ttt(step: BaseNode) -> BaseNode:
+    """Chains `reconstruction()` into `ttt(step)` so each observation adapts `step` to reconstruct itself."""
     return reconstruction() >> ttt(step)

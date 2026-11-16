@@ -1,4 +1,4 @@
-"""Train one recurrent Pendulum policy with SHAC and save its phase plot."""
+"""Trains a recurrent pendulum policy ensemble with SHAC and plots closed-loop phase trajectories."""
 
 import jax
 import jax.numpy as jnp
@@ -59,7 +59,7 @@ N_EVALUATION_STEPS = 300
 
 @node
 def ScalarMLP(hidden: int) -> Node:
-    """A replaceable scalar function approximator."""
+    """Maps a feature vector to a scalar value through two `tanh` hidden layers."""
     return (
         nn.Linear(hidden)
         >> nn.tanh
@@ -78,7 +78,7 @@ def PendulumTrainingData(
     n_worlds: int,
     disturbance_scale: float,
 ) -> PNode:
-    """Independent plant starts and disturbances for chunked SHAC episodes."""
+    """Samples independent `(episode, world)` pendulum starts and `(episode, chunk, world, time)` torque disturbances."""
     def apply(rng):
         disturbance = disturbance_scale * jax.random.normal(
             rng.next(),
@@ -98,8 +98,7 @@ def PendulumTrainingData(
                 maxval=VELOCITY_SCALE,
             ),
         )
-        # Nested scans map every input field. Only episode priming consumes the
-        # duplicated initial plant state.
+        # Nested scans slice every input field; only episode priming reads initial_plant_state.
         initial_plant_state = jax.tree.map(
             lambda value: jnp.broadcast_to(
                 value[:, None, :, None],
@@ -117,17 +116,17 @@ def PendulumTrainingData(
 
 
 def pendulum_policy(memory: BaseNode) -> Node:
-    """Build the example policy with an explicit memory lifecycle."""
+    """Builds a `PendulumMean` policy wrapping `memory`."""
     return PendulumMean(memory=memory, hidden=HIDDEN)
 
 
 def policy_committee(policy: Node) -> Node:
-    """Choose mean ensembling as the policy architecture."""
+    """Ensembles `N_POLICY_MEMBERS` copies of `policy` averaged by `jnp.mean`."""
     return ensemble(policy, n=N_POLICY_MEMBERS) >> reduce(jnp.mean)
 
 
 def pendulum_critic() -> Node:
-    """Build the mean-valued terminal critic."""
+    """Builds a mean-reduced `PendulumCritic` ensemble initialized on default pendulum state."""
     return (
         ensemble(
             PendulumCritic(ScalarMLP(hidden=HIDDEN)),
@@ -142,7 +141,7 @@ def pendulum_training_program(
     critic: Node,
     n_episodes: int,
 ) -> Node:
-    """Assemble the complete Pendulum SHAC Node tree."""
+    """Assembles the complete pendulum SHAC training Node."""
     iteration = shac_iteration(
         policy,
         critic,
@@ -173,7 +172,7 @@ def pendulum_training_program(
 
 
 def train_pendulum_shac(n_episodes: int = N_EPISODES) -> Struct:
-    """Train the canonical recurrent Pendulum policy with fixed keys."""
+    """Trains the recurrent pendulum SHAC policy ensemble and returns the policy, EMA critic, and history."""
     critic = pendulum_critic()
     program = pendulum_training_program(
         policy_committee(pendulum_policy(nn.GRU(MEMORY))),
@@ -199,6 +198,7 @@ def pendulum_evaluation(
     steps: int,
     rng: jax.Array,
 ) -> Struct:
+    """Summarizes episode cost, worst-case terminal state error, and peak torque across `starts`."""
     trajectory = control.policy_trajectory(policy, plant, starts, steps, rng)
     return Struct(
         cost=jnp.mean(jnp.sum(trajectory.cost, axis=1)),
@@ -213,7 +213,7 @@ def plot_phase_space(
     trajectory: Struct,
     filename: str = 'pendulum_shac_phase_space_energy.png',
 ) -> str:
-    """Render real closed-loop rollouts beside the EMA critic."""
+    """Renders closed-loop phase rollouts beside the learned EMA terminal cost surface."""
     import os
     import matplotlib
 
@@ -302,7 +302,7 @@ def plot_phase_space(
 
 
 def pendulum_swing_up() -> None:
-    """Train, evaluate, and plot the canonical Pendulum experiment."""
+    """Trains, evaluates, and plots the recurrent SHAC pendulum experiment."""
     result = train_pendulum_shac()
     outcome = pendulum_evaluation(
         result.policy,

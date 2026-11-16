@@ -15,9 +15,9 @@ from examples.comparisons.generics.generics_common import (
 
 
 class Block(nnx.Module):
-    """The leaf. `temperature` is a plain attribute, which puts it in
-    the graphdef rather than the state: static, like equinox's static
-    field, but reachable by assignment because the object is mutable."""
+    """Applies a same-width linear layer followed by temperature-scaled `tanh`.
+    `temperature` sits in the graphdef rather than state, remaining static yet
+    assignable on the mutable instance."""
 
     def __init__(self, width: int, temperature: float, *, rngs: nnx.Rngs):
         self.linear = nnx.Linear(width, width, rngs=rngs)
@@ -28,13 +28,13 @@ class Block(nnx.Module):
 
 
 class Tower(nnx.Module):
-    """entry -> depth blocks -> readout. `temperature` is here to reach
-    Block and for nothing else."""
+    """Chains `entry -> depth blocks -> readout`, forwarding `temperature` only
+    so `Block` receives it."""
 
     def __init__(self, in_dim: int, width: int, depth: int,
                  temperature: float, *, rngs: nnx.Rngs):
         self.entry = nnx.Linear(in_dim, width, rngs=rngs)
-        # nnx 0.12.8 REFUSES a plain list of submodules here ('use
+        # nnx 0.12.8 refuses a plain list of submodules here ('use
         # nnx.List(...)', it says, among four other remedies): a
         # container of modules has to announce that it holds data
         self.blocks = nnx.List([Block(width, temperature, rngs=rngs)
@@ -49,8 +49,8 @@ class Tower(nnx.Module):
 
 
 class Committee(nnx.Module):
-    """`members` towers, averaged. Four of the five configuration
-    parameters below are pure threading."""
+    """Averages `members` towers while forwarding four unused config parameters
+    down to `Tower`."""
 
     def __init__(self, in_dim: int, width: int, depth: int, members: int,
                  temperature: float, *, rngs: nnx.Rngs):
@@ -67,15 +67,15 @@ THREADING_TAX = 5
 
 
 def configured(config: dict, seed: int) -> Committee:
-    """Exercise 1: the caller unpacks the dict and the constructor chain
-    re-states every value at every level."""
+    """Unpacks `config` into positional constructor arguments for Exercise 1,
+    since every level restates what it forwards."""
     return Committee(IN_DIM, config['width'], config['depth'],
                      config['members'], config['temperature'],
                      rngs=nnx.Rngs(seed))
 
 
 def fit(model: Committee, rows: jax.Array, targets: jax.Array) -> tuple:
-    """Train the object directly with NNX graph-aware gradient and scan."""
+    """Trains `model` directly with NNX graph-aware gradient and scan."""
     optimizer = nnx.Optimizer(model, optax.adam(LR), wrt=nnx.Param)
     carry_axes = nnx.StateAxes({...: nnx.Carry})
 
@@ -91,13 +91,13 @@ def fit(model: Committee, rows: jax.Array, targets: jax.Array) -> tuple:
 
 
 def retempered(model: Committee, temperature: float) -> Committee:
-    """Exercise 2, and nnx's genuine win: the flip is an assignment, no
-    rebuild, no transplant, no config kept alive at the call site.
+    """Clones `model` and assigns `temperature` on every `Block` without
+    rebuilding weights or keeping `config` at the call site.
 
     Two things it still costs. The walk is hand-written, so the caller
     must know the structure to reach every block, and it is a walk that
     grows with the architecture rather than one addressed edit. And the
-    assignment MUTATES: the previous configuration is gone unless the
+    assignment mutates: the previous configuration is gone unless the
     model was cloned first, which is why this takes a clone."""
     flipped = nnx.clone(model)
     for tower in flipped.towers:

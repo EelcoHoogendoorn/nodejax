@@ -1,1 +1,1 @@
-"""The Node definition, binding, authoring, and composition machinery."""
+"""Defines the `Def` representation, normalized `Contract`, public `Node` views, and authoring forms."""

@@ -1,4 +1,4 @@
-"""Filtering and tracking layer blocks."""
+"""Defines exponential moving-average smoothing over arbitrary PyTrees."""
 
 from __future__ import annotations
 
@@ -7,28 +7,23 @@ import jax.numpy as jnp
 
 from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
+from nodejax.core.pnode import PNode
+from nodejax.core.types import PyTree
 
 
 @node
-def EMA(tau: float, warm: bool = False):
-    """One-pole low-pass over an arbitrary pytree: state is the smoothed
-    tree. On a signal it is an ordinary smoothing filter; on a param
-    pytree it is a target network.
+def EMA(tau: float, warm: bool = False) -> PNode:
+    """Tracks an exponential moving average `tau * state + (1 - tau) * input` over any PyTree.
 
-    `warm` chooses where the smoothing STARTS, and with it what the node
-    needs to be initialized. Warm copies the first real input, so the
-    filter begins at the signal instead of decaying up to it from nothing
-    — a target network starts equal to the online net — and the node then
-    REQUIRES a real value at init. Cold starts at zeros, which needs only
-    a shape, and pays a startup transient. A shape cannot stand in for a
-    warm start: zeros are not the first sample."""
-    def init(input):
+    When `warm=False`, `init` allocates zeros matching `node.input` so initialization requires only an input spec. When `warm=True`, `init(input)` copies the first concrete input directly into state so smoothing starts at that sample rather than ramping up from zero, which requires a concrete input value at `init` time.
+    """
+    def init(input) -> PyTree:
         return input
 
-    def init_cold(node):
+    def init_cold(node) -> PyTree:
         return jax.tree.map(jnp.zeros_like, node.input)
 
-    def apply(state, input):
+    def apply(state, input) -> tuple[PyTree, PyTree]:
         new = jax.tree.map(lambda s, i: tau * s + (1.0 - tau) * i, state, input)
         return new, new
 

@@ -1,4 +1,4 @@
-"""Linear / affine blocks."""
+"""Defines affine projections and layout-reshaping Leaf nodes."""
 
 from __future__ import annotations
 
@@ -11,20 +11,20 @@ from nodejax.struct import Struct
 from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
 from nodejax.core.node import Node
+from nodejax.core.pnode import PNode
 
 
 flat = Leaf(lambda input: input.reshape(-1), name='flat')
 
 
 def _fan_in_normal(key: jax.Array, shape: tuple[int, ...]) -> jax.Array:
-    """Normal weights scaled by the first, input-feature dimension."""
+    """Draws normal weights scaled by the inverse square root of `shape[0]`."""
     return jax.random.normal(key, shape) / jnp.sqrt(shape[0])
 
 
 @node
-def Reshape(shape: tuple[int, ...]):
-    """Reshape the signal to `shape`: geometry as a block, so a pipe can
-    state its layout inline instead of minting a local lambda node."""
+def Reshape(shape: tuple[int, ...]) -> PNode:
+    """Reshapes an array input to `shape` as an inline pipeline stage."""
     return Leaf(lambda input: input.reshape(shape))
 
 
@@ -36,12 +36,10 @@ def Linear(
     weight_init: Callable = _fan_in_normal,
     bias_init: Callable = jax.nn.initializers.zeros,
 ) -> Node:
-    """Affine map to n_out features; fan-in from the resolved input
-    spec. ``bias=False`` drops the offset: a pure linear map, for uses
-    where an offset is meaningless (projecting a difference, feeding a
-    normalization that would remove it). Initializers accept a key and
-    shape; their defaults preserve the standard fan-in normal weights and
-    zero bias."""
+    """Maps the trailing input axis to `n_out` features with fan-in inferred from `node.input.shape[-1]`.
+
+    Setting `bias=False` omits `param.b` and applies a pure matrix product. `weight_init` and `bias_init` accept `(key, shape)` and default to fan-in-scaled normal weights and zeros.
+    """
     def param(node, rng) -> Struct:
         n_in = node.input.shape[-1]
         weight = weight_init(rng.next(), (n_in, n_out))
@@ -64,10 +62,9 @@ def Projection(
     weight_init: Callable = _fan_in_normal,
     bias_init: Callable = jax.nn.initializers.zeros,
 ) -> Node:
-    """Affine projection from one vector to one scalar.
+    """Projects a trailing feature vector to a scalar (`input @ param.w + param.b`).
 
-    Initializers accept a key and shape; their defaults preserve the standard
-    fan-in normal weights and zero bias.
+    Infers the input width from `node.input.shape[-1]`. `weight_init` and `bias_init` accept `(key, shape)` and default to fan-in-scaled normal weights and zeros.
     """
     def param(node, rng) -> Struct:
         width = node.input.shape[-1]

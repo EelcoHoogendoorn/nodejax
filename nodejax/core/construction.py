@@ -1,23 +1,23 @@
-"""Static construction replay.
+"""Static factory replay and dotted-path specialization over `Def` records.
 
-This module owns the stage before concrete tree binding.  It deliberately
-does not inspect a Node's current member tree when replaying statics: that
-tree may contain ephemeral surgery.
+`specialize` replays a Node's recorded `@node` factory call with updated static
+arguments, forwarding descendant overrides (`'encoder.dim'`) and wildcards
+(`'*.dtype'`) down the rebuilt member tree without relying on ephemeral member
+mutations applied after the original construction.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
 
 from nodejax.core.definition import Construction, Def
 from nodejax.frozendict import frozendict
 from nodejax.core.node import Node, _is_node
+from nodejax.core.types import PyTree
 from nodejax.struct import Struct
 
 
 def _freeze_paths(values: Mapping) -> frozendict:
-    """Freeze a nested path tree after its local assembly is complete."""
     return frozendict({
         name: (_freeze_paths(value)
                if issubclass(type(value), Mapping) else value)
@@ -25,9 +25,8 @@ def _freeze_paths(values: Mapping) -> frozendict:
     })
 
 
-def _nested(overrides: dict[str, Any]) -> frozendict:
-    """Expand dotted overrides into an immutable descendant tree."""
-    out: dict[str, Any] = {}
+def _nested(overrides: dict[str, PyTree]) -> frozendict:
+    out: dict[str, PyTree] = {}
     for path, value in overrides.items():
         here = out
         parts = path.split('.')
@@ -38,7 +37,6 @@ def _nested(overrides: dict[str, Any]) -> frozendict:
 
 
 def _merge(base: Mapping, changes: Mapping) -> frozendict:
-    """Return the recursively merged immutable path tree."""
     out = dict(base)
     for name, value in changes.items():
         if (issubclass(type(value), Mapping)
@@ -49,8 +47,7 @@ def _merge(base: Mapping, changes: Mapping) -> frozendict:
     return frozendict(out)
 
 
-def _definition(value: Any) -> Def:
-    """Extract the raw definition returned by a construction factory."""
+def _definition(value: PyTree) -> Def:
     if type(value) is Def:
         return value
     if _is_node(value):
@@ -59,9 +56,9 @@ def _definition(value: Any) -> Def:
         f'a definition factory returned {type(value).__name__}, not a Node')
 
 
-def _specialize_value(value: Any, named: Mapping,
-                      wildcards: Mapping) -> Any:
-    """Apply descendant overrides to one recorded construction value."""
+def _specialize_value(value: PyTree, named: Mapping,
+                      wildcards: Mapping) -> PyTree:
+    """Applies descendant and wildcard static overrides to one recorded factory value."""
     from nodejax.core.generic import Generic
 
     if _is_node(value):
@@ -88,8 +85,8 @@ def _specialize_value(value: Any, named: Mapping,
     return value
 
 
-def specialize(definition: Def, overrides: dict[str, Any]) -> Def:
-    """Replay a definition's canonical construction record."""
+def specialize(definition: Def, overrides: dict[str, PyTree]) -> Def:
+    """Replays `definition`'s recorded factory with static `overrides` and returns the new `Def`."""
     construction = definition.construction
     if construction is None:
         raise TypeError(
@@ -153,7 +150,6 @@ def specialize(definition: Def, overrides: dict[str, Any]) -> Def:
 
 def _specialize(definition: Def, named: Mapping,
                 wildcards: Mapping) -> Def:
-    """Recursive descendant replay without rebuilding override syntax."""
     construction = definition.construction
     if construction is None:
         if named:

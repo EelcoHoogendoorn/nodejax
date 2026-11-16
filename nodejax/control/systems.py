@@ -1,4 +1,4 @@
-"""Standard dynamic plant models."""
+"""Defines discrete-time first-order lag and linear state-space plant Leaf factories."""
 
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ from nodejax.core.types import PyTree
 
 @node
 def FirstOrder(dt: float, warm: bool = False) -> Node:
-    """First-order lag discretized with backward Euler.
+    """Advances a backward-Euler first-order lag with time constant `tau` and steady-state `gain`.
 
-    `tau` is the time constant and `gain` is the steady-state gain. Cold
-    initialization starts the output at zero. With `warm=True`, init requires
-    an input value and starts at the corresponding steady-state output.
+    Cold initialization (`warm=False`) starts state at zero matching `node.input`. Warm initialization (`warm=True`) requires a concrete initial `input` and initializes state at `gain * input`.
     """
     if dt <= 0.0:
         raise ValueError('dt must be positive')
@@ -51,12 +49,9 @@ def FirstOrder(dt: float, warm: bool = False) -> Node:
 
 @node
 def StateSpace() -> Node:
-    """Discrete linear state-space system.
+    """Steps a discrete linear state-space plant with `output = C @ state + D @ input` and `state_next = A @ state + B @ input`.
 
-    The transition and output equations are `x_next = A @ x + B @ input`
-    and `output = C @ x + D @ input`. Output is computed from the current
-    state before the transition. State initializes to zero; bind a different
-    state explicitly when a model starts from another operating point.
+    Evaluates `output` from the current `state` before advancing `state`, and initializes `state` to a zero vector of length `A.shape[0]`.
     """
     def param(A: PyTree, B: PyTree, C: PyTree, D: PyTree) -> Struct:
         A = jnp.asarray(A)

@@ -1,1 +1,1 @@
-"""Worked examples: each is a test, and each runs."""
+"""Contains worked NodeJAX examples across neural architectures, control, physics, and reinforcement learning."""

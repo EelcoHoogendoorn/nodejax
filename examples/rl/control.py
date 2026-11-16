@@ -1,8 +1,7 @@
-"""Shared policy-plant interaction Nodes for reinforcement-learning examples.
+"""Provides shared policy-plant interaction Nodes for reinforcement learning.
 
-A plant is a cyclic Node taking ``command`` and ``disturbance`` and returning
-a record of ``action`` and ``cost``; its state is its own, read through the
-member view before and after a step, and ``observe`` is a method on it.
+Models each plant as a cyclic Node taking `command` and `disturbance`, returning
+`action` and `cost`, and exposing controller observations via `observe`.
 """
 
 from typing import Callable
@@ -28,34 +27,29 @@ from nodejax import (
 
 
 def initial_state(plant: PNode) -> Struct:
-    """The plant's state at its default start, for resolving an input
-    contract; a plant whose init draws a key gets a fixed probe key, since
-    only the shape is kept."""
+    """Evaluates `plant.init` at its default start using a fixed probe key when needed."""
     if plant.contract.init_takes_rng:
         return plant.init(rng=jax.random.PRNGKey(0))
     return plant.init()
 
 
 def initial_observation(plant: PNode) -> Struct:
-    """What a controller sees of the plant at its default start, for
-    resolving a policy's or a value's input contract."""
+    """Returns the observation of `plant` at its default start state for contract resolution."""
     return plant.observe(state=initial_state(plant))
 
 
 @node
-def ControlledStep(policy: Node, plant: PNode) -> Node:
-    """Observe, choose a command, and advance one controlled plant step.
+def ControlledStep(policy: BaseNode, plant: BaseNode) -> Node | PNode:
+    """Observes `plant`, evaluates `policy`, and advances one closed-loop step.
 
-    ``initial_plant_state`` rides the apply input rather than the state bundle
-    because a boundary re-prime rebuilds the state from the stream's first
-    element, so the value has to be in the stream; the step reads it at
-    prime and ignores it afterwards. ``SamplingStep``, run fresh per call
-    and never re-primed, takes its start as a state input instead.
+    Passes `initial_plant_state` as an `apply` input rather than a state-init input so
+    boundary re-priming inside a scan can rebuild carried state from the stream's first
+    element; subsequent transitions ignore `initial_plant_state`.
     """
     members = Composite(policy=policy, plant=plant)
 
     def apply(self, disturbance, initial_plant_state):
-        """Advance carried state; ``initial_plant_state`` is consumed by prime."""
+        """Advances carried plant and policy state by one step."""
         state = self.plant.state
         command = self.policy(self.plant.observe())
         output = self.plant(
@@ -71,14 +65,7 @@ def ControlledStep(policy: Node, plant: PNode) -> Node:
         )
 
     def init(self, input):
-        """Start the plant from ``initial_plant_state`` and the policy from
-        what it observes there.
-
-        ``initial_plant_state`` shares the apply call because a scan primes from
-        its first real element. It is ignored by later transitions. The plant's
-        own init turns the start into its state; for a plant whose start is
-        its state that is the identity.
-        """
+        """Resets `plant` from `input.initial_plant_state` and primes `policy` on its observation."""
         self.plant.reset(start=input.initial_plant_state)
         self.policy.reset(input=self.plant.observe())
 
@@ -86,11 +73,11 @@ def ControlledStep(policy: Node, plant: PNode) -> Node:
 
 
 @node
-def PlannedStep(policy: Node, plant: PNode) -> Node:
-    """``ControlledStep`` for a planner: the policy is handed the plant's
-    state, not its observation, since a planner rolls the plant's own
-    model out from where the plant is. Everything else is the same, member
-    names included, so paths into the two steps agree."""
+def PlannedStep(policy: BaseNode, plant: BaseNode) -> Node | PNode:
+    """Feeds full `plant` state rather than observations into `policy` for model-based planning.
+
+    Preserves the same member names and output fields as `ControlledStep`.
+    """
     members = Composite(policy=policy, plant=plant)
 
     def apply(self, disturbance, initial_plant_state):
@@ -113,8 +100,8 @@ def PlannedStep(policy: Node, plant: PNode) -> Node:
 
 
 @node
-def ProposalMean() -> Node:
-    """Select the deterministic command from a Gaussian proposal."""
+def ProposalMean() -> PNode:
+    """Extracts the deterministic `mean` command from a Gaussian proposal `Struct`."""
     return Leaf(lambda input: input.mean)
 
 
@@ -123,9 +110,11 @@ def mean_rollout_program(
     plant: BaseNode,
     n_worlds: int,
 ) -> PNode:
-    """Build a fresh deterministic rollout from an injected policy and plant."""
+    """Builds a batched deterministic rollout `PNode` for `n_worlds` parallel worlds."""
     mean_policy = policy >> ProposalMean()
-    return batch(scanned(ControlledStep(mean_policy, plant)), n=n_worlds).parameterize()
+    step = ControlledStep(mean_policy, plant)
+    batched = batch(scanned(step), n=n_worlds)
+    return batched if isinstance(batched, PNode) else batched.parameterize()
 
 
 def mean_rollout(
@@ -134,8 +123,7 @@ def mean_rollout(
     starts: Struct,
     disturbance: jax.Array,
 ) -> Struct:
-    """Run a deterministic closed loop from the given starts under a
-    ``disturbance`` shaped (world, time); the trajectory shares those axes."""
+    """Runs a deterministic closed-loop rollout from `starts` under `(world, time)` `disturbance`."""
     n_worlds = tree_len(starts)
     steps = disturbance.shape[1]
     input = Struct(
@@ -157,21 +145,20 @@ def policy_trajectory(
     initial_plant_state: Struct,
     steps: int,
     rng: jax.Array,
-    step: Callable = ControlledStep,
+    step: Callable[..., BaseNode] = ControlledStep,
 ) -> Struct:
-    """Evaluate from fresh plant state while preserving recurrent policy carry.
+    """Evaluates `policy` on `plant` over `steps` while preserving recurrent policy state.
 
-    The trajectory is shaped (world, time), its ``state`` holding the final
-    state as one extra step, its ``command`` what the policy asked for and
-    its ``action`` what the plant did. ``step`` builds the transition from the policy
-    and the plant: ``ControlledStep`` for a policy on observations,
-    ``PlannedStep`` for a planner on states."""
+    Returns `(world, time)` trajectories of `command`, `action`, and `cost`, along with
+    `state` including the terminal state as one extra step and `final_state`.
+    """
     n_worlds = tree_len(initial_plant_state)
     input = Struct(
         disturbance=jnp.zeros((n_worlds, steps)),
         initial_plant_state=tree_broadcast_axis(initial_plant_state, steps, axis=1),
     )
-    rollout = batch(scanned(step(policy, plant)), n=n_worlds).parameterize()
+    batched = batch(scanned(step(policy, plant)), n=n_worlds)
+    rollout = batched if isinstance(batched, PNode) else batched.parameterize()
     if rollout.contract.apply_takes_rng:
         trajectory = rollout.apply(bundle=input, rng=rng)
     else:
@@ -193,11 +180,11 @@ def policy_trajectory(
 
 
 @node
-def OpenLoopStep(plant: PNode) -> Node:
-    """Advance one plant step under a stored command; no controller.
+def OpenLoopStep(plant: BaseNode) -> Node | PNode:
+    """Advances `plant` by one open-loop step under an explicit `command` and `disturbance`.
 
-    The plant state a rollout starts from is a state input, ``initial_state``,
-    so a run internalized by ``scanned`` takes it once beside the commands.
+    Takes `initial_state` as a state-init input so an enclosing `scanned` transform
+    consumes it once alongside the command sequence.
     """
     members = Composite(plant=plant)
 
@@ -207,21 +194,19 @@ def OpenLoopStep(plant: PNode) -> Node:
         return Struct(state=state, cost=output.cost, next_state=self.plant.state)
 
     def init(self, initial_state):
-        """Start from the given plant state."""
+        """Binds `plant` state to `initial_state`."""
         self.plant.bind(state=initial_state)
 
     return members(apply, init=init)
 
 
 @node
-def SamplingStep(policy: Node, plant: Node) -> Node:
-    """One on-policy transition: sample, act, record what replay needs.
+def SamplingStep(policy: BaseNode, plant: BaseNode) -> Node | PNode:
+    """Samples a stochastic command from `policy`, steps `plant`, and records replay fields.
 
-    ``initial_plant_state`` starts one sampled run. An enclosing internalized
-    scan consumes it once to initialize the plant and a fresh policy lifecycle,
-    then carries both states through the run. ``policy_state`` is the policy's
-    state as this step saw it, so replay can resume a recurrent policy from any
-    recorded step.
+    Initializes `plant` and `policy` once from `initial_plant_state` at the start of an
+    internalized scan and records `policy_state` before each step so replay can resume
+    recurrent policies from any step.
     """
     members = Composite(policy=policy, plant=plant)
 
@@ -241,8 +226,7 @@ def SamplingStep(policy: Node, plant: Node) -> Node:
         )
 
     def init(self, initial_plant_state):
-        """Start the plant from ``initial_plant_state`` and the policy from
-        what it observes there."""
+        """Resets `plant` from `initial_plant_state` and primes `policy` on its observation."""
         self.plant.reset(start=initial_plant_state)
         self.policy.reset(input=self.plant.observe())
 

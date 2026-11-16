@@ -1,101 +1,81 @@
-"""NodeJAX's immutable named record.
+"""Immutable named record registered as a keyed JAX PyTree.
 
-``Struct`` is a JAX pytree for fixed shapes whose fields benefit from attribute
-access. It is not a base class for framework objects.
+`Struct` stores named fields with attribute, key, and positional-index access while keeping non-dunder dict methods (`keys`, `values`, `items`) off the namespace so arbitrary field names never collide with container methods. JAX PyTree flattening emits `GetAttrKey` path entries so path-addressed tools (`replace_by_path`, `set_by_path`, `optax.multi_transform`) see dotted `.member.field` addresses.
 """
 
-from typing import Any, Iterator
+from __future__ import annotations
+
+from typing import Iterator, TYPE_CHECKING
+
+if TYPE_CHECKING:
+	from nodejax.core.types import PyTree
 
 
 class Struct:
-	"""
-	This is similar to a AnonymousNamedTuple with getitem access
-	or perhaps a FrozenAttrOrderedDict
-		that being said; only a part of the dict interface is implemented,
-		(no keys, values or items)
-		since implementing the dict interface would require showing these non-dunder methods
-	"""
+	"""Holds named read-only fields as an ordered record and keyed JAX PyTree."""
 
-	def __init__(self, **kwargs):
-		"""Store fields in hidden attributes, a frozendict-like structure."""
+	def __init__(self, **kwargs: PyTree) -> None:
 		object.__setattr__(self, '__keys__', tuple(kwargs.keys()))
 		object.__setattr__(self, '__values__', tuple(kwargs.values()))
 
-	def __setattr__(self, name: str, value: Any):
-		"""Prevent attribute modification after construction."""
+	def __setattr__(self, name: str, value: PyTree) -> None:
 		raise AttributeError(f"'{self.__class__.__name__}' object attribute '{name}' is read-only")
 
-	def __delattr__(self, name: str):
-		"""Prevent attribute deletion."""
+	def __delattr__(self, name: str) -> None:
 		raise AttributeError(f"'{self.__class__.__name__}' object attribute '{name}' is read-only")
 
 	def __reduce__(self):
-		"""Pickle as a construction: the read-only fields cannot be restored
-		onto a bare instance the way default unpickling restores them."""
 		return _rebuild, (type(self), tuple(self.__items__))
 
-	# === Attribute access interface ===
-
-	def __getattribute__(self, name: str) -> Any:
-		"""Prioritize field access over methods."""
+	def __getattribute__(self, name: str) -> PyTree:
 		keys = object.__getattribute__(self, '__keys__')
 		if name in keys:
 			values = object.__getattribute__(self, '__values__')
 			return values[keys.index(name)]
 		return object.__getattribute__(self, name)
 
-	def __getitem__(self, key) -> Any:
-		"""Support both string keys and integer indices."""
+	def __getitem__(self, key: str | int) -> PyTree:
 		if key in self.__keys__:
 			key = self.__keys__.index(key)
 		if type(key) is int:
 			return self.__values__[key]
 		raise KeyError(f"'{self.__class__.__name__}' object key '{key}' not found.")
 
-	def __contains__(self, key) -> bool:
-		"""Support 'in' operator for field names."""
+	def __contains__(self, key: str) -> bool:
 		return key in self.__keys__
 
 	def __len__(self) -> int:
-		"""Number of fields."""
 		return len(self.__keys__)
 
-	def __iter__(self) -> Iterator[Any]:
-		"""Iterate over field values (enables unpacking). Note, giving precedence to tuple interface over dict interface"""
+	def __iter__(self) -> Iterator[PyTree]:
 		return iter(self.__values__)
 
-	# === String representation ===
-
 	def __repr__(self) -> str:
-		"""Compact representation."""
 		fields = ', '.join(f'{k}={repr(v)}' for k, v in self.__as_dict__.items())
 		return f'{type(self).__name__}({fields})'
 
 	def __str__(self) -> str:
-		"""Same as repr for now."""
 		return self.__repr__()
 
 	@property
-	def __items__(self) -> Iterator[tuple[str, Any]]:
-		"""Iterate over (field_name, field_value) pairs."""
+	def __items__(self) -> Iterator[tuple[str, PyTree]]:
 		return zip(self.__keys__, self.__values__)
 	@property
-	def __as_tuple__(self):
+	def __as_tuple__(self) -> tuple[PyTree, ...]:
 		return tuple(self.__values__)
 	@property
-	def __as_list__(self):
+	def __as_list__(self) -> list[PyTree]:
 		return list(self.__values__)
 	@property
-	def __as_dict__(self):
+	def __as_dict__(self) -> dict[str, PyTree]:
 		return dict(self.__items__)
 
-	def without(self, *names: str) -> 'Struct':
-		"""A copy without the named fields. Filter semantics: a name that is
-		not present is simply not there to remove."""
+	def without(self, *names: str) -> Struct:
+		"""Returns a new record omitting any fields present in `names`."""
 		return type(self)(**{k: v for k, v in self.__items__ if k not in names})
 
-	def replace(self, *args, **kwargs) -> 'Struct':
-		"""Create a new record with the named fields replaced wholesale."""
+	def replace(self, *args: PyTree, **kwargs: PyTree) -> Struct:
+		"""Returns a new record with positional or keyword fields replaced."""
 		if len(args) > len(self.__keys__):
 			raise TypeError(f"replace() takes at most {len(self.__keys__)} positional arguments ({len(args)} given)")
 		positional = dict(zip(self.__keys__, args))
@@ -103,12 +83,11 @@ class Struct:
 			**self.__as_dict__, **positional, **kwargs,
 		})
 
-	def merge(self, other) -> 'Struct':
-		"""Merge another struct-like object, with other's fields taking precedence."""
+	def merge(self, other: Struct | dict) -> Struct:
+		"""Recursively merges `other` (`Struct` or `dict`), giving leaves in `other` precedence."""
 		return self._merge_nested(other, preserve_structure=True)
 
-	def _merge_nested(self, other: dict, preserve_structure=True) -> 'Struct':
-		"""Recursively merge another dict-like value."""
+	def _merge_nested(self, other: Struct | dict, preserve_structure: bool = True) -> Struct:
 		result = self.__as_dict__
 		if issubclass(type(other), Struct):
 			other = other.__as_dict__
@@ -134,43 +113,31 @@ class Struct:
 
 
 def _rebuild(cls: type, items: tuple) -> Struct:
-	"""A pickled Struct, as its type constructed from its (name, value) pairs."""
 	return cls(**dict(items))
 
 
-# === JAX PyTree registration ===
-
 def _struct_flatten(tree):
-	"""Flatten Struct for JAX pytree."""
 	return tree.__values__, tree.__keys__
 
 def _struct_flatten_with_keys(tree):
-	"""Keyed flatten: field names become pytree path entries, so path-aware
-	tooling (tree_map_with_path, optax.multi_transform, freeze/decay masks)
-	sees '.member.field' paths instead of anonymous indices."""
 	keys = tree.__keys__
 	return tuple((jax.tree_util.GetAttrKey(k), v) for k, v in zip(keys, tree.__values__)), keys
 
 def _struct_unflatten(aux_data, children):
-	"""Unflatten JAX pytree back to Struct."""
 	field_names = aux_data
 	field_values = children
 	return Struct(**dict(zip(field_names, field_values)))
 
-# Register with JAX
 try:
 	import jax
 	jax.tree_util.register_pytree_with_keys(
 		Struct, _struct_flatten_with_keys, _struct_unflatten, _struct_flatten)
 except ImportError:
-	pass  # JAX not available
+	pass
 
 
 def register_struct_subtype(cls: type) -> type:
-	"""Register a Struct subtype as its own pytree, so it survives a
-	flatten/unflatten round trip as itself rather than decaying to Struct.
-	A subtype that carries meaning (a marker the reader dispatches on) has
-	to come back wearing it."""
+	"""Registers `cls` as its own keyed JAX PyTree so unflatten preserves the subclass."""
 	import jax
 
 	def unflatten(keys, values):

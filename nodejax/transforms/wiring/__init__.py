@@ -1,4 +1,4 @@
-"""Node wiring and composition operations."""
+"""Re-exports combinator wiring transforms (`at`, `parallel`, `residual`, `sum_junction`)."""
 
 from nodejax.transforms.wiring.at import at
 from nodejax.transforms.wiring.parallel import parallel

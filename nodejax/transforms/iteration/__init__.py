@@ -1,4 +1,4 @@
-"""Transforms over repeated execution."""
+"""Re-exports sequential and fixed-depth iteration transforms (`scan`, `scanned`, `carried`, `repeat`, `repeated`, `iterated`, `stack`)."""
 
 from nodejax.transforms.iteration.iterated import iterated
 from nodejax.transforms.iteration.repeat import repeat, repeated

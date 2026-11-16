@@ -1,11 +1,11 @@
 """Configuring a deep composition, the equinox column.
 
-Written the way you would write it to be REUSABLE: the architecture is
+Written the way you would write it to be reusable: the architecture is
 three classes, each taking the configuration it needs and handing the
 rest down. No globals are read inside a module, because a module that
 reads its width off a global is not an architecture, it is one model.
 
-That leaves the threading in plain sight, which is the measurement.
+That leaves the threading explicit, which is the measurement.
 Committee takes five configuration parameters and consumes exactly one
 (members); the other four exist to be handed to Tower unchanged. Tower
 takes temperature for no reason of its own. And `in_dim` is threaded
@@ -13,7 +13,7 @@ from the caller through both levels, because an equinox Linear must be
 told its fan-in; the nodejax column never mentions a fan-in anywhere,
 since a constructor there reads it off the wiring.
 
-The temperature is a STATIC field, which it must be: a bare float on an
+The temperature is a static field, which it must be: a bare float on an
 equinox Module is a pytree leaf, and a pytree leaf gets traced and
 optimized. That correctness fix is what makes exercise 2 expensive; see
 `retempered`.
@@ -31,7 +31,7 @@ from examples.comparisons.generics.generics_common import (
 
 
 class Block(eqx.Module):
-    """The leaf: a same-width linear, then a tanh cooled by temperature."""
+    """Applies a same-width linear layer followed by temperature-scaled `tanh`."""
     linear: eqx.nn.Linear
     temperature: float = eqx.field(static=True)
 
@@ -44,8 +44,8 @@ class Block(eqx.Module):
 
 
 class Tower(eqx.Module):
-    """entry -> depth blocks -> readout. `temperature` appears in this
-    signature for one reason: to reach Block."""
+    """Chains `entry -> depth blocks -> readout`, forwarding `temperature` only
+    so `Block` receives it."""
     entry: eqx.nn.Linear
     blocks: list
     readout: eqx.nn.Linear
@@ -66,8 +66,8 @@ class Tower(eqx.Module):
 
 
 class Committee(eqx.Module):
-    """`members` towers, averaged. Four of the five configuration
-    parameters below are pure threading."""
+    """Averages `members` towers while forwarding four unused config parameters
+    down to `Tower`."""
     towers: list
 
     def __init__(self, in_dim: int, width: int, depth: int, members: int,
@@ -85,21 +85,20 @@ THREADING_TAX = 5
 
 
 def configured(config: dict, key) -> Committee:
-    """Exercise 1. The config cannot be handed over as a config: the
-    constructor chain takes positional values, so the caller unpacks
-    the dict here and every level re-states what it is passing on."""
+    """Unpacks `config` into positional constructor arguments for Exercise 1,
+    since every level restates what it forwards."""
     return Committee(IN_DIM, config['width'], config['depth'],
                      config['members'], config['temperature'], key=key)
 
 
 @eqx.filter_jit
 def fit(model: Committee, rows: jax.Array, targets: jax.Array) -> tuple:
-    """The whole run as one scan, the module riding as the carry: its
+    """Runs training as one scan with `model` as the carry: its
     array leaves are the loop state and its static fields sit in the
     treedef, which lax.scan requires to be identical in and out. That
     holds here, and it is worth naming why: the configuration cannot
     change during a run, so a config value that lives in the treedef
-    can be carried. The same fact is what makes it immovable AFTER the
+    can be carried. The same fact is what makes it immovable after the
     run; see `retempered`."""
     optimizer = optax.adam(LR)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
@@ -122,13 +121,13 @@ def fit(model: Committee, rows: jax.Array, targets: jax.Array) -> tuple:
 
 def retempered(model: Committee, config: dict, temperature: float,
                key) -> Committee:
-    """Exercise 2, and the price of a static field.
+    """Rebuilds `model` at a new `temperature` and grafts trained leaves onto it.
 
-    Two doors are shut before the third opens. eqx.tree_at cannot reach
+    Two direct operations fail before the third works. eqx.tree_at cannot reach
     the field: `tree_at(lambda m: m.temperature, ...)` raises
     'Operation undefined, 1.0 is not a leaf of the pytree', because a
     static field is not in the pytree at all. So the architecture is
-    REBUILT at the new temperature (throwing away a fresh weight draw)
+    rebuilt at the new temperature (throwing away a fresh weight draw)
     and the trained weights are moved onto it. But eqx.combine refuses
     that too: the old and new skeletons differ in exactly the metadata
     we changed, and combine compares metadata, reporting
@@ -136,7 +135,7 @@ def retempered(model: Committee, config: dict, temperature: float,
 
     What is left is the transplant by hand: flatten the trained arrays
     to a list and unflatten that list into the new skeleton, trusting
-    LEAF ORDER to line the two architectures up. It works here because
+    leaf order to line the two architectures up. It works here because
     the flip changed no shape. It is also the moment the config must be
     alive at the call site, since the model cannot say what it was
     built with."""
@@ -166,7 +165,7 @@ def main() -> None:
     flipped = retempered(first_trained, CONFIGS[0], RETEMPERED, key)
     shift = float(jnp.mean(jnp.abs(jax.vmap(flipped)(rows) - before)))
 
-    # exercise 3: there is no address book. The module can be PRINTED
+    # exercise 3: there is no address book. The module can be printed
     # (eqx.tree_pformat shows static fields), but a repr is not data you
     # can hand back to a builder, and nothing ties it to the config dict
     # the caller kept: the two can drift and nothing notices.

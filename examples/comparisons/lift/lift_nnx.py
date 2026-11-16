@@ -1,32 +1,32 @@
 """An attempt at a reusable lifted layer stack in idiomatic Flax NNX.
 
-This is deliberately more than ``vmap`` over parameters. ``layer_stack``
+This is deliberately more than `vmap` over parameters. `layer_stack`
 attempts to reach true feature parity with nodejax stack. It
 constructs independent layers, stores their complete NNX graphs on a leading
 axis, and scans that axis when called. Parameters and mutable Variables move
 together. A layer returns its clean value and may publish auxiliary data with
-NNX's native ``Module.sow``. A caller that wants those values wraps the stack
-with ``nnx.capture``; capture crosses the scan and stacks the sown leaves over
-depth without putting them in the sequential carry.
+NNX's native `Module.sow`. A caller that wants those values wraps the stack
+with `nnx.capture`; capture crosses the scan and stacks the captured leaves
+over depth without putting them in the sequential carry.
 
-It is reusable over a convention, not over every NNX module: ``make_layer`` is
-a closure over construction arguments and accepts one ``Rngs`` value; the
-resulting layer consumes one value and may request ``rngs=`` at apply. Aux
-needs no local return convention: it uses ``nnx.Intermediate`` and the
+It is reusable over a convention, not over every NNX module: `make_layer` is
+a closure over construction arguments and accepts one `Rngs` value; the
+resulting layer consumes one value and may request `rngs=` at apply. Aux
+needs no local return convention: it uses `nnx.Intermediate` and the
 framework's capture mechanism. NodeJAX's standard contract supplies the
 remaining construction and entropy facts without a per-transform convention;
 that difference is part of the comparison.
 
-The convention is wide enough for stock modules: ``layer_stack`` accepts
-``nnx.Linear`` unchanged, because a simple module satisfies all four
-requirements by construction. It is NOT wide enough for its own product.
-``layer_stack`` of a ``layer_stack`` raises, and the cause is the signature
-inspection below: ``LayerStack.__call__`` must declare ``rngs=`` to serve both
+The convention is wide enough for stock modules: `layer_stack` accepts
+`nnx.Linear` unchanged, because a simple module satisfies all four
+requirements by construction. It is not wide enough for its own product.
+`layer_stack` of a `layer_stack` raises, and the cause is the signature
+inspection below: `LayerStack.__call__` must declare `rngs=` to serve both
 the stochastic and deterministic cases from one Python signature, so the outer
 transform reads it as stochastic and demands a key that nothing downstream
 consumes. Recovering a member's contract by inspecting it means a transform
 cannot present that contract when it is itself the member, so the family does
-not nest. That is the criterion ``nests`` reports.
+not nest. That is the criterion `nests` reports.
 
 The comparison omits input-value priming. NNX modules are constructed eagerly,
 so a layer that needs its input shape receives it as an ordinary constructor
@@ -63,7 +63,7 @@ _MISSING = object()
 
 
 class LayerStack(nnx.Module):
-    """Stack layers satisfying this comparison's factory/call protocol."""
+    """Stacks layers satisfying this comparison's factory and call protocol."""
 
     def __init__(self, make_layer: Callable[[nnx.Rngs], nnx.Module],
                  depth: int, rngs: nnx.Rngs):
@@ -81,8 +81,8 @@ class LayerStack(nnx.Module):
             self.layers.__call__).parameters
 
     def __call__(self, value, *, rngs=_MISSING):
-        # ``sow`` must run under capture: otherwise it adds an Intermediate
-        # Variable while ``scan`` is tracing and changes the graph structure.
+        # `sow` must run under capture: otherwise it adds an Intermediate
+        # Variable while `scan` is tracing and changes the graph structure.
         # Preserve an enclosing capture so it can collect the leaf emissions;
         # install and discard a local one only for an ordinary clean call.
         def captured(stack, input, call_rngs):
@@ -119,7 +119,7 @@ class LayerStack(nnx.Module):
 
 def layer_stack(make_layer: Callable[[nnx.Rngs], nnx.Module],
                 depth: int, rngs: nnx.Rngs) -> LayerStack:
-    """Construct a sequential transform over the documented layer protocol."""
+    """Constructs a sequential transform over the documented layer protocol."""
     return LayerStack(make_layer, depth, rngs)
 
 
@@ -149,7 +149,7 @@ class NoisyStatefulLayer(nnx.Module):
 
 
 class BareLayer(nnx.Module):
-    """A deterministic layer proving that aux is not mandatory."""
+    """Scales inputs deterministically without auxiliary output."""
 
     def __init__(self, rngs: nnx.Rngs):
         self.weight = nnx.Param(
@@ -176,7 +176,7 @@ def _raises(call) -> bool:
 
 
 def _nests() -> bool:
-    """Whether layer_stack accepts its own product as a layer."""
+    """Checks whether `layer_stack` accepts its own product as a layer."""
     try:
         tower = layer_stack(
             lambda rows: layer_stack(BareLayer, 2, rows),
@@ -215,11 +215,11 @@ class StatefulLayer(nnx.Module):
 
 
 class OtherStateLayer(nnx.Module):
-    """State of NNX\'s other kind.
+    """Carries running state via `nnx.BatchStat` rather than `nnx.Variable`.
 
-    ``nnx.BatchStat`` rather than a plain ``nnx.Variable``. The distinction
-    is a Variable subclass, which is what ``nnx.StateAxes`` keys on when a
-    lifted transform gives one collection a different axis from another.
+    The distinction is a Variable subclass, which is what `nnx.StateAxes`
+    keys on when a lifted transform gives one collection a different axis
+    from another.
     """
 
     def __init__(self, rngs: nnx.Rngs):
@@ -234,7 +234,7 @@ class OtherStateLayer(nnx.Module):
 
 
 #: Each context and the module that presents it. Every module owns
-#: parameters, since a layer axis is what ``layer_stack`` ranges over.
+#: parameters, since a layer axis is what `layer_stack` ranges over.
 _CONTEXTS = (
     ('plain', BareLayer, False),
     ('rng', NoisyLayer, True),
@@ -245,7 +245,7 @@ _CONTEXTS = (
 
 
 def _contexts() -> tuple[str, ...]:
-    """Which member contexts ``layer_stack`` carries."""
+    """Reports which member contexts `layer_stack` carries."""
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)
     carried = []
     for name, make_layer, draws in _CONTEXTS:
@@ -262,10 +262,10 @@ def _contexts() -> tuple[str, ...]:
 
 
 def _state_gets_gradient() -> bool:
-    """Whether a gradient reaches the running statistic.
+    """Checks whether a gradient reaches the running statistic.
 
-    It does not. ``nnx.grad`` differentiates ``nnx.Param`` by default, and
-    the running statistic is a plain ``nnx.Variable``, so the Variable
+    It does not. `nnx.grad` differentiates `nnx.Param` by default, and
+    the running statistic is a plain `nnx.Variable`, so the Variable
     subclass is what keeps the two apart.
     """
     inputs = jnp.linspace(-1.0, 1.0, WIDTH)

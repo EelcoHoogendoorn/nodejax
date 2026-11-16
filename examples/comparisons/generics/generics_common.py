@@ -9,17 +9,17 @@ Each tower is an entry linear (4 -> width), `depth` blocks of
 the composition.
 
 Three exercises, identical in every column:
-  1. CONFIGURE LATE: the architecture is defined once with nothing
+  1. Configure late: the architecture is defined once with nothing
      decided; each config in the grid becomes a trained variant.
-  2. RECONFIGURE BUILT: the trained first variant flips its deepest
+  2. Reconfigure built: the trained first variant flips its deepest
      knob (temperature) and is evaluated again, weights kept.
-  3. READ BACK: print the configuration as data, if the framework can.
+  3. Read back: print the configuration as data, if the framework can.
 
-The measure is the CONFIG THREADING TAX: constructor parameters that
+The measure is the config threading tax: constructor parameters that
 exist only to forward a value to a deeper level unmodified, counted by
 hand per column, plus the honesty rules of the comparison files: the
 threading is explicit, no globals smuggle configuration, and where a
-framework forces something inline, the column says so loudly.
+framework forces something inline, the column says so directly.
 """
 
 import numpy as np
@@ -37,15 +37,15 @@ CONFIGS = [
 
 
 def make_data() -> tuple:
-    """The shared regression task, numpy so every framework eats it."""
+    """Generates the shared regression dataset in NumPy."""
     rows = np.random.RandomState(DATA_KEY).randn(SAMPLES, IN_DIM).astype('float32')
     targets = np.sin(rows @ np.array([1.0, -2.0, 0.5, 3.0], dtype='float32'))
     return rows, targets.reshape(-1, 1)
 
 
 def expected_parameters(config: dict) -> int:
-    """The architecture's parameter count, from the config alone: the
-    parity check that every column built the same thing."""
+    """Computes the architecture's parameter count from `config` alone as a
+    parity check across columns."""
     width = config['width']
     entry = IN_DIM * width + width
     blocks = config['depth'] * (width * width + width)
@@ -55,9 +55,9 @@ def expected_parameters(config: dict) -> int:
 
 def report(name: str, rows: list, retempered_shift: float,
            threading_tax: int) -> None:
-    """One verdict line per variant plus the census. `rows` carries
-    (config, parameter_count, first_loss, last_loss); the asserts are
-    the check, the printing is for reading."""
+    """Asserts parameter-count and convergence parity, then prints one summary
+    line per variant plus the config threading census. `rows` carries
+    (config, parameter_count, first_loss, last_loss)."""
     for config, parameters, first_loss, last_loss in rows:
         assert parameters == expected_parameters(config), (
             f'{name}: {parameters} parameters, the shared architecture '

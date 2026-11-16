@@ -31,7 +31,7 @@ def query_xent(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 class MLP(nn.Module):
-    """Stateless token predictor (`token -> logits`)."""
+    """Predicts next-token logits from a single token (`token -> logits`)."""
 
     def __init__(self, vocab: int, hidden: int):
         super().__init__()
@@ -44,7 +44,7 @@ class MLP(nn.Module):
 
 
 class RNN(nn.Module):
-    """Recurrent token predictor (`(carry, token) -> (carry, logits)`)."""
+    """Predicts next-token logits with explicit carry (`(carry, token) -> (carry, logits)`)."""
 
     def __init__(self, vocab: int, hidden: int):
         super().__init__()
@@ -66,7 +66,7 @@ def _mangle(name: str) -> str:
 
 
 class TTT(nn.Module):
-    """Reusable online gradient-adaptation wrapper over unary or carry-based `nn.Module`s."""
+    """Wraps unary or carry-based `nn.Module`s in online gradient adaptation."""
 
     def __init__(self, model: nn.Module, loss_fn, lr0: float):
         super().__init__()

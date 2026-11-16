@@ -1,27 +1,10 @@
-"""Third-order learning across a deeply transformed recurrent Node.
+"""Demonstrates third-order meta-learning across a deeply transformed recurrent Node.
 
-Each stacked residual minGRU has its own running batch statistics and performs test-time training
-inside a tied encoder and readout. The cell's state transition is contractive by construction, so
-gradient transport along the sequence stays bounded at every derivative order; the tanh after each
-cell's norm is what keeps genuine curvature in the differentiated path. The stack is scanned over a
-sequence and fine-tuned over support sequences. An ensemble of those rematerialized learners adapts
-independently before its mean is evaluated across batched tasks. An outer trainer meta-learns every
-starting value and learning rate on a freshly sampled batch of tasks each step, and a task is
-observable only through its support trajectories, so adaptation is the only route to the query.
+Stacks residual `MinGRU` blocks paired with `BatchNorm` and `tanh`, wraps each layer in `next_step_ttt` inside a `tie`-shared encoder and decoder, scans across sequences, adapts over support trajectories via `finetune`, ensembles rematerialized learners via `ensemble(remat(...))`, batches across tasks, and meta-trains every initial weight and inner learning rate end-to-end with `trained(train_step(...))`. Because smooth operations nest inner TTT, support fine-tuning, and outer meta-updates directly, third-order derivatives propagate through the entire composition.
 
-Each level is an ordinary Node transform. The inner, support and query gradients are nested exactly,
-so smooth model operations contribute genuine third-order derivatives to the outer update.
+`BatchNorm` inside each block exercises collective `'batch'` running statistics across `stack`, `tie`, `finetune`, `ensemble`, and outer `trained` scans. Its `1 / sqrt(var)` backward gain also bounds sequence length in differentiated inner loops: short streams (`STREAM = 8`) remain well-conditioned, whereas long unnormalized-gradient horizons compound normalization gains across inner updates.
 
-The batch norm in each block earns nothing as modeling; it is here as a flex of composition. Its
-running statistics are ordinary cyclic state threading stack, tie, finetune, ensemble and the outer
-training scan, with the batch axis reaching it by name through every level, and that is the point
-being made. It also marks the scaling limit of this construction: normalization's backward gain
-grows as one over the activation scale, and inside a differentiated test-time-training loop those
-gains compound. At this stream length the few crossings stay tame; pushed to stream length 128 the
-finetune landscape grows cliffs (a mild gradient at the initialization, of order 1e9 one small
-update away) and third-order training only stabilizes with the norm out of the differentiated path.
-
-Run directly: ``python -m examples.third_order_learning``
+Run directly via `python -m examples.third_order_learning`.
 """
 
 import jax
@@ -70,12 +53,12 @@ META_RATE = 0.02
 
 @node
 def Encoder(features: int, width: int) -> Node:
-    """Map an observation into the recurrent width using one shared matrix."""
-    def param(rng):
+    """Projects `features`-dimensional observations into `width` features."""
+    def param(rng) -> Struct:
         scale = jnp.sqrt(features)
         return Struct(weight=jax.random.normal(rng.next(), (features, width)) / scale)
 
-    def apply(param, input):
+    def apply(param, input) -> jax.Array:
         return input @ param.weight
 
     return Leaf(apply, param=param)
@@ -83,12 +66,12 @@ def Encoder(features: int, width: int) -> Node:
 
 @node
 def Decoder(features: int, width: int) -> Node:
-    """Map back with the transpose of the encoder matrix supplied by ``tie``."""
-    def param(rng):
+    """Projects `width` features back to `features` via the transposed matrix shared under `tie`."""
+    def param(rng) -> Struct:
         scale = jnp.sqrt(features)
         return Struct(weight=jax.random.normal(rng.next(), (features, width)) / scale)
 
-    def apply(param, input):
+    def apply(param, input) -> jax.Array:
         return input @ param.weight.T
 
     return Leaf(apply, param=param)
@@ -119,12 +102,12 @@ def third_order_learning() -> Node:
     return trained(outer)
 
 
-# Synthetic input data for the dynamical-system task. Nothing below builds Nodes.
+# Synthetic input data for the dynamical-system task.
 
 
 def make_sequence(matrix: jax.Array, initial: jax.Array) -> jax.Array:
-    """Generate one trajectory of ``state = tanh(matrix @ state)``."""
-    def step(state, unused: None) -> tuple[jax.Array, jax.Array]:
+    """Generates one trajectory of `state_next = tanh(matrix @ state)`."""
+    def step(state: jax.Array, unused: None) -> tuple[jax.Array, jax.Array]:
         next_state = jnp.tanh(matrix @ state)
         return next_state, next_state
 
@@ -133,10 +116,7 @@ def make_sequence(matrix: jax.Array, initial: jax.Array) -> jax.Array:
 
 
 def make_tasks(rng: jax.Array) -> tuple[Struct, jax.Array]:
-    """Sample one batch of dynamical-system tasks per meta step.
-
-    A task is a random matrix rescaled to a fixed spectral radius. Its
-    identity is observable only through the support trajectories."""
+    """Samples one batch of random contraction-matrix dynamical tasks per meta step."""
     matrix_rng, support_rng, query_rng = jax.random.split(rng, 3)
     matrices = jax.random.uniform(
         matrix_rng,

@@ -30,7 +30,7 @@ def query_xent(preds: jax.Array, target: jax.Array) -> jax.Array:
 
 
 class MLP(hk.Module):
-    """Stateless Haiku token predictor (`token -> logits`)."""
+    """Predicts next-token logits from a single token (`token -> logits`)."""
 
     def __init__(self, vocab: int, hidden: int):
         super().__init__(name='mlp')
@@ -52,7 +52,7 @@ class MLP(hk.Module):
 
 
 class RNN(hk.Module):
-    """Stateful Haiku token predictor storing hidden carry via `hk.get_state`."""
+    """Predicts next-token logits while storing hidden carry via `hk.get_state`."""
 
     def __init__(self, vocab: int, hidden: int):
         super().__init__(name='rnn')
@@ -77,7 +77,7 @@ class RNN(hk.Module):
 
 
 class TTT(hk.Module):
-    """Reusable online gradient-adaptation wrapper over any single-token Haiku callable."""
+    """Wraps any single-token Haiku callable in online gradient adaptation."""
 
     def __init__(self, step_fn: Callable[[jax.Array], jax.Array],
                  loss_fn: Callable, lr0: float):

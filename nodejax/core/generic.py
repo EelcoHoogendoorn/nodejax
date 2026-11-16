@@ -1,21 +1,33 @@
-"""Deferred factory calls with unbound static arguments."""
+"""Open `Generic` blueprints representing `@node` calls with unbound statics.
+
+Calling a `@node` factory or `@transform` with omitted static parameters (or
+with nested `Generic` arguments) produces a `Generic` value rather than raising
+immediately. `Generic.specialize` overlays dotted static overrides and wildcard
+defaults (`'*.dtype'`), returning another `Generic` while unbound static
+arguments remain and building the concrete Node view as soon as the last static
+argument is bound.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Callable
 
 from nodejax.frozendict import frozendict
 from nodejax.core.binding import REQUIRED, _unflatten_dot_paths
+from nodejax.core.types import PyTree
 from nodejax.struct import Struct
 
+if TYPE_CHECKING:
+    from nodejax.core.node import BaseNode
 
-def is_generic(value: Any) -> bool:
-    """Return whether ``value`` is a deferred factory call."""
+
+def is_generic(value: object) -> bool:
+    """Reports whether `value` is an open `Generic` blueprint."""
     return type(value) is Generic
 
 
-def _unbound(value: Any, prefix: str = '') -> tuple[str, ...]:
+def _unbound(value: PyTree, prefix: str = '') -> tuple[str, ...]:
     if value is REQUIRED:
         return (prefix.rstrip('.'),)
     if is_generic(value):
@@ -28,8 +40,8 @@ def _unbound(value: Any, prefix: str = '') -> tuple[str, ...]:
     return ()
 
 
-def _overlay(value: Any, changes: Any, wilds: dict[str, Any], path: str) -> Any:
-    """Overlay one recursive construction value without dropping siblings."""
+def _overlay(value: PyTree, changes: PyTree, wilds: dict[str, PyTree],
+             path: str) -> PyTree:
     if is_generic(value):
         nested = changes if issubclass(type(changes), Mapping) else {}
         if changes is not None and not issubclass(type(changes), Mapping):
@@ -62,27 +74,26 @@ def _overlay(value: Any, changes: Any, wilds: dict[str, Any], path: str) -> Any:
 
 
 class Generic:
-    """A factory call whose static arguments are not all bound yet."""
+    """Represents a deferred `@node` or `@transform` call with unbound static arguments."""
 
-    def __init__(self, name: str, factory: Callable, statics: Struct):
+    def __init__(self, name: str, factory: Callable, statics: Struct) -> None:
         self.name = name
         self.factory = factory
         self.statics = statics
 
     @property
     def generic(self) -> bool:
-        """Whether this value represents an unfinished construction."""
         return True
 
     def unbound(self) -> tuple[str, ...]:
-        """Return dot-separated paths of missing static arguments."""
+        """Returns the dotted paths of all static arguments still awaiting values."""
         out = []
         for name, value in self.statics.__items__:
             out.extend(_unbound(value, f'{name}.'))
         return tuple(out)
 
-    def specialize(self, **overrides: Any) -> Any:
-        """Apply static overrides and rerun the factory when complete."""
+    def specialize(self, **overrides: PyTree) -> BaseNode | Generic:
+        """Applies static `overrides` and builds the Node once no unbound statics remain."""
         wilds = {key[2:]: value for key, value in overrides.items()
                  if key.startswith('*.')}
         named = _unflatten_dot_paths({key: value for key, value in overrides.items()
@@ -108,41 +119,38 @@ class Generic:
         built = self.factory(**{**dict(self.statics.__items__), **take})
         if is_generic(built):
             return built
-        # Specialization returns an unbound definition view.
         node = built.node if built.bound else built
         return node
 
     def statics_by_path(self) -> frozendict:
-        """Return the flattened static argument graph."""
+        """Returns a flattened `frozendict` of bound and unbound static paths."""
         from nodejax.core.printing import statics_by_path
         return statics_by_path(self)
 
     def describe(self) -> str:
-        """Describe the deferred construction."""
+        """Formats a multi-line structural description of this `Generic` blueprint."""
         from nodejax.core.printing import describe
         return describe(self)
 
     def tree_view(self) -> str:
-        """Render the static argument graph as a tree."""
+        """Renders the static argument hierarchy of this `Generic` blueprint as an ASCII tree."""
         from nodejax.core.printing import tree_view
         return tree_view(self)
 
     def summary(self) -> str:
-        """Summarize the construction and its missing arguments."""
+        """Formats a compact one-block summary of this `Generic` and its unbound statics."""
         from nodejax.core.printing import summary
         return summary(self)
 
-    def __rshift__(self, other: Any) -> Any:
-        """Compose while deferring the resulting construction."""
+    def __rshift__(self, other: BaseNode | Generic) -> BaseNode | Generic:
         from nodejax.core.compose import _compose
         return _compose(self, other)
 
-    def __rrshift__(self, other: Any) -> Any:
+    def __rrshift__(self, other: BaseNode | Generic) -> BaseNode | Generic:
         from nodejax.core.compose import _compose
         return _compose(other, self)
 
-    def __getattr__(self, requested: str) -> Any:
-        """Reject Node operations until all statics are bound."""
+    def __getattr__(self, requested: str):
         if requested.startswith('__'):
             raise AttributeError(requested)
         raise TypeError(

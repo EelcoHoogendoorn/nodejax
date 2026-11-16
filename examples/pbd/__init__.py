@@ -1,4 +1,4 @@
-"""Position-Based Dynamics (PBD) and Extended PBD (XPBD) using NodeJAX transforms."""
+"""Implements Position-Based Dynamics (PBD) and Extended PBD (XPBD) solvers with NodeJAX transforms."""
 
 from examples.pbd.core import (
     Constraint,

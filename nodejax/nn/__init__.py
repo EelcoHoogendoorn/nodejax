@@ -1,23 +1,4 @@
-"""nodejax.nn: stock neural blocks with input shapes inferred.
-
-Factories return Nodes that participate in the same shape resolution,
-composition, and transform APIs whether or not they own params or state.
-
-Organized into modular subfiles:
-- linear: Linear, Projection, Reshape, flat
-- activations: gelu, relu, silu, sigmoid, tanh, elu, leaky_relu,
-  softplus, softmax, log_softmax, identity
-- norm: LayerNorm, RMSNorm, L2Norm, BatchNorm, Whiten
-- conv: Conv, ConvTranspose
-- spatial: MaxPool, AvgPool, GlobalAvgPool, Upsample, Downsample
-- attention: Attention, TransformerBlock, PosEmbed, tokens
-- mlp: MLP, SwiGLU, MoE
-- embeddings: OneHot, Embed, Unembed
-- recurrent: RNN, GRU, MinGRU, LSTM
-- stochastic: Dropout, DropPath, GaussianNoise
-- filtering: EMA
-- mode: eval_mode
-"""
+"""Provides neural network Leaf and Composite factories with input shapes inferred at bind time."""
 
 from nodejax.nn.linear import Linear, Projection, flat, Reshape
 from nodejax.nn.activations import (

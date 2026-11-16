@@ -34,7 +34,7 @@ def query_xent(out: jax.Array, target: jax.Array) -> jax.Array:
 
 @node
 def MLP(vocab: int, hidden: int) -> Node:
-    """Stateless token predictor (`input -> logits`)."""
+    """Maps each input token to next-token logits without carried state."""
     def param(rng: KeyStream) -> Struct:
         return Struct(
             embed=0.3 * jax.random.normal(rng.next(), (vocab, hidden)),
@@ -50,7 +50,7 @@ def MLP(vocab: int, hidden: int) -> Node:
 
 @node
 def RNN(vocab: int, hidden: int) -> Node:
-    """Recurrent token predictor carrying hidden state alongside fast weights."""
+    """Carries a recurrent hidden vector alongside fast-weight parameters."""
     def param(rng: KeyStream) -> Struct:
         return Struct(
             embed=0.3 * jax.random.normal(rng.next(), (vocab, hidden)),
@@ -70,7 +70,7 @@ def RNN(vocab: int, hidden: int) -> Node:
 
 
 def ttt_meta(model: Node) -> tuple[Node, Node]:
-    """Build both the batched sequence predictor and its outer meta-trainer."""
+    """Builds both the batched sequence predictor and its outer meta-trainer."""
     cell = next_step_ttt(train_step(model, xent, learned_sgd(TTT_LR0)))
     batched = batch(scanned(cell))
     return batched, train_step(batched, query_xent, optax.adam(META_LR))

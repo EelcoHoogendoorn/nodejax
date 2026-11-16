@@ -1,4 +1,4 @@
-"""Elementwise activation function blocks."""
+"""Defines elementwise activation and softmax Leaf nodes."""
 
 from __future__ import annotations
 

@@ -1,14 +1,24 @@
-"""One-member structure-first construction."""
+"""Single-member transparent `Wrapper` construction for transforms and decorators.
+
+`Wrapper(inner=member)` declares one child Node whose parameter, state, method,
+and nested-member surfaces pass straight through the wrapper without adding an
+extra `Struct` nesting level. Calling `Wrapped(step, ...)` attaches authored
+`(self, ...)` behavior, whereas `Wrapped.roles(...)` and `Wrapped(contract=...)`
+override individual T3 roles or T4 `ContractCalls`.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from typing import Callable
 
 from nodejax.core.composite import _promote_members
 from nodejax.core.contract import ContractCalls, _KEEP
 from nodejax.core.definition import Captures, Def, Layout
 from nodejax.frozendict import frozendict
-from nodejax.core.node import _is_node, _view
+from nodejax.core.generic import Generic
+from nodejax.core.node import BaseNode, _is_node, _view
+from nodejax.core.types import PyTree
 from nodejax.struct import Struct
 
 
@@ -16,7 +26,6 @@ _EMPTY_MAPPING = frozendict()
 
 
 def _resolved_member(definition: Def, name: str) -> Def:
-    """Resolve only a member whose own input evidence is still unknown."""
     member = getattr(definition.members, name)
     shape = definition.contract.input_spec
     if shape is None or member.contract.input_spec is not None:
@@ -61,7 +70,6 @@ def _transparent_calls(member_name: str, member: Def) -> ContractCalls:
 
 def _delegate_inherited_calls(member_name: str, member: Def,
                               calls: ContractCalls) -> ContractCalls:
-    """Pass the child Def to unchanged calls and the wrapper Def to replacements."""
     delegated = _transparent_calls(member_name, member)
     original = member.calls
 
@@ -81,15 +89,14 @@ def _delegate_inherited_calls(member_name: str, member: Def,
 
 def _transparent_def(member_name: str, member: Def, *, name: str,
                      captures: Captures,
-                     tags=None, boundaries: Mapping = _EMPTY_MAPPING,
-                     methods: Mapping = _EMPTY_MAPPING,
-                     destructurable=True, destructurable_state=True,
+                     tags: Iterable[str] | None = None,
+                     boundaries: Mapping[str, Callable] = _EMPTY_MAPPING,
+                     methods: Mapping[str, Callable] = _EMPTY_MAPPING,
+                     destructurable: bool = True,
+                     destructurable_state: bool = True,
                      externalized_param_paths: frozenset[str] = (
                          frozenset())) -> Def:
-    """A transparent wrapper's tags are the member's own unless replaced.
-    It declares no methods of the member's: attribute lookup on a view or
-    a member handle passes through to the member, which binds its own
-    methods to the shared slots."""
+    """Builds a transparent `Def` that inherits `member`'s tags and delegates member methods."""
     members = Struct(**{member_name: member})
 
     def bind(replacements):
@@ -121,23 +128,33 @@ def _transparent_def(member_name: str, member: Def, *, name: str,
 
 
 class Wrapped:
-    def __init__(self, member_name: str, operand):
+    """Holds the single named child Node declared via `Wrapper(name=member)`."""
+
+    def __init__(self, member_name: str, operand: BaseNode | Generic) -> None:
         self.member_name = member_name
         self.operand = operand
 
     def roles(self, *, param=None, init=None, prime=None, apply=None,
-              name=None, requires_input=None, state_fields: tuple[str, ...] = (),
-              param_takes_rng=None, init_takes_rng=None,
-              apply_takes_rng=None, input_spec=_KEEP,
-              apply_fields=None, open: bool = False,
-              tags=None, boundary: Mapping = _EMPTY_MAPPING,
-              methods: Mapping = _EMPTY_MAPPING,
-              destructurable=True, destructurable_state=True,
-              externalized_param_paths: frozenset[str] = frozenset()):
-        """Build a wrapper by replacing roles with ordinary T3 functions.
+              name: str | None = None,
+              requires_input: bool | None = None,
+              state_fields: tuple[str, ...] = (),
+              param_takes_rng: bool | None = None,
+              init_takes_rng: bool | None = None,
+              apply_takes_rng: bool | None = None,
+              input_spec: PyTree = _KEEP,
+              apply_fields: tuple[str, ...] | None = None,
+              open: bool = False,
+              tags: Iterable[str] | None = None,
+              boundary: Mapping[str, Callable] = _EMPTY_MAPPING,
+              methods: Mapping[str, Callable] = _EMPTY_MAPPING,
+              destructurable: bool = True,
+              destructurable_state: bool = True,
+              externalized_param_paths: frozenset[str] = frozenset()) -> BaseNode:
+        """Builds a transparent wrapper by overriding selected T3 contract roles.
 
-        ``requires_input`` can promote an inherited init into a prime, or
-        demote a prime into an init, when that replacement role is supplied.
+        Setting `requires_input` switches an inherited initializer between cold
+        `init` and input-dependent `prime` when the matching replacement callable
+        is supplied.
         """
         if not _is_node(self.operand):
             raise TypeError('Wrapper.roles requires a complete member Node')
@@ -183,11 +200,16 @@ class Wrapped:
 
         return _view(definition.copy(calls=calls, tree=bind))
 
-    def __call__(self, apply=None, *, init=None, name=None, contract=None,
-                 tags=None, boundary: Mapping = _EMPTY_MAPPING,
-                 methods: Mapping = _EMPTY_MAPPING,
-                 destructurable=True, destructurable_state=True,
-                 rng_from=None, input_spec=None):
+    def __call__(self, apply: Callable | None = None, *, init=None,
+                 name: str | None = None, contract: ContractCalls | None = None,
+                 tags: Iterable[str] | None = None,
+                 boundary: Mapping[str, Callable] = _EMPTY_MAPPING,
+                 methods: Mapping[str, Callable] = _EMPTY_MAPPING,
+                 destructurable: bool = True,
+                 destructurable_state: bool = True,
+                 rng_from: bool | None = None,
+                 input_spec: PyTree = None) -> BaseNode | Generic:
+        """Attaches authored `(self, ...)` behavior, metadata overrides, or `contract` calls."""
         if apply is not None:
             if (contract is not None or tags is not None
                     or boundary or methods):
@@ -237,7 +259,9 @@ class Wrapped:
 
 
 class _WrapperDoor:
-    def __call__(self, *unnamed, **named):
+    """Declares a single transparent member (`Wrapper(inner=member)`) and returns `Wrapped`."""
+
+    def __call__(self, *unnamed, **named: BaseNode | Generic) -> Wrapped:
         if unnamed or len(named) != 1:
             raise TypeError('Wrapper names exactly one member')
         (name, member), = named.items()
