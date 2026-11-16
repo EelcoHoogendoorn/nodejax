@@ -103,12 +103,13 @@ def test_stack_assembly():
     assert act.current_ctrl.fets == 25.0
     assert act.motor_thermal == 25.0
     assert act.mechanical_est.observer.velocity == 0.0
-    # Each stochastic sensor member receives an independent PRNG stream split from the root key.
-    keys = [act.current_ctrl.bus_est.noisy.rng, act.mechanical_est.encoder.rng,
-            act.current_ctrl.estimator.filter.current_sensor.rng]
-    assert jnp.any(keys[0] != keys[1]) and jnp.any(keys[1] != keys[2])
+    # Stochastic sensors draw call-time keys rather than carrying PRNG state leaves.
+    assert env.contract.apply_takes_rng
+    assert 'noisy' not in act.current_ctrl.bus_est
+    assert 'encoder' not in act.mechanical_est
+    assert 'current_sensor' not in act.current_ctrl.estimator.filter
 
-    assert len(jax.tree.leaves(state)) >= 20
+    assert len(jax.tree.leaves(state)) >= 17
 
     paths = {jax.tree_util.keystr(p)
              for p, _ in jax.tree_util.tree_flatten_with_path(env)[0]}

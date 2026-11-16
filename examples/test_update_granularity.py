@@ -17,7 +17,7 @@ without referencing internal state field names.
 
 import jax.numpy as jnp
 
-from nodejax import Leaf, Node, PNode, freeze, node, scan, scanned
+from nodejax import Leaf, PNode, freeze, node, scan, scanned
 from nodejax.struct import Struct
 
 MOMENTUM = 0.5

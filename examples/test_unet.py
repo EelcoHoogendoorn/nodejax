@@ -14,11 +14,8 @@ before decoding:
 import jax
 import jax.numpy as jnp
 import optax
-import pytest
 
-from nodejax import node, trained, Node, Composite, batch, train_step, nn
-from nodejax.struct import Struct
-from nodejax import tile
+from nodejax import node, trained, Node, Composite, batch, train_step, nn, tile
 
 
 @node

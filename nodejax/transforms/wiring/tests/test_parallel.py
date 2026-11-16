@@ -20,16 +20,6 @@ def Primed():
     return Leaf(apply, init=init, name='primed').node
 
 
-def Streamy():
-    def init(rng):
-        return Struct(rng=rng)
-
-    def apply(state, input):
-        return state, input
-
-    return Leaf(apply, init=init, name='streamy').node
-
-
 def test_parallel_routes_strands():
     block = parallel(x=Gain(), y=ident).parameterize(x=Struct(scale=jnp.asarray(2.0)))
     out = block.apply(x=jnp.asarray(3.0), y=jnp.asarray(7.0))
@@ -76,15 +66,3 @@ def test_state_bound_primer_is_a_finished_state_slot():
     assert not block.contract.init_requires_input
     assert jnp.allclose(block.init().p, 7.0)
     assert jnp.allclose(block.init(p=jnp.asarray(2.0)).p, 2.0)
-
-
-def test_stored_parallel_rng_is_rekeyed():
-    original = jax.random.PRNGKey(7)
-    stored = Streamy().bind(state=Struct(rng=original))
-    block = parallel(s=stored, g=Gain()).parameterize(
-        g=Struct(scale=1.0))
-
-    with pytest.raises(TypeError, match='rng'):
-        block.init()
-    state = block.init(rng=jax.random.PRNGKey(1))
-    assert not jnp.array_equal(state.s.rng, original)

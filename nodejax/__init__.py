@@ -34,7 +34,7 @@ from nodejax.core.printing import (
 )
 from nodejax.core.ambient import ambient, node
 from nodejax.core.compose import serial
-from nodejax import control
+from nodejax import control, nn
 from nodejax.control import closed_loop, observed_loop
 from nodejax.core.spec import spec, spec_of, materialize
 
@@ -51,7 +51,7 @@ __all__ = [
     # authoring
     'node', 'ambient', 'Leaf', 'derive',
     # submodules
-    'control',
+    'control', 'nn',
     # transforms
     'batch', 'unbatched', 'ensemble', 'reduce', 'stack', 'drop_aux', 'remat', 'repeat', 'repeated', 'iterated', 'scan', 'scanned', 'carried', 'residual', 'train_step', 'trained', 'supervised_ttt', 'next_step_ttt', 'reconstruction_ttt',
     'finetune', 'tie', 'taps', 'cyclic', 'externalize', 'parallel', 'sum_junction', 'state_reinit', 'at',

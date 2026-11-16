@@ -22,8 +22,8 @@ import jax.numpy as jnp
 import optax
 from sklearn.datasets import load_digits
 
-from nodejax import (Generic, node, trained, scan, PNode, Node, nn, Leaf, serial, stack, residual,
-                     batch, train_step, ambient, KeyStream)
+from nodejax import (Generic, node, trained, PNode, Node, nn, Leaf, serial, stack, residual,
+                     batch, train_step, ambient)
 from nodejax.struct import Struct
 
 IMAGE, STEM, HIDDEN, HEADS, DEPTH = 8, 16, 32, 4, 2

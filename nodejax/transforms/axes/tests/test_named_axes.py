@@ -141,7 +141,7 @@ def test_unbatched_binds_its_named_axis_during_construction() -> None:
         rng=jax.random.PRNGKey(0)
     ).initialize(input=input)
 
-    stacked_state = model.state.stack_primed_batch_norm
+    stacked_state = model.state.stack
     successor, output = model(input)
 
     assert normalizer.state.mean.shape == (3,)
@@ -150,7 +150,7 @@ def test_unbatched_binds_its_named_axis_during_construction() -> None:
     assert stacked_state.primed.shape == (2, 3)
     assert stacked_state.batch_norm.mean.shape == (2, 3)
     assert stacked_state.batch_norm.var.shape == (2, 3)
-    assert successor.state.stack_primed_batch_norm.primed.shape == (2, 3)
+    assert successor.state.stack.primed.shape == (2, 3)
     assert output.shape == (2,)
 
 

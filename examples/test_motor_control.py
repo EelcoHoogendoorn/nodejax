@@ -87,9 +87,9 @@ def test_assembly() -> None:
 
     node = loop.with_input(jnp.zeros(1)).parameterize(rng=jax.random.PRNGKey(0))
     # `closed_loop` stores the controlled chain under `pipe` alongside its feedback register.
-    committee = node.param.pipe.ensemble_linear_stack_res_gru_projection
+    committee = node.param.pipe.ensemble
     assert committee.linear.w.shape == (MEMBERS, 1, HIDDEN)
-    update_weight = committee.stack_res_gru.update_weight
+    update_weight = committee.stack.update_weight
     assert update_weight.shape == (MEMBERS, DEPTH, 2 * HIDDEN, HIDDEN)
     assert not jnp.allclose(update_weight[0], update_weight[1])
     assert not jnp.allclose(update_weight[0, 0], update_weight[0, 1])
@@ -106,14 +106,14 @@ def test_assembly() -> None:
     deep = (
         nn.Linear(HIDDEN) >> stack(residual(nn.GRU(HIDDEN)), n=DEPTH)
     ).with_input(jnp.zeros(1)).parameterize(rng=jax.random.PRNGKey(1))
-    assert deep.init().stack_res_gru.shape == (DEPTH, HIDDEN)
+    assert deep.init().stack.shape == (DEPTH, HIDDEN)
 
     state = node.init()
 
-    committee_state = state.pipe.ensemble_linear_stack_res_gru_projection
-    assert committee_state.stack_res_gru.shape == (MEMBERS, DEPTH, HIDDEN)
+    committee_state = state.pipe.ensemble
+    assert committee_state.stack.shape == (MEMBERS, DEPTH, HIDDEN)
     assert state.pipe.motor.current.shape == ()
-    assert 'reduce_mean' not in state.pipe
+    assert 'reduce' not in state.pipe
     assert state.last.shape == ()
 
 
@@ -127,8 +127,8 @@ def test_closed_loop_training() -> None:
     targets = refs[..., 0]
     model = fleet.with_input(refs).parameterize(rng=jax.random.PRNGKey(0))
 
-    committee = model.param.pipe.ensemble_linear_stack_res_gru_projection
-    update_weight = committee.stack_res_gru.update_weight
+    committee = model.param.pipe.ensemble
+    update_weight = committee.stack.update_weight
     assert update_weight.shape == (MEMBERS, DEPTH, 2 * HIDDEN, HIDDEN)
 
     # Each optimizer step unrolls a `T`-timestep episode across all setpoints.

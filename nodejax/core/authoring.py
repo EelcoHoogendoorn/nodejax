@@ -223,7 +223,8 @@ def derive(parent: BaseNode, *, apply: Callable | None = None,
            init: Callable | None = None, param: Callable | None = None,
            name: str | None = None, apply_input_spec: PyTree = None,
            methods: Mapping[str, Callable] = _EMPTY_MAPPING,
-           tags: Iterable[str] | None = None) -> Node | PNode:
+           tags: Iterable[str] | None = None,
+           boundary: Mapping[str, Callable] = _EMPTY_MAPPING) -> Node | PNode:
     """Extends an unbound leaf Node by merging disjoint `Struct` constructor fragments.
 
     Omitted roles are inherited from `parent`; when both `parent` and `derive`
@@ -284,6 +285,9 @@ def derive(parent: BaseNode, *, apply: Callable | None = None,
             **dict(methods),
         }),
         tags=parent.tags | (frozenset() if tags is None else frozenset(tags)),
-        boundaries=parent._def.boundaries,
+        boundaries=frozendict({
+            **dict(parent._def.boundaries),
+            **dict(boundary),
+        }),
     )
     return Node(definition) if param_call is not None else PNode(definition, ())

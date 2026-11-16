@@ -28,7 +28,7 @@ Transforms act on `apply` and ignore auxiliary methods. Whenever an operation su
 Control systems decompose along physical and signal boundaries, and each stateful element owns the state that evolves inside it. An `Integrator` owns its accumulator, a `Delay` owns its one-step register, and a plant owns its physical coordinates. Closing a unit-feedback loop combines an open-loop pipe with a `Delay` register inside a `Composite`:
 
 ```python
-@node(name='loop')
+@node
 def closed_loop(pipe: Node, output_spec: Any = 0.0) -> Node:
     def apply(self, input):
         error = jax.tree.map(jnp.subtract, input, self.last.state)
@@ -207,9 +207,9 @@ print(rollout.with_input(jnp.zeros((4, 16, 1))).tree_view())
 ```
 
 ```text
-batch(scanned(loop))
-└── sample: scanned(loop) [P]
-    └── step: loop [PC]
+batch(scanned(closed_loop))
+└── sample: scanned(closed_loop) [P]
+    └── step: closed_loop [PC]
         ├── pipe: (controller >> plant) [PC]
         │   ├── controller: (committee >> vote) [PC]
         │   │   ├── committee: ensemble((in_proj >> rnn >> readout)) [PC]

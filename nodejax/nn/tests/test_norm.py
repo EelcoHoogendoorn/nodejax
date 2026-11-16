@@ -294,10 +294,10 @@ def test_streamed_rnn_normed_both_ways() -> None:
     stream_norm = batch(nn.BatchNorm(MOMENTUM, axis=('batch', 'stream')), axis='stream')
     pooled_pipe = recurrent >> stream_norm
     pooled = batch(pooled_pipe).parameterize().initialize(input=sequences)
-    assert pooled.state.batch_batch_norm.mean.shape == (hidden,)
+    assert pooled.state.batch.mean.shape == (hidden,)
     successor, output = pooled.apply(sequences)
     assert output.shape == (batch_size, stream, hidden)
-    assert jnp.allclose(successor.state.batch_batch_norm.mean,
+    assert jnp.allclose(successor.state.batch.mean,
                         MOMENTUM * jnp.mean(pre_norm, axis=(0, 1)), atol=1e-6)
 
 

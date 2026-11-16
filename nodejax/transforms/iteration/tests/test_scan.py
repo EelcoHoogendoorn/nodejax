@@ -184,15 +184,14 @@ def test_apply_rng_nodes_are_scannable():
 
 
 def test_both_homes_of_entropy_under_one_scan():
-    """Verifies that `scanned` serves both `state.rng` initialization and per-step `apply` PRNG draws."""
+    """Verifies that `scanned` serves both `init` PRNG draws and per-step `apply` PRNG draws."""
     def Both():
         def init(rng):
-            return Struct(rng=rng, n=jnp.zeros(()))
+            return Struct(bias=jax.random.normal(rng.next()), n=jnp.zeros(()))
 
         def apply(state, x, rng):
-            streamed = jax.random.normal(state.rng)
             drawn = jax.random.normal(rng.next())
-            return state.replace(n=state.n + 1.0), streamed + drawn + x
+            return state.replace(n=state.n + 1.0), state.bias + drawn + x
 
         return Leaf(apply, init=init, name='both')
 

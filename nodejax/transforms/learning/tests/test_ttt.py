@@ -135,12 +135,12 @@ def test_both_deep_compositions_just_work():
     node = node.initialize(input=data[0])
     state, out = scan(node.pnode).apply(node.state, data)
     _, aux = out
-    losses = aux.ttt_train_step_stack_rnn.loss
+    losses = aux.ttt.loss
     assert losses[-1] < 0.3 * losses[1]
-    fast = state.ttt_train_step_stack_rnn
+    fast = state.ttt
     drift = jnp.max(jnp.abs(
         fast.opt.params.model.wx
-        - node.param.ttt_train_step_stack_rnn.objective.model.wx), axis=1)
+        - node.param.ttt.objective.model.wx), axis=1)
     assert drift.shape == (2,) and bool(jnp.all(drift > 0))
     assert fast.objective.model.shape == (2, 4)
     assert bool(jnp.any(fast.objective.model != 0))
@@ -162,7 +162,7 @@ def test_next_step_ttt_learns_the_shift():
     signal = jnp.tile(jnp.array([-1.0, 1.0]), 10)
     bound = cell.initialize(input=signal[0])
     final, _ = scan(bound).apply(signal)
-    assert float(final.state.ttt_train_step_g.opt.params.model.scale) < -0.9
+    assert float(final.state.ttt.opt.params.model.scale) < -0.9
 
 
 def test_next_step_deep_compositions_just_work():
@@ -175,11 +175,11 @@ def test_next_step_deep_compositions_just_work():
     bound = deep.initialize(input=signal[0])
     final, _ = scan(bound).apply(signal)
     assert abs(float(jnp.prod(
-        final.state.ttt_train_step_stack_lin.opt.params.model.w)) + 1.0) < 1e-2
+        final.state.ttt.opt.params.model.w)) + 1.0) < 1e-2
 
     cell = next_step_ttt(train_step(Lin(), mse, learned_sgd(0.2)))
     layered = stack(cell, n=3)
     bound = layered.parameterize(rng=jax.random.PRNGKey(0)).initialize(input=signal[0])
     final, _ = scan(bound).apply(signal)
     assert bool(jnp.all(
-        final.state.ttt_train_step_lin.opt.params.model.w < -0.9))
+        final.state.ttt.opt.params.model.w < -0.9))

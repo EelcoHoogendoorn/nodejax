@@ -93,7 +93,8 @@ def scenario_cost(plant: PNode, command: jax.Array) -> Struct:
     def one_start(angle):
         state = plant.init(rng=jax.random.PRNGKey(0), start=plant.start(angle=angle, target=TARGET))
         program = scan(plant, n=N_STEPS).bind(state=state)
-        _, outputs = program.apply(command=command, disturbance=jnp.zeros((N_STEPS,)))
+        _, outputs = program.apply(
+            command=command, disturbance=jnp.zeros((N_STEPS,)), rng=jax.random.PRNGKey(1))
         outputs, _ = split_aux(outputs)
         true = plant.mechanical(state=outputs.state)
         estimate = outputs.state.actuator.mechanical_est.observer.velocity
@@ -111,14 +112,18 @@ def tune(base: PNode, n_generations: int = N_GENERATIONS, population: int = POPU
     def fitness(candidate: PNode, element: Struct) -> jax.Array:
         return scenario_cost(tuned_plant(base, candidate.param), element.input).total
 
+    init_key, scan_key = jax.random.split(jax.random.PRNGKey(0))
     trainer = evolve(
         initial_genome(base), fitness,
         differential_evolution(population=population, spread=0.5, bounds=LOG_BOUNDS),
-        rng=jax.random.PRNGKey(0),
+        rng=init_key,
     )
     command = stroke_commands()
     advanced, (_, aux) = trainer.scan(
-        input=tile(command, n_generations), target=tile(jnp.zeros(()), n_generations))
+        input=tile(command, n_generations),
+        target=tile(jnp.zeros(()), n_generations),
+        rng=scan_key,
+    )
     champion = advanced.state.opt.params
     return Struct(
         tuned=jax.tree.map(jnp.exp, champion),

@@ -46,7 +46,7 @@ def min_ensemble_pendulum_value() -> Node:
 
 def min_ensemble_value_loss(reduced_value, target, *, aux) -> jax.Array:
     """Computes mean squared error across all ensemble member value predictions against `target`."""
-    member_values = aux.reduce_min.population
+    member_values = aux.reduce.population
     return mse(member_values, target[..., None])
 
 

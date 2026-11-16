@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import PNode, node, trained, Leaf, batch, unbatched, scan, train_step, nn, Node
+from nodejax import PNode, node, trained, Leaf, batch, unbatched, train_step, nn, Node
 from nodejax.struct import Struct
 
 TRAIN_IDS, TEST_IDS = 64, 24

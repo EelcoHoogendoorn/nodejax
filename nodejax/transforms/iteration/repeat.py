@@ -15,7 +15,7 @@ from nodejax.core.binding import split_aux
 from nodejax.core.node import Node
 from nodejax.core.wrapper import Wrapper
 from nodejax.transforms.iteration.scan import (
-    _given_start, _run_takes_rng, _split_state_fields,
+    _run_takes_rng, _split_state_fields,
 )
 from nodejax.transforms.transform import transform
 
@@ -85,7 +85,7 @@ def repeated(step: Node, n: int) -> Node:
         state_input, start = _split_state_fields(input, fields)
         first = current.intake(start)
         if state is not None:
-            initial = _given_start(current, state, rng)
+            initial = current._dense_state(state)
         elif current.cyclic:
             initial = current.prime(
                 param, state_input, first, rng.child(current.init_takes_rng))

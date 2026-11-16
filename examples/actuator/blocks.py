@@ -48,6 +48,18 @@ def Observer(dt: float) -> Node:
 
 
 @node
+def ClampNorm() -> Node:
+    """Clamps a `DQ` vector to Euclidean radius `limit` via `DQ.clamp_norm`."""
+    def param(limit: float = 1.0) -> Struct:
+        return Struct(limit=limit)
+
+    def apply(param, input: DQ) -> DQ:
+        return input.clamp_norm(param.limit)
+
+    return Leaf(apply, param=param)
+
+
+@node
 def Encoder() -> Node:
     """Simulates a quantized absolute rotary encoder with phase offset and additive count noise."""
     def param(resolution: float = 2000.0, noise_std: float = 0.1,
@@ -55,17 +67,13 @@ def Encoder() -> Node:
         return Struct(resolution=resolution, noise_std=noise_std,
                       phase_offset=phase_offset)
 
-    def init(rng) -> Struct:
-        return Struct(rng=rng)
-
-    def apply(param, state, input) -> tuple[Struct, jax.Array]:
+    def apply(param, input, rng) -> jax.Array:
         rad_to_counts = param.resolution / (2.0 * jnp.pi)
         counts = (input + param.phase_offset) * rad_to_counts
-        counts = counts + jax.random.normal(state.rng) * param.noise_std
-        measured = jnp.round(counts) / rad_to_counts - param.phase_offset
-        return state, measured
+        counts = counts + jax.random.normal(rng.next()) * param.noise_std
+        return jnp.round(counts) / rad_to_counts - param.phase_offset
 
-    return Leaf(apply, init=init, param=param)
+    return Leaf(apply, param=param)
 
 
 @node
@@ -74,15 +82,12 @@ def CurrentSensor() -> Node:
     def param(noise_std: float = 0.1) -> Struct:
         return Struct(noise_std=noise_std)
 
-    def init(rng) -> Struct:
-        return Struct(rng=rng)
-
-    def apply(param, state, input) -> tuple[Struct, DQ]:
+    def apply(param, input: DQ, rng) -> DQ:
         noise_d, noise_q = (
-            jax.random.normal(state.rng, shape=(2,)) * param.noise_std)
-        return state, input + DQ(noise_d, noise_q)
+            jax.random.normal(rng.next(), shape=(2,)) * param.noise_std)
+        return input + DQ(noise_d, noise_q)
 
-    return Leaf(apply, init=init, param=param)
+    return Leaf(apply, param=param)
 
 
 @node
@@ -91,13 +96,10 @@ def Noisy() -> Node:
     def param(noise_std: float = 0.1) -> Struct:
         return Struct(noise_std=noise_std)
 
-    def init(rng) -> Struct:
-        return Struct(rng=rng)
+    def apply(param, input, rng) -> jax.Array:
+        return input + jax.random.normal(rng.next()) * param.noise_std
 
-    def apply(param, state, input) -> tuple[Struct, jax.Array]:
-        return state, input + jax.random.normal(state.rng) * param.noise_std
-
-    return Leaf(apply, init=init, param=param)
+    return Leaf(apply, param=param)
 
 
 @node

@@ -368,15 +368,9 @@ class _InitWired:
         self._specs = {}
         self._called = set()
         self._given = set()
-        from nodejax.core.binding import _has_rng_deep
-        from nodejax.core.compose import _rekeyed
         for name, state in state_given.items():
             if name in member_inputs:
                 state = member_inputs[name]
-            if _has_rng_deep(state_given[name]):
-                state = _rekeyed(
-                    state, rng.next(),
-                    f"member '{name}'")
             self._init[name] = state
             self._work[name] = state
             self._given.add(name)

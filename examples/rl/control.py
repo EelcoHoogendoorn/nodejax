@@ -110,11 +110,10 @@ def mean_rollout_program(
     plant: BaseNode,
     n_worlds: int,
 ) -> PNode:
-    """Builds a batched deterministic rollout `PNode` for `n_worlds` parallel worlds."""
+    """Builds a batched deterministic-policy rollout `PNode` for `n_worlds` parallel worlds."""
     mean_policy = policy >> ProposalMean()
     step = ControlledStep(mean_policy, plant)
-    batched = batch(scanned(step), n=n_worlds)
-    return batched if isinstance(batched, PNode) else batched.parameterize()
+    return batch(scanned(step), n=n_worlds).parameterize()
 
 
 def mean_rollout(
@@ -122,8 +121,9 @@ def mean_rollout(
     plant: BaseNode,
     starts: Struct,
     disturbance: jax.Array,
+    rng: jax.Array | None = None,
 ) -> Struct:
-    """Runs a deterministic closed-loop rollout from `starts` under `(world, time)` `disturbance`."""
+    """Runs a deterministic-policy closed-loop rollout from `starts` under `(world, time)` `disturbance`."""
     n_worlds = tree_len(starts)
     steps = disturbance.shape[1]
     input = Struct(
@@ -131,7 +131,11 @@ def mean_rollout(
         initial_plant_state=tree_broadcast_axis(starts, steps, axis=1),
     )
     rollout = mean_rollout_program(policy, plant, n_worlds)
-    trajectory = drop_aux(rollout.apply(bundle=input))
+    if rollout.contract.apply_takes_rng:
+        key = jax.random.PRNGKey(0) if rng is None else rng
+        trajectory = drop_aux(rollout.apply(bundle=input, rng=key))
+    else:
+        trajectory = drop_aux(rollout.apply(bundle=input))
     return Struct(
         cost=trajectory.cost,
         state=trajectory.next_state,
@@ -157,8 +161,7 @@ def policy_trajectory(
         disturbance=jnp.zeros((n_worlds, steps)),
         initial_plant_state=tree_broadcast_axis(initial_plant_state, steps, axis=1),
     )
-    batched = batch(scanned(step(policy, plant)), n=n_worlds)
-    rollout = batched if isinstance(batched, PNode) else batched.parameterize()
+    rollout = batch(scanned(step(policy, plant)), n=n_worlds).parameterize()
     if rollout.contract.apply_takes_rng:
         trajectory = rollout.apply(bundle=input, rng=rng)
     else:

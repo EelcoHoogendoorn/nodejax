@@ -12,9 +12,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax.struct import Struct
-from nodejax import Node, trained, ensemble, train_step, nn
-from nodejax import tile
+from nodejax import Node, trained, ensemble, train_step, nn, tile
 from examples.util import mse
 N_IN, HIDDEN, POP = 4, 16, 8
 

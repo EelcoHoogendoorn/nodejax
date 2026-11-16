@@ -11,7 +11,7 @@ from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
 
 
-@node(name='drop')
+@node
 def Dropout(rate: float, train: bool = True) -> PNode:
     """Zeros independent elements with probability `rate` and rescales survivors by `1 / (1 - rate)` at `apply` time.
 
@@ -27,7 +27,7 @@ def Dropout(rate: float, train: bool = True) -> PNode:
     return Leaf(apply)
 
 
-@node(name='drop_path')
+@node
 def DropPath(rate: float, train: bool = True) -> PNode:
     """Zeros an entire sample PyTree with probability `rate` and rescales kept samples by `1 / (1 - rate)` at `apply` time.
 
@@ -48,7 +48,7 @@ def DropPath(rate: float, train: bool = True) -> PNode:
     return Leaf(apply)
 
 
-@node(name='gaussian_noise')
+@node
 def GaussianNoise(std: float, train: bool = True) -> PNode:
     """Adds independent zero-mean Gaussian noise of standard deviation `std` to each leaf at `apply` time.
 

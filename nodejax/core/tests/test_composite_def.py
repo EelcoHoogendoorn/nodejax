@@ -494,11 +494,9 @@ def test_rng_routes_by_def_and_calls_chain():
         return Leaf(apply, init=init, name='acc')
 
     def Noise():
-        def init(rng):
-            return Struct(rng=rng)
-        def apply(state, input):
-            return state, input + jax.random.normal(state.rng)
-        return Leaf(apply, init=init, name='noise')
+        def apply(input, rng):
+            return input + jax.random.normal(rng.next())
+        return Leaf(apply, name='noise')
 
     members = Composite(acc=Accumulator(), noise=Noise())
 
@@ -510,9 +508,9 @@ def test_rng_routes_by_def_and_calls_chain():
         return Struct(total=total, draws=jnp.stack([d1, d2]))
 
     node = members(apply, name='chained').parameterize()
-    state = node.with_input(jnp.asarray(1.0)).bind(node.param).init(
-        rng=jax.random.PRNGKey(0))
-    new_state, out = node.apply(state, jnp.asarray(1.0))
+    state = node.with_input(jnp.asarray(1.0)).bind(node.param).init()
+    new_state, out = node.apply(
+        state, jnp.asarray(1.0), rng=jax.random.PRNGKey(0))
 
     assert out.total == 2.0
     assert new_state.acc == 2.0

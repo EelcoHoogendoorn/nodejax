@@ -23,7 +23,7 @@ from nodejax.transforms.policy import (
     tree_detach,
     tree_freeze,
 )
-from nodejax.transforms.structure import cyclic, externalize, tie
+from nodejax.transforms.structure import cyclic, externalize, map_members, tie, tree_filter
 from nodejax.transforms.wiring import at, parallel, residual, sum_junction
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     'stack',
     'repeat',
     'repeated',
+    'iterated',
     'scan',
     'scanned',
     'carried',
@@ -56,6 +57,8 @@ __all__ = [
     'tie',
     'cyclic',
     'externalize',
+    'map_members',
+    'tree_filter',
     'at',
     'residual',
     'parallel',

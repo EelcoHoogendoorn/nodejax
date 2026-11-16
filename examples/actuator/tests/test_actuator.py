@@ -1,8 +1,9 @@
 """Exercises the stock field-oriented control `ActuatorStack` over a spinning mechanical trajectory.
 
 Collaborator `Node`s enter the composite already constructed, a single PRNG key splits across
-stochastic sensor members during `init`, per-member state shapes derive from the wiring walk, and
-`ActuatorStack` initializes its bus-voltage estimator from the sampled initial bus reading.
+stochastic sensor members during priming and per-step execution, per-member state shapes derive from
+the wiring walk, and `ActuatorStack` initializes its bus-voltage estimator from the sampled initial
+bus reading.
 """
 
 import jax
@@ -67,7 +68,8 @@ def test_stack_runs_and_tracks():
                   velocity=jnp.full(n, 20.0))
     final, out = scan(stack)(state, mechanical=mech,
                              command=jnp.full(n, 2.0),
-                             bus_voltage=jnp.full(n, 48.0))
+                             bus_voltage=jnp.full(n, 48.0),
+                             rng=jax.random.PRNGKey(1))
 
     assert jnp.all(jnp.isfinite(out.torque))
     assert jnp.abs(jnp.mean(out.torque[n // 2:]) - 2.0) < 0.5

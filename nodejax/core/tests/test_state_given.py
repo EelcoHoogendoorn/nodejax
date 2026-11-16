@@ -1,16 +1,15 @@
-"""Verifies state capture, explicit state replacement, and PRNG re-keying on `PSNode` members.
+"""Verifies state capture and explicit state replacement on `PSNode` members.
 
 A state-bound member contributes its captured state to an enclosing
 composition. Passing an explicit state value for that member replaces the
-captured state without re-running `init`, while stored `rng` state re-keys
-from the enclosing boundary.
+captured state without re-running `init`.
 """
 
 import jax
 import jax.numpy as jnp
 import pytest
 
-from nodejax import Node, PNode, PSNode, Leaf, serial
+from nodejax import Node, PSNode, Leaf, serial
 from nodejax.control import Gain, Integrator
 from nodejax.struct import Struct
 
@@ -23,19 +22,19 @@ def PrimedLevel() -> Node:
     return Leaf(apply, init=init, name='primed_level')
 
 
-def Streamy() -> Node:
+def RandomLevel() -> Node:
     def init(rng):
-        return Struct(rng=rng)
+        return jax.random.normal(rng.next())
     def apply(state, input):
-        return state, input
-    return Leaf(apply, init=init, name='streamy')
+        return state, state + input
+    return Leaf(apply, init=init, name='random_level')
 
 
 def test_a_stored_state_fills_the_open_slot():
     bound = Integrator().parameterize().bind(state=jnp.asarray(5.0))
     pipe = serial(a=bound, g=Gain())
     node = pipe.parameterize(g=Struct(scale=2.0))
-    state = node.init()              # no replacement or key: the store fills
+    state = node.init()
     assert jnp.allclose(state.a, 5.0)
 
 
@@ -58,16 +57,15 @@ def test_all_state_bound_composes_state_bound():
     assert jnp.allclose(res.state.integrator_2, 11.0)
 
 
-def test_stored_entropy_never_replays():
-    """Verifies stored `rng` state re-keys from the enclosing boundary and refuses missing keys."""
-    k0 = jax.random.PRNGKey(7)
-    bound = Streamy().parameterize().bind(state=Struct(rng=k0))
+def test_captured_stochastic_init_state_needs_no_key():
+    """Verifies capturing a `PSNode` from a stochastic `init` makes enclosing `init` deterministic."""
+    bound = RandomLevel().parameterize().initialize(rng=jax.random.PRNGKey(7))
     node = serial(s=bound, g=Gain()).parameterize(g=Struct(scale=1.0))
-    state = node.init(rng=jax.random.PRNGKey(1))
-    assert not jnp.allclose(state.s.rng, k0)
-    # the derived spec demands the key (`REQUIRED`); `_rekeyed` also guards against replay
-    with pytest.raises(TypeError, match='rng'):
-        node.init()
+    assert not node.contract.init_takes_rng
+    state = node.init()
+    assert jnp.allclose(state.s, bound.state)
+    with pytest.raises(TypeError, match='does not accept rng'):
+        node.init(rng=jax.random.PRNGKey(1))
 
 
 def test_staterize_mirrors_parameterize():

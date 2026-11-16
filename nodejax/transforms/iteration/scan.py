@@ -16,7 +16,7 @@ enters and leaves the run:
 
 from __future__ import annotations
 
-from nodejax.core.binding import _has_rng_deep, split_aux
+from nodejax.core.binding import split_aux
 from nodejax.core.contract import Contract
 from nodejax.core.node import Node
 from nodejax.core.pnode import PNode
@@ -101,16 +101,10 @@ def _fresh_step_state(step: Contract, param, state_input, inputs, rng):
         step, param, state_input, inputs, child_rng, bundled=True)
 
 
-def _given_start(step: Contract, state, rng):
-    from nodejax.core.compose import _rekeyed
-    start = step._dense_state(state)
-    return _rekeyed(start, rng.next(), step.name) if _has_rng_deep(state) else start
-
-
 def _run_start(contract: Contract, param, state_input, sequence, rng, state):
     current = contract.members.step
     if state is not None:
-        return _given_start(current, state, rng)
+        return current._dense_state(state)
     if not current.cyclic:
         return ()
     return _fresh_step_state(current, param, state_input, sequence, rng)
@@ -119,7 +113,7 @@ def _run_start(contract: Contract, param, state_input, sequence, rng, state):
 def _run_takes_rng(inner: Contract, state) -> bool:
     if state is None:
         return inner.init_takes_rng or inner.apply_takes_rng
-    return inner.apply_takes_rng or _has_rng_deep(state)
+    return inner.apply_takes_rng
 
 
 def _check_claim(inner: Contract, boundary: str | None) -> None:

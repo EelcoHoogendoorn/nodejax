@@ -44,11 +44,6 @@ def bind(contract: Contract, param, *, state=_NO_STATE) -> PNode | PSNode:
 
 
 def _split_and_tile(tree: PyTree, count: int) -> PyTree:
-    if type(tree) is Struct:
-        return Struct(**{
-            name: (jax.random.split(value, count) if name == 'rng'
-                   else _split_and_tile(value, count))
-            for name, value in tree.__items__})
     return jax.tree.map(
         lambda leaf: jnp.broadcast_to(
             jnp.asarray(leaf), (count,) + jnp.shape(leaf)),

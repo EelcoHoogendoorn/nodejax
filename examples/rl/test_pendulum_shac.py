@@ -76,15 +76,15 @@ def test_policy_ensembles_compile_for_both_policy_lifecycles() -> None:
     recurrent_command, recurrent_aux = split_aux(recurrent_output)
 
     assert feedforward_command.shape == recurrent_command.shape == ()
-    assert feedforward_aux.reduce_mean.population.shape == (N_POLICY_MEMBERS,)
-    assert recurrent_aux.reduce_mean.population.shape == (N_POLICY_MEMBERS,)
+    assert feedforward_aux.reduce.population.shape == (N_POLICY_MEMBERS,)
+    assert recurrent_aux.reduce.population.shape == (N_POLICY_MEMBERS,)
     assert jnp.allclose(
         feedforward_command,
-        jnp.mean(feedforward_aux.reduce_mean.population),
+        jnp.mean(feedforward_aux.reduce.population),
     )
     assert jnp.allclose(
         recurrent_command,
-        jnp.mean(recurrent_aux.reduce_mean.population),
+        jnp.mean(recurrent_aux.reduce.population),
     )
     recurrent_state = jax.tree.leaves(recurrent.state)
     assert recurrent_state

@@ -569,6 +569,30 @@ def test_derived_apply_keeps_its_entropy_requirement():
     assert jnp.allclose(child(input=0.0, rng=key), child(input=0.0, rng=key))
 
 
+def test_derive_adds_and_overrides_boundaries():
+    """Verifies `derive(..., boundary=...)` merges new and overridden boundary actions."""
+    reset = lambda carried, initialized, decided: initialized
+    keep = lambda carried, initialized, decided: carried
+    parent = Leaf(
+        lambda state, input: (state + input, state + input),
+        init=lambda: jnp.asarray(0.0),
+        boundary={'episode': keep},
+        name='counter',
+    )
+    child = derive(
+        parent,
+        boundary={'episode': reset, 'chunk': reset},
+        name='counter_child',
+    )
+    assert child.contract.boundary_names == frozenset({'episode', 'chunk'})
+
+    bound = child.parameterize()
+    _, ep_out = scan(bound, boundary='episode')(jnp.asarray(10.0), jnp.ones(3))
+    _, chunk_out = scan(bound, boundary='chunk')(jnp.asarray(10.0), jnp.ones(3))
+    assert jnp.allclose(ep_out, jnp.array([1.0, 2.0, 3.0]))
+    assert jnp.allclose(chunk_out, jnp.array([1.0, 2.0, 3.0]))
+
+
 def test_derive_inherits_boundary_actions():
     def reset(carried, initialized, decided):
         return initialized

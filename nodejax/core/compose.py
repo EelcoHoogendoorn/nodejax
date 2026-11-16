@@ -20,8 +20,7 @@ import jax.numpy as jnp
 
 from nodejax.core.ambient import node
 from nodejax.core.binding import (
-    Aux, _bundle_spec, _bundle_spec_from_sig, _has_rng_deep, _spec_resolved,
-    split_aux,
+    Aux, _bundle_spec, _bundle_spec_from_sig, _spec_resolved, split_aux,
 )
 from nodejax.core.composite import (
     _promote_members, member_param_input, member_state_input,
@@ -29,7 +28,7 @@ from nodejax.core.composite import (
 from nodejax.core.contract import (
     ApplyCall, CallForm, ContractCalls, InitCall, ParamCall,
 )
-from nodejax.core.definition import Captures, Construction, Def, Layout
+from nodejax.core.definition import Captures, Construction, Layout, Def
 from nodejax.frozendict import frozendict
 from nodejax.core.generic import Generic, is_generic
 from nodejax.core.lifting import (
@@ -85,8 +84,7 @@ def _param_takes_rng(members: Struct, captures: Captures) -> bool:
 
 def _init_takes_rng(members: Struct, captures: Captures) -> bool:
     return any(
-        (_has_rng_deep(captures.state[name]) if name in captures.state
-         else member.contract.init_takes_rng)
+        name not in captures.state and member.contract.init_takes_rng
         for name, member in members.__items__)
 
 
@@ -103,17 +101,16 @@ def block_name(separator: str, names: Iterable[str]) -> str:
 def _over_members(separator: str) -> Callable:
     """Normalizes an N-ary member combinator over Node or `Generic` operands."""
     def decorate(build):
-        @wraps(build)
-        def entry(**named):
-            if not named:
+        def entry(**members):
+            if not members:
                 raise TypeError(f'{build.__name__} needs at least one member')
-            if any(is_generic(value) for value in named.values()):
+            if any(is_generic(value) for value in members.values()):
                 return Generic(
-                    block_name(separator, named),
-                    lambda **members: entry(**members),
-                    Struct(**named),
+                    block_name(separator, members),
+                    lambda **filled: entry(**filled),
+                    Struct(**members),
                 )
-            definitions, captures = _promote_members(named)
+            definitions, captures = _promote_members(members)
             product = build(definitions, captures)
             if not _is_node(product):
                 raise TypeError('member combinator did not build a Node')
@@ -131,9 +128,9 @@ def _over_members(separator: str) -> Callable:
             )
             product = _view(definition)
 
-            if all(value.bound for value in named.values()):
+            if all(value.bound for value in members.values()):
                 param = Struct(**{
-                    name: named[name].param
+                    name: members[name].param
                     for name, member in definitions.__items__
                     if member.parametric
                 })
@@ -141,7 +138,7 @@ def _over_members(separator: str) -> Callable:
                           if definition.cyclic]
                 if cyclic and all(name in captures.state for name in cyclic):
                     state = Struct(**{
-                        name: value.state for name, value in named.items()
+                        name: value.state for name, value in members.items()
                         if getattr(definitions, name).cyclic
                     })
                     return Node(definition).bind(
@@ -149,46 +146,13 @@ def _over_members(separator: str) -> Callable:
                 return Node(definition).bind(param if param else ())
             return product
 
+        entry.__name__ = build.__name__
+        entry.__qualname__ = build.__qualname__
+        entry.__doc__ = build.__doc__
+        entry.__module__ = build.__module__
         entry.separator = separator
         return entry
     return decorate
-
-
-def _rekeyed(state: PyTree, key, where: str) -> PyTree:
-    draws = 0
-
-    def walk(value, current):
-        nonlocal draws
-        if not issubclass(type(value), Struct):
-            return value, current
-        out = {}
-        for name, child in value.__items__:
-            if name != 'rng':
-                out[name], current = walk(child, current)
-                continue
-            current, fresh = jax.random.split(current)
-            draws += 1
-            try:
-                template = jax.random.key_data(child)
-                shape = template.shape[:-1]
-                count = 1
-                for extent in shape:
-                    count *= extent
-                keys = jax.random.split(fresh, count) if shape else fresh
-                data = jax.random.key_data(keys).reshape(shape + template.shape[-1:])
-                out[name] = (
-                    jax.random.wrap_key_data(data, impl=jax.random.key_impl(child))
-                    if jax.dtypes.issubdtype(
-                        getattr(child, 'dtype', None), jax.dtypes.prng_key)
-                    else data)
-            except (TypeError, ValueError) as error:
-                raise TypeError(f"{where}: state rng is not a JAX key") from error
-        return Struct(**out), current
-
-    result, _ = walk(state, key)
-    if not draws:
-        raise TypeError(f'{where}: replacement state contains no rng field')
-    return result
 
 
 def _probe_apply(apply_fn: Callable, param, state, input, rng: MaybeKeyStream):
@@ -258,56 +222,6 @@ def _member_param(name: str, member: Def, sub_bundle: Struct | None,
         return current.contract.param(bundle, rng)
     except TypeError as error:
         raise TypeError(f"member '{name}': {error}") from error
-
-
-def _member_states_init(members: Struct, captures: Captures, *, block: str,
-                        project: Callable) -> InitCall | None:
-    if not any(member.cyclic for member in members):
-        return None
-    requires_input = any(
-        member.contract.init_requires_input and name not in captures.state
-        for name, member in members.__items__)
-    takes_rng = _init_takes_rng(members, captures)
-
-    def initialize(definition, param, formed_input, rng, value=None):
-        current = definition.members
-        captures = definition.captures
-        states = {}
-        for name, member in current.__items__:
-            if not member.cyclic:
-                continue
-            if name in captures.state:
-                supplied = (formed_input[name] if name in formed_input
-                            else captures.state[name])
-                if _has_rng_deep(captures.state[name]):
-                    supplied = _rekeyed(
-                        supplied, rng.next(),
-                        f"{block} member '{name}'")
-                states[name] = supplied
-                continue
-            evidence = project(value, name) if value is not None else None
-            if evidence is None and definition.contract.input_spec is not None:
-                evidence = project(definition.contract.input_spec, name)
-            resolved = (member if evidence is None else
-                        member.contract._resolve_def(evidence))
-            child = rng.child(resolved.contract.init_takes_rng)
-            state_input = getattr(formed_input, name)
-            params = (getattr(param, name) if member.parametric else ())
-            states[name] = (resolved.contract.prime(
-                params, state_input, evidence, child)
-                if value is not None else
-                resolved.contract.init(params, state_input, child))
-        return Struct(**states)
-
-    if requires_input:
-        def impl(definition, param, formed_input, input, rng):
-            return initialize(definition, param, formed_input, rng, input)
-    else:
-        def impl(definition, param, formed_input, rng):
-            return initialize(definition, param, formed_input, rng)
-    return init_call(
-        impl, member_state_input(members, captures),
-        requires_input=requires_input, takes_rng=takes_rng)
 
 
 @_over_members(' >> ')
@@ -380,13 +294,8 @@ def serial(members: Struct, captures: Captures) -> BaseNode:
                                if member.contract._accepts_input else None)
             if member.cyclic:
                 if name in captures.state:
-                    state = (formed_input[name] if name in formed_input
-                             else captures.state[name])
-                    if _has_rng_deep(captures.state[name]):
-                        state = _rekeyed(
-                            state, rng.next(),
-                            f"pipe member '{name}'")
-                    states[name] = state
+                    states[name] = (formed_input[name] if name in formed_input
+                                    else captures.state[name])
                 else:
                     resolved = (member if member_evidence is None else
                                 member.contract._resolve_def(member_evidence))
@@ -484,13 +393,8 @@ def _member_init(members: Struct, authored, param, evidence: PyTree,
     states = {}
     for name, member in members.__items__:
         if name in captures.state and member.cyclic:
-            supplied = (getattr(inputs, name) if name in inputs
-                        else captures.state[name])
-            if _has_rng_deep(captures.state[name]):
-                supplied = _rekeyed(
-                    supplied, rng.next(),
-                    f"member '{name}'")
-            states[name] = supplied
+            states[name] = (getattr(inputs, name) if name in inputs
+                            else captures.state[name])
             continue
         child = rng.child(member.contract.init_takes_rng)
         bundle = getattr(inputs, name)
@@ -853,7 +757,8 @@ def _transparent_init(init: Callable, member: str) -> Callable:
 
 
 def _ident(name: str) -> str:
-    return re.sub(r'\W+', '_', name).strip('_') or 'node'
+    head = re.sub(r'\W+', '_', name.split('(', 1)[0]).strip('_')
+    return head or re.sub(r'\W+', '_', name).strip('_') or 'node'
 
 
 def _components(value: BaseNode | Generic) -> frozendict:

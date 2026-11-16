@@ -121,17 +121,6 @@ def _bundle_spec_from_sig(fn: Callable, *, drop: tuple = ()) -> Struct:
         params, drop=drop, owner=fn.__name__, allow_defaults=False)
 
 
-def _has_rng_deep(tree: PyTree) -> bool:
-    """Reports whether a state PyTree contains a `Struct` field named `rng` at any depth."""
-    if issubclass(type(tree), Struct):
-        return 'rng' in tree or any(_has_rng_deep(v) for _, v in tree.__items__)
-    return False
-
-
-def _has_rng_field(tree: PyTree) -> bool:
-    return issubclass(type(tree), Struct) and 'rng' in tree
-
-
 def _spec_resolved(spec: PyTree) -> bool:
     """Reports whether an input spec contains concrete shapes rather than `REQUIRED` markers.
 

@@ -120,10 +120,18 @@ def test_contract_init_leaf_and_state_input():
     assert _init(node.node, node.param) == 0.0
 
     w = Walker().parameterize(sigma=1.0)
-    s = _init(w.node, w.param, key=jax.random.PRNGKey(0))
-    assert s.x == 0.0 and s.rng is not None
+    assert _init(w.node, w.param) == 0.0
+    assert w.contract.apply_takes_rng
+
+    seeded = Leaf(
+        lambda state, input: (state, state + input),
+        init=lambda rng: jax.random.normal(rng.next()),
+        name='seeded',
+    )
+    s = _init(seeded.node, (), key=jax.random.PRNGKey(0))
+    assert jnp.isfinite(s)
     with pytest.raises(TypeError, match='init requires rng='):
-        w.init()
+        seeded.init()
 
 
 def test_public_init_non_cyclic_rejects_an_rng_channel():
@@ -144,10 +152,14 @@ def test_contract_init_primes_from_the_input_channel():
 
 
 def test_contract_init_composite_boundary_rng():
-    net = serial(w=Walker(), g=Gain()).parameterize(
-        w=Struct(sigma=1.0), g=Struct(scale=2.0))
+    seeded = Leaf(
+        lambda state, input: (state, state + input),
+        init=lambda rng: jax.random.normal(rng.next()),
+        name='seeded',
+    )
+    net = serial(s=seeded, g=Gain()).parameterize(g=Struct(scale=2.0))
     s = _init(net.node, net.param, key=jax.random.PRNGKey(0))
-    assert s.w.x == 0.0
+    assert jnp.isfinite(s.s)
     assert s.g == ()
 
 

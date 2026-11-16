@@ -74,7 +74,8 @@ def test_one_step_keeps_the_links_rigid_and_turns_the_shoulder() -> None:
     state = plant.init(rng=jax.random.PRNGKey(0), start=whip_start())
     started = plant.bind(state=state)
 
-    advanced, output = started.apply(command=jnp.array((40.0, 0.0)), disturbance=jnp.zeros(()))
+    advanced, output = started.apply(
+        command=jnp.array((40.0, 0.0)), disturbance=jnp.zeros(()), rng=jax.random.PRNGKey(1))
     output, _ = split_aux(output)
 
     positions = advanced.state.rope.position
@@ -126,19 +127,24 @@ def test_priming_from_any_angle_leaves_the_observers_at_rest() -> None:
 
 
 def test_a_policy_step_pays_the_cost_of_every_tick() -> None:
+    from nodejax import KeyStream
     from examples.whip.whip import N_CONTROL_TICKS
 
     step = whip_plant().parameterize()
     tick = step.tick.parameterize()
     state = step.init(rng=jax.random.PRNGKey(0), start=whip_start())
     command, disturbance = jnp.array((30.0, -10.0)), jnp.zeros(())
+    run_key = jax.random.PRNGKey(1)
 
-    _, (output, _) = step.bind(state=state).apply(command=command, disturbance=disturbance)
+    _, (output, _) = step.bind(state=state).apply(
+        command=command, disturbance=disturbance, rng=run_key)
 
+    tick_keys = jax.random.split(KeyStream(run_key).next(), N_CONTROL_TICKS)
     ticking = tick.bind(state=state)
     total = 0.0
-    for _ in range(N_CONTROL_TICKS):
-        ticking, (tick_output, _) = ticking.apply(command=command, disturbance=disturbance)
+    for tick_key in tick_keys:
+        ticking, (tick_output, _) = ticking.apply(
+            command=command, disturbance=disturbance, rng=tick_key)
         total = total + tick_output.cost
     assert jnp.allclose(output.cost, total)
 
@@ -154,8 +160,9 @@ def test_the_floor_keeps_the_arm_and_rope_above_the_pivot() -> None:
 
 def test_the_ideal_actuator_plant_primes_steps_and_reads_out_like_the_stack() -> None:
     plant = whip_plant(ideal_actuator=True).parameterize()
-    # Replacing the stochastic actuator stack with an ideal torque source removes PRNG requirements from init.
+    # Replacing the stochastic actuator stack with an ideal torque source removes PRNG requirements.
     assert plant.contract.init_takes_rng is False
+    assert plant.contract.apply_takes_rng is False
     state = plant.init(start=whip_start(0.4))
     observation = plant.observe(state=state)
     assert set(observation.__keys__) == {'angle', 'velocity', 'current', 'target'}
@@ -173,7 +180,8 @@ def test_the_target_is_part_of_the_start_and_of_the_cost() -> None:
     state = plant.init(rng=jax.random.PRNGKey(0), start=whip_start(0.5, target))
     assert jnp.allclose(state.target, target)
     assert jnp.allclose(plant.observe(state=state).target, target)
-    advanced, _ = plant.bind(state=state).apply(command=jnp.zeros((N_LINKS,)), disturbance=jnp.zeros(()))
+    advanced, _ = plant.bind(state=state).apply(
+        command=jnp.zeros((N_LINKS,)), disturbance=jnp.zeros(()), rng=jax.random.PRNGKey(1))
     assert jnp.allclose(advanced.state.target, target)
 
 

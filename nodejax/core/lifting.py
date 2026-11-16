@@ -17,9 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from nodejax.core.author_view import AuthorNode
-from nodejax.core.binding import (
-    _METHOD_CHANNELS, _bundle_spec, _has_rng_field,
-)
+from nodejax.core.binding import _METHOD_CHANNELS, _bundle_spec
 from nodejax.core.contract import ApplyCall, CallForm, InitCall, ParamCall
 from nodejax.frozendict import frozendict
 from nodejax.core.rng import KeyStream, MaybeKeyStream
@@ -28,11 +26,9 @@ from nodejax.struct import Struct
 
 
 def _keys_only(tree: PyTree, where: str) -> PyTree:
-    """Draws raw PRNG keys stored under `rng` fields and rejects other `KeyStream` escapes."""
-    def walk(value: PyTree, path: str, rng_field: bool = False) -> PyTree:
+    """Rejects any `KeyStream` or `MaybeKeyStream` handle escaping into a returned PyTree."""
+    def walk(value: PyTree, path: str) -> PyTree:
         if type(value) is KeyStream:
-            if rng_field:
-                return value.next()
             raise TypeError(
                 f'{where}: a KeyStream escaped at {path or "the output"}; '
                 'draw with rng.next()')
@@ -42,14 +38,12 @@ def _keys_only(tree: PyTree, where: str) -> PyTree:
                 f'{path or "the output"}')
         if issubclass(type(value), Struct):
             return type(value)(**{
-                name: walk(child, f'{path}.{name}' if path else name,
-                           name == 'rng')
+                name: walk(child, f'{path}.{name}' if path else name)
                 for name, child in value.__items__
             })
         if type(value) is dict:
             return {
-                name: walk(child, f'{path}.{name}' if path else str(name),
-                           name == 'rng')
+                name: walk(child, f'{path}.{name}' if path else str(name))
                 for name, child in value.items()
             }
         if issubclass(type(value), tuple):
@@ -124,8 +118,6 @@ def _compile_apply(fn: Callable, *, parametric: bool, cyclic: bool,
         output = _keys_only(fn(**arguments), f'{definition.name}.apply')
         return output if has_state else (state, output)
 
-    if has_state:
-        impl = _advance_state_rng(impl)
     return ApplyCall(
         impl=impl,
         form=CallForm.from_values(declaration),
@@ -133,18 +125,6 @@ def _compile_apply(fn: Callable, *, parametric: bool, cyclic: bool,
         takes_rng=takes_rng,
         reads_def=reads_def,
     )
-
-
-def _advance_state_rng(apply_impl: Callable) -> Callable:
-    def wrapped(definition, param, state, formed_input, rng):
-        if _has_rng_field(state):
-            next_key, use_key = jax.random.split(state.rng)
-            state, output = apply_impl(
-                definition, param, state.replace(rng=use_key),
-                formed_input, rng)
-            return state.replace(rng=next_key), output
-        return apply_impl(definition, param, state, formed_input, rng)
-    return wrapped
 
 
 def _compile_param(fn: Callable) -> ParamCall:

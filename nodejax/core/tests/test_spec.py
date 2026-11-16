@@ -91,18 +91,21 @@ def test_pipe_shape_error_names_member():
 
 
 def test_pipe_init_routes_rng():
-    """Verifies composite `init` splits `rng` keys independently across stochastic pipe members."""
+    """Verifies composite `init` and `apply` split `rng` keys independently across stochastic pipe members."""
+    seeded = Leaf(
+        lambda state, input: (state, state + input),
+        init=lambda rng: jax.random.normal(rng.next()),
+        name='seeded',
+    )
+    init_pipe = (seeded >> seeded).init(rng=jax.random.PRNGKey(0))
+    assert not jnp.allclose(init_pipe.seeded, init_pipe.seeded_2)
+
     pipe = Walker() >> Walker()
     bound = pipe.parameterize(walker=Struct(sigma=jnp.asarray(1.0)),
                               walker_2=Struct(sigma=jnp.asarray(1.0)))
-
-    state = bound.init(rng=jax.random.PRNGKey(0))
-    assert 'rng' in state.walker and 'rng' in state.walker_2
-    assert jnp.any(state.walker.rng != state.walker_2.rng)  # split, not copied
-
-    # the closed pipe steps: both walkers advance independently
-    state, out = bound.apply(state, 0.0)
-    state, out2 = bound.apply(state, 0.0)
+    state = bound.init()
+    state, out = bound.apply(state, 0.0, rng=jax.random.PRNGKey(1))
+    state, out2 = bound.apply(state, 0.0, rng=jax.random.PRNGKey(2))
     assert not jnp.allclose(out, out2)
 
 
@@ -112,11 +115,18 @@ def test_batch_init_from_input():
     state = b.with_input(spec(5)).bind(b.param).init()
     assert state.shape == (5,)
 
-    # stochastic case: n and independent keys, from the input value and boundary key
-    bw = batch(Walker()).parameterize(sigma=jnp.asarray(1.0))
-    state = bw.with_input(spec(3)).bind(bw.param).init(
+    seeded = Leaf(
+        lambda state, input: (state, state + input),
+        init=lambda rng: jax.random.normal(rng.next()),
+        name='seeded',
+    )
+    seeded_batch = batch(seeded).with_input(spec(3)).bind(()).init(
         rng=jax.random.PRNGKey(0))
-    state, out = bw.apply(state, jnp.zeros(3))
+    assert jnp.unique(seeded_batch).size == 3
+
+    bw = batch(Walker()).parameterize(sigma=jnp.asarray(1.0))
+    state = bw.with_input(spec(3)).bind(bw.param).init()
+    state, out = bw.apply(state, jnp.zeros(3), rng=jax.random.PRNGKey(1))
     assert jnp.unique(out).size == 3
 
 

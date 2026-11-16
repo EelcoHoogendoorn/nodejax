@@ -14,9 +14,7 @@ import jax.numpy as jnp
 import optax
 
 from nodejax.struct import Struct
-from nodejax import Node, node, Leaf, residual, stack, train_step, trained, Aux
-from nodejax.nn import linear
-from nodejax import tile
+from nodejax import Node, node, Leaf, residual, stack, train_step, trained, Aux, tile
 from examples.util import mse
 
 

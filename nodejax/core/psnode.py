@@ -59,6 +59,13 @@ class PSNode(BaseNode):
         """Drops the bound `state` tree and returns the underlying `PNode`."""
         return PNode(self._def, self.param)
 
+    def parameterize(self, param_input: PyTree = _UNSET, /,
+                     **fields: PyTree) -> PNode:
+        """Returns `self.pnode` when called with no overrides, or re-parameterizes `self._def`."""
+        if param_input is _UNSET and not fields:
+            return self.pnode
+        return super().parameterize(param_input, **fields)
+
     def reset(self, *args: PyTree, **fields: PyTree) -> PSNode:
         """Re-runs state initialization while keeping `param` fixed, returning a fresh `PSNode`."""
         return self.pnode.initialize(*args, **fields)

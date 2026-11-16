@@ -12,7 +12,7 @@ from nodejax.core.ambient import node
 from nodejax.core.authoring import Leaf
 
 
-@node(name='norm')
+@node
 def LayerNorm(eps: float = 1e-5) -> Node:
     """Normalizes activations across the trailing feature axis with learned `scale` and `bias`.
 
@@ -47,7 +47,7 @@ def RMSNorm(eps: float = 1e-6) -> Node:
     return Leaf(apply, param=param)
 
 
-@node(name='l2norm')
+@node
 def L2Norm(eps: float = 1e-8) -> PNode:
     """Divides vectors along the trailing axis by their Euclidean norm plus `eps`."""
     def apply(input) -> jax.Array:

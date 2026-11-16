@@ -13,8 +13,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax.struct import Struct
-from nodejax import Node, trained, stack, batch, train_step, serial, Leaf, nn
+from nodejax import Node, trained, stack, batch, train_step, serial, nn
 from examples.test_conv_vit import data, xent, accuracy
 
 IMAGE = 8
@@ -47,7 +46,7 @@ def test_nn_assembly() -> None:
     assert model.param.conv2.kernel.shape == (3, 3, STEM, HIDDEN)
     grid = IMAGE // 2
     assert model.param.pos.embed.shape == (grid * grid, HIDDEN)
-    wqkv = model.param.blocks.attn.attn.wqkv
+    wqkv = model.param.blocks.attn.attention.wqkv
     assert wqkv.shape == (DEPTH, HIDDEN, 3 * HIDDEN)
     assert not jnp.allclose(wqkv[0], wqkv[1])
     assert model.param.head.w.shape == (grid * grid * HIDDEN, 10)

@@ -44,7 +44,7 @@ def Deadband() -> Node:
     return Leaf(apply, param=param)
 
 
-@node(name='rate_limit')
+@node
 def RateLimit(dt: float) -> Node:
     """Clamps per-step signal changes to `[-param.max_rate * dt, param.max_rate * dt]` relative to the previous output."""
     def param(max_rate: PyTree) -> Struct:
@@ -75,18 +75,6 @@ def Clamp() -> Node:
 
 
 @node
-def ClampNorm() -> Node:
-    """Clamps the norm of a structured signal via `input.clamp_norm(param.limit)` while preserving direction."""
-    def param(limit: PyTree) -> Struct:
-        return Struct(limit=limit)
-
-    def apply(param, input) -> PyTree:
-        return input.clamp_norm(param.limit)
-
-    return Leaf(apply, param=param)
-
-
-@node
 def Delay(warm: bool = False) -> PNode:
     """Emits the previous step's stored signal and stores the current `input` for the next step.
 
@@ -105,15 +93,21 @@ def Delay(warm: bool = False) -> PNode:
 
 
 @node
-def Diff(dt: float) -> PNode:
-    """Approximates the backward-difference time derivative `(input - previous) / dt`."""
-    def init(node) -> PyTree:
+def Diff(dt: float, warm: bool = False) -> PNode:
+    """Approximates the backward-difference time derivative `(input - previous) / dt`.
+
+    Cold initialization (`warm=False`) zeros `node.input` so only an input spec is required. Warm initialization (`warm=True`) starts state at a concrete initial `input` so the first sample produces zero derivative instead of an `(input - 0) / dt` step spike.
+    """
+    def init(input) -> PyTree:
+        return input
+
+    def init_cold(node) -> PyTree:
         return jax.tree.map(jnp.zeros_like, node.input)
 
     def apply(state, input) -> tuple[PyTree, PyTree]:
-        return input, (input - state) / dt
+        return input, jax.tree.map(lambda s, x: (x - s) / dt, state, input)
 
-    return Leaf(apply, init=init)
+    return Leaf(apply, init=init if warm else init_cold)
 
 
 @node
@@ -222,11 +216,11 @@ def Walker() -> Node:
     def param(sigma: PyTree) -> Struct:
         return Struct(sigma=jnp.asarray(sigma))
 
-    def init(param, rng) -> Struct:
-        return Struct(x=jnp.asarray(0.0), rng=rng)
+    def init(param) -> jax.Array:
+        return jnp.asarray(0.0)
 
-    def apply(param, state, input) -> tuple[Struct, jax.Array]:
-        new_x = state.x + input + param.sigma * jax.random.normal(state.rng)
-        return state.replace(x=new_x), new_x
+    def apply(param, state, input, rng) -> tuple[jax.Array, jax.Array]:
+        new_x = state + input + param.sigma * jax.random.normal(rng.next())
+        return new_x, new_x
 
     return Leaf(apply, param=param, init=init)

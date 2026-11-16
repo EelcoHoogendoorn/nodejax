@@ -20,12 +20,10 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import (Aux, PNode, node, trained, Node, Leaf, Composite, serial, stack,
-                     scan, scanned, residual, train_step, tie, split_aux,
+from nodejax import (Aux, PNode, node, trained, Node, Composite, serial, stack,
+                     scanned, residual, train_step, tie, split_aux,
                      ambient, nn)
 from nodejax.control import Delay
-from nodejax.core.types import Param
-from nodejax.struct import Struct
 
 HIDDEN, LAYERS, EXPERTS = 48, 3, 4
 T, BATCH, STEPS = 32, 32, 1500

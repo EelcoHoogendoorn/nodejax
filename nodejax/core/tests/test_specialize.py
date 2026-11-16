@@ -59,9 +59,9 @@ def test_wildcards_and_transfer_through_the_tree():
 def test_dot_path_addresses_one_member():
     """Verifies dot-path `specialize` updates the addressed member without altering its sibling."""
     pipe = (nn.Dropout(0.3) >> nn.Dropout(0.5)).with_input(jnp.zeros(4))
-    tuned = pipe.specialize(**{'drop.train': False})
-    assert not tuned.members.drop.contract.apply_takes_rng
-    assert tuned.members.drop_2.contract.apply_takes_rng
+    tuned = pipe.specialize(**{'dropout.train': False})
+    assert not tuned.members.dropout.contract.apply_takes_rng
+    assert tuned.members.dropout_2.contract.apply_takes_rng
 
 
 def test_unrecorded_leaf_refuses():
@@ -116,9 +116,8 @@ def test_static_replay_rebuilds_from_canonical_members():
 
 
 def test_node_names_the_def_from_the_factory():
-    """A node the factory left unnamed takes the factory's own name,
-    lowercased; an explicit node name wins untouched."""
-    from nodejax import node, Wrapper
+    """Verifies `@node` derives `snake_case` names unless an explicit `name=` is supplied."""
+    from nodejax import Wrapper
 
     @node
     def Blip():
@@ -133,7 +132,8 @@ def test_node_names_the_def_from_the_factory():
 
     assert Blip().name == 'blip'
     assert Wrapped(Leaf(lambda input: input)).name == 'wrapped'
-    assert nn.Dropout(0.3).name == 'drop'    # explicit, untouched
+    assert nn.Dropout(0.3).name == 'dropout'
+    assert nn.MoE(4, 2).name == 'moe'
 
 
 def test_statics_of_lists_the_whole_argument_graph():

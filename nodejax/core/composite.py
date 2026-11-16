@@ -72,12 +72,10 @@ def _member_roles(definitions: Struct, captures: Captures, apply: Callable, *,
             and member.contract.param_takes_rng
             for name, member in definitions.__items__)
     if init_takes_rng is None:
-        from nodejax.core.binding import _has_rng_deep
         init_takes_rng = any(
             member.cyclic
-            and ((_has_rng_deep(captures.state[name])
-                  if name in captures.state else
-                  member.contract.init_takes_rng))
+            and name not in captures.state
+            and member.contract.init_takes_rng
             for name, member in definitions.__items__)
     if apply_takes_rng is None:
         apply_takes_rng = any(

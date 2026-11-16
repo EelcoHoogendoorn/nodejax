@@ -3,7 +3,7 @@
 Covers commutativity of `scanned` and `stack` on linear time-invariant filters, backpropagation
 through time via `train_step(scanned(...))`, parallel ensemble optimization via
 `train_step(ensemble(...))`, and differentiable proportional-derivative controller tuning through
-simulated spring-damper physics via `train_step(scanned(feedback(...)))`.
+simulated spring-damper physics via `train_step(scanned(closed_loop(...)))`.
 """
 
 from __future__ import annotations
@@ -12,10 +12,9 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import Node, PNode, Leaf, ensemble, stack, scan, scanned, train_step
+from nodejax import Node, PNode, Leaf, ensemble, stack, scanned, train_step, tile
 from nodejax.struct import Struct
-from nodejax.control import Gain, Integrator, PD, feedback
-from nodejax import tile
+from nodejax.control import Gain, Integrator, PD, closed_loop
 from examples.util import mse
 
 
@@ -90,7 +89,7 @@ def test_gradient_pid_tuning() -> None:
     """Tunes `PD` controller gains by differentiating through an unrolled closed-loop plant rollout."""
     dt = 0.1
 
-    loop = feedback(PD(dt) >> Plant(dt, 1.0, 0.3).node)
+    loop = closed_loop(PD(dt) >> Plant(dt, 1.0, 0.3).node)
     rollout = scanned(loop)
 
     T = 40
@@ -110,11 +109,11 @@ def test_gradient_pid_tuning() -> None:
 
 
 def test_feedback_mimo() -> None:
-    """Verifies steady-state step tracking of a two-axis `feedback` loop against `kp / (kp + spring_k)`."""
+    """Verifies steady-state step tracking of a two-axis `closed_loop` system against `kp / (kp + spring_k)`."""
     dt, spring_k = 0.05, 1.0
 
     # `output_spec` sizes the feedback output register for the two plant axes.
-    loop = feedback(PD(dt) >> Plant(dt, spring_k, 0.3).node, output_spec=jnp.zeros(2))
+    loop = closed_loop(PD(dt) >> Plant(dt, spring_k, 0.3).node, output_spec=jnp.zeros(2))
     kp = jnp.array([4.0, 9.0])
     bound = scanned(loop).parameterize(pipe=Struct(pd=Struct(kp=kp, kd=jnp.array(1.0))))
 

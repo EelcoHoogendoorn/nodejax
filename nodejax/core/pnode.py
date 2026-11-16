@@ -64,6 +64,13 @@ class PNode(BaseNode):
     def pnode(self) -> PNode:
         return self
 
+    def parameterize(self, param_input: PyTree = _UNSET, /,
+                     **fields: PyTree) -> PNode:
+        """Returns `self` when called with no overrides, or re-parameterizes `self._def`."""
+        if param_input is _UNSET and not fields:
+            return self
+        return super().parameterize(param_input, **fields)
+
     def init(self, state_input: PyTree = _UNSET, /, *,
              input=_UNSET, **fields: PyTree) -> PyTree:
         """Computes a fresh sparse `state` tree from optional field overrides, priming `input`, and `rng`."""

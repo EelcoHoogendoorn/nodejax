@@ -98,7 +98,7 @@ def test_batch_binds_its_named_axis_during_construction() -> None:
     )
 
     initialized = model.initialize(input=values)
-    stacked_state = initialized.state.stack_primed_batch_norm
+    stacked_state = initialized.state.stack
 
     assert initialized.param.linear.w.shape == (3, 2)
     assert stacked_state.primed.shape == (2, 2, 3)

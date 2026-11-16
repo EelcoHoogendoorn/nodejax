@@ -73,7 +73,15 @@ def test_state_input_spec_is_the_init_bundle():
     # PRNG streams travel separately from state-input fields.
     walker = Walker()
     assert list(walker.contract.state_input_spec.__keys__) == []
-    assert walker.contract.init_takes_rng
+    assert walker.contract.apply_takes_rng
+
+    seeded = Leaf(
+        lambda state, input: (state, state + input),
+        init=lambda rng: jax.random.normal(rng.next()),
+        name='seeded',
+    )
+    assert list(seeded.contract.state_input_spec.__keys__) == []
+    assert seeded.contract.init_takes_rng
 
     assert list(Integrator().contract.state_input_spec.__keys__) == []
 
@@ -94,8 +102,12 @@ def test_state_input_spec_non_cyclic_is_absent():
 
 
 def test_state_input_spec_composes_separately_from_init_entropy():
-    from nodejax.control import Walker
-    net = serial(w=Walker(), g=Gain())
+    seeded = Leaf(
+        lambda state, input: (state, state + input),
+        init=lambda rng: jax.random.normal(rng.next()),
+        name='seeded',
+    )
+    net = serial(w=seeded, g=Gain())
     s = net.contract.state_input_spec
     assert list(s.__keys__) == ['w', 'g']
     assert net.contract.init_takes_rng

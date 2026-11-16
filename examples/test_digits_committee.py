@@ -24,9 +24,8 @@ import jax.numpy as jnp
 import optax
 from sklearn.datasets import load_digits
 
-from nodejax import (Node, Leaf, serial, ensemble, stack, scan, scanned, trained, residual,
-                     batch, train_step, tree_filter, ambient, nn)
-from nodejax.struct import Struct
+from nodejax import (Node, Leaf, serial, ensemble, stack, scanned, trained, residual,
+                     batch, train_step, ambient, nn)
 
 HIDDEN, MEMBERS, LAYERS = 24, 3, 2
 BATCH, EPOCHS = 125, 30
@@ -75,7 +74,7 @@ def test_assembly() -> None:
     pipe = batch(build())
     model = pipe.with_input(jnp.zeros((BATCH, 64))).parameterize(rng=jax.random.PRNGKey(0))
 
-    wh = model.param.encoder.stack_norm_res_rnn.res_rnn.wh
+    wh = model.param.encoder.stack.res.wh
     assert wh.shape == (MEMBERS, LAYERS, HIDDEN, HIDDEN)
     assert not jnp.allclose(wh[0], wh[1])
     assert not jnp.allclose(wh[0, 0], wh[0, 1])

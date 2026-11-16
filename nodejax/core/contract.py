@@ -798,19 +798,13 @@ class Contract:
     def member_init(self, name: str, param, formed_input: PyTree,
                     rng: MaybeKeyStream, *, input=_KEEP,
                     input_spec: PyTree = None) -> PyTree:
-        """Constructs member `name`'s state tree, reusing or rekeying captured state when present."""
+        """Constructs member `name`'s state tree, reusing captured state when present."""
         if name not in self._def.members:
             raise TypeError(f'{self.name}: no member {name!r}')
         member = getattr(self._def.members, name)
         if not member.cyclic:
             return ()
         if name in self._def.captures.state:
-            from nodejax.core.binding import _has_rng_deep
-            if _has_rng_deep(self._def.captures.state[name]):
-                from nodejax.core.compose import _rekeyed
-                return _rekeyed(
-                    formed_input, rng.next(),
-                    f"member '{name}'")
             return formed_input
         child = member.contract.for_input(input_spec)
         child_rng = rng.child(child.init_takes_rng)

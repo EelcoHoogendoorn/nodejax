@@ -111,8 +111,8 @@ def pendulum_critic() -> Node:
 
 
 def pendulum_critic_loss(reduced_cost: jax.Array, target: jax.Array, *, aux: Struct) -> jax.Array:
-    """Fits every critic ensemble member in `aux.reduce_min.population` against `target`."""
-    member_costs = aux.reduce_min.population
+    """Fits every critic ensemble member in `aux.reduce.population` against `target`."""
+    member_costs = aux.reduce.population
     return mse(member_costs, target[..., None])
 
 

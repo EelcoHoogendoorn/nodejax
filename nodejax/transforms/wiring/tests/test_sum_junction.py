@@ -19,16 +19,6 @@ def Primed():
     return Leaf(apply, init=init, name='primed').node
 
 
-def Streamy():
-    def init(rng):
-        return Struct(rng=rng)
-
-    def apply(state, input):
-        return state, input
-
-    return Leaf(apply, init=init, name='streamy').node
-
-
 def test_it_adds_what_the_members_make_of_one_input():
     """Verifies that `sum_junction` feeds every member the same input and sums only member outputs."""
     block = sum_junction(a=Gain(), b=Gain()).parameterize(
@@ -64,11 +54,11 @@ def test_param_and_state_are_keyed_by_member():
 def test_stochastic_members_get_independent_keys():
     """Verifies that `sum_junction` splits one boundary `init` PRNG key into distinct subkeys per stochastic member."""
     def Noise():
-        def init(param, rng):
-            return Struct(rng=rng)
+        def init(rng):
+            return jax.random.normal(rng.next())
 
         def apply(state, input):
-            return state, jax.random.normal(state.rng, jnp.shape(input))
+            return state, input + state
 
         return Leaf(apply, init=init, name='noise')
 
@@ -76,7 +66,7 @@ def test_stochastic_members_get_independent_keys():
     state = block.with_input(jnp.zeros(())).bind(block.param).init(
         rng=jax.random.PRNGKey(0))
 
-    assert jnp.any(state.a.rng != state.b.rng)
+    assert not jnp.allclose(state.a, state.b)
 
 
 def test_it_is_a_node_like_any_other():
@@ -129,15 +119,3 @@ def test_state_bound_primer_is_a_finished_state_slot():
     assert not block.contract.init_requires_input
     assert jnp.allclose(block.init().p, 7.0)
     assert jnp.allclose(block.init(p=jnp.asarray(2.0)).p, 2.0)
-
-
-def test_stored_junction_rng_is_rekeyed():
-    original = jax.random.PRNGKey(7)
-    stored = Streamy().bind(state=Struct(rng=original))
-    block = sum_junction(s=stored, g=Gain()).parameterize(
-        g=Struct(scale=1.0))
-
-    with pytest.raises(TypeError, match='rng'):
-        block.init()
-    state = block.init(rng=jax.random.PRNGKey(1))
-    assert not jnp.array_equal(state.s.rng, original)

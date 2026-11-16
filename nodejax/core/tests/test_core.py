@@ -111,3 +111,36 @@ def test_attribute_access_is_destructuring_only():
 
     with pytest.raises(AttributeError, match='values live under .param'):
         comp.nonexistent
+
+
+def test_pnode_and_psnode_parameterize_idempotent_and_override():
+    """Verifies `PNode.parameterize()` and `PSNode.parameterize()` return bound `PNode` views."""
+    plain = Leaf(lambda input: input * 2.0, name='double')
+    assert plain.parameterize() is plain
+
+    gain = Gain().parameterize(scale=3.0)
+    assert gain.parameterize() is gain
+    rebound = gain.parameterize(scale=5.0)
+    assert rebound.apply(2.0) == 10.0
+
+    stateful = Integrator().parameterize(decay=0.25).initialize()
+    dropped = stateful.parameterize()
+    assert type(dropped) is PNode
+    assert jnp.allclose(dropped.param.decay, 0.25)
+
+
+def test_serial_signature_exposes_members_kwargs():
+    """Verifies `inspect.signature(serial)` displays `(**members)` rather than internal parameters."""
+    import inspect
+
+    params = inspect.signature(nodejax.serial).parameters
+    assert list(params) == ['members']
+    assert params['members'].kind is inspect.Parameter.VAR_KEYWORD
+
+
+def test_anonymous_pipe_uses_outer_head_identifier():
+    """Verifies `>>` names transformed anonymous stages from their outer head identifier."""
+    from nodejax import ensemble, reduce, stack
+
+    pipe = ensemble(stack(nn.Linear(4), n=2), n=3) >> reduce(jnp.mean)
+    assert pipe.members.__keys__ == ('ensemble', 'reduce')

@@ -6,9 +6,9 @@
 
 `BYOL` is a three-member `Composite` combining a nested `train_step` trainer over the online
 encoder and predictor, an `nn.EMA(tau, warm=True)` filter smoothing the online encoder weights in
-state, and a `Views` leaf advancing its augmentation PRNG key in state. Custom `param` and `init`
-functions size the online network from `BYOL`'s input, warm-start the EMA filter at the initial
-online encoder weights, and seed `Views`.
+state, and a stateless `Views` leaf drawing two augmented views per batch from call-time `rng`.
+Custom `param` and `init` functions size the online network from `BYOL`'s input and warm-start the
+EMA filter at the initial online encoder weights.
 
 During `apply`, the target branch evaluates `enc.apply(self.ema.state, pair.v2)` outside the
 nested trainer's `value_and_grad`, so target representations enter `nmse` as constant target data
@@ -28,7 +28,7 @@ import optax
 from sklearn.datasets import load_digits
 
 from nodejax import (
-    Composite, KeyStream, Leaf, Node, PNode, nn, node, serial, train_step,
+    Composite, Leaf, Node, PNode, nn, node, serial, train_step,
 )
 from nodejax.struct import Struct
 
@@ -80,17 +80,12 @@ def nmse(pred: jax.Array, target: jax.Array) -> jax.Array:
 
 @node
 def Views(augment: Callable) -> PNode:
-    """Draws two independently augmented views per batch while advancing its PRNG key in state."""
-    def init(rng) -> Struct:
-        return Struct(rng=rng)
+    """Draws two independently augmented views per batch from call-time `rng`."""
+    def apply(input, rng) -> Struct:
+        return Struct(v1=augment(rng.next(), input),
+                      v2=augment(rng.next(), input))
 
-    def apply(state, input) -> tuple[Struct, Struct]:
-        # A local `KeyStream` splits two independent augmentation keys from the per-step key.
-        rng = KeyStream(state.rng)
-        return state, Struct(v1=augment(rng.next(), input),
-                             v2=augment(rng.next(), input))
-
-    return Leaf(apply, init=init)
+    return Leaf(apply)
 
 
 @node
@@ -99,13 +94,13 @@ def BYOL(enc: Node, pred: Node, augment: Callable,
          loss: Callable = nmse, tau: float = TAU) -> Node:
     """Executes one BYOL training step over `enc` and `pred` with an EMA target encoder.
 
-    Carries `Struct(train, ema, views)` in state, evaluating the target branch at `self.ema.state`
+    Carries `Struct(train, ema)` in state, evaluating the target branch at `self.ema.state`
     outside `self.train` before updating the EMA filter from the stepped online encoder weights.
     """
     online = serial(enc=enc, pred=pred)
     members = Composite(train=train_step(online, loss, opt),
-                   ema=nn.EMA(tau, warm=True),
-                   views=Views(augment))
+                        ema=nn.EMA(tau, warm=True),
+                        views=Views(augment))
 
     def param(node, rng) -> Struct:
         """Resolves online network parameter shapes from `BYOL`'s input specification."""
@@ -113,19 +108,15 @@ def BYOL(enc: Node, pred: Node, augment: Callable,
         return Struct(
             train=resolved.node.parameterize(rng=rng.next()).param)
 
-    def init(param, rng) -> Struct:
-        """Initializes trainer state, warm-starts EMA from online encoder weights, and seeds `Views`."""
-        train_state = members.train.bind(param.train).init()
-        return Struct(
-            train=train_state,
-            ema=members.ema.init(input=train_state.opt.params.model.enc),
-            views=members.views.init(rng=rng.next()))
+    def init(self) -> None:
+        """Initializes trainer state and warm-starts `ema` from online encoder weights."""
+        self.ema.reset(input=self.train.params().enc)
 
     def apply(self, input) -> None:
         pair = self.views(input)
         targets = enc.apply(self.ema.state, pair.v2)
         step_loss = self.train(input=pair.v1, target=targets)
-        self.ema(self.train.state.opt.params.model.enc)
+        self.ema(self.train.params().enc)
         return step_loss
 
     return members(apply, param=param, init=init)
@@ -158,9 +149,8 @@ def test_byol_learns_a_representation() -> None:
     labels = 100
 
     byol = BYOL(enc, Predictor(), augment, optax.adam(1e-3))
-    # `parameterize` draws network weights while `initialize` seeds the augmentation key in state.
     byol = byol.with_input(jnp.zeros((1, IMAGE * IMAGE))).parameterize(
-        rng=jax.random.PRNGKey(0)).initialize(rng=jax.random.PRNGKey(1))
+        rng=jax.random.PRNGKey(0)).initialize()
     random_enc_params = byol.state.train.opt.params.model.enc
 
     shuffle = np.random.RandomState(1)
@@ -168,7 +158,7 @@ def test_byol_learns_a_representation() -> None:
         [shuffle.permutation(len(X_train)) for _ in range(STEPS * BATCH // len(X_train))]
     )[:STEPS * BATCH].reshape(STEPS, BATCH)
     # Composite auxiliary outputs nest the trainer's loss trajectory under its member name `train`.
-    byol, (_, aux) = byol.scan(X_train[batch_indices])
+    byol, (_, aux) = byol.scan(X_train[batch_indices], rng=jax.random.PRNGKey(1))
     losses = aux.train.loss
 
     assert jnp.all(jnp.isfinite(losses))

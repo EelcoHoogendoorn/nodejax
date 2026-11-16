@@ -217,30 +217,24 @@ def test_trainer_rng_has_one_required_boundary_source():
     assert output is not None
 
 
-def test_stored_rng_state_keeps_a_static_required_init_channel():
-    def streamy():
+def test_finished_state_capture_is_deterministic_not_optional():
+    def random_start():
         def init(rng):
-            return Struct(rng=rng)
+            return Struct(offset=jax.random.uniform(rng.next(), ()))
 
         def apply(state, input):
-            return state, input
+            return state, input + state.offset
 
-        return Leaf(apply, init=init, name='streamy')
+        return Leaf(apply, init=init, name='random_start')
 
-    original = KEYS[0]
-    stored = streamy().bind(state=Struct(rng=original))
-    model = serial(stream=stored, gain=Gain()).parameterize(
-        gain=Struct(scale=1.0))
+    stored = random_start().initialize(rng=KEYS[0])
+    pipe = serial(random=stored, gain=Gain()).parameterize(
+        gain=Struct(scale=2.0))
 
-    assert model.contract.init_takes_rng
-    with pytest.raises(TypeError, match='requires'):
-        model.init()
-
-    initialized = model.init(rng=KEYS[1])
-    assert not jnp.array_equal(initialized.stream.rng, original)
-
-    replacement = Struct(rng=KEYS[2])
-    initialized = model.init(stream=replacement, rng=KEYS[1])
-    assert not jnp.array_equal(initialized.stream.rng, replacement.rng)
-    with pytest.raises(TypeError, match='replacement state contains no rng'):
-        model.init(stream=Struct(), rng=KEYS[1])
+    assert not pipe.contract.init_takes_rng
+    initialized = pipe.init()
+    assert jnp.allclose(initialized.random.offset, stored.state.offset)
+    replaced = pipe.init(random=Struct(offset=jnp.asarray(5.0)))
+    assert jnp.allclose(replaced.random.offset, 5.0)
+    with pytest.raises(TypeError, match='does not accept rng'):
+        pipe.init(rng=KEYS[1])

@@ -149,10 +149,15 @@ def open_loop_swing(
     and true joint velocities alongside observer velocity estimates.
     """
     n_steps = command.shape[0]
-    stepping = plant if isinstance(plant, PNode) else plant.parameterize()
-    state = stepping.init(rng=rng, start=start)
+    stepping = plant.parameterize()
+    init_key, run_key = jax.random.split(rng)
+    state = (stepping.init(rng=init_key, start=start)
+             if stepping.contract.init_takes_rng else stepping.init(start=start))
     program = scan(stepping, n=n_steps).bind(state=state)
-    _, outputs = jax.jit(program.apply)(command=command, disturbance=jnp.zeros((n_steps,)))
+    call_kwargs = dict(command=command, disturbance=jnp.zeros((n_steps,)))
+    if program.contract.apply_takes_rng:
+        call_kwargs['rng'] = run_key
+    _, outputs = jax.jit(program.apply)(**call_kwargs)
     outputs, _ = split_aux(outputs)
     true = stepping.mechanical(state=outputs.state)
     return Struct(

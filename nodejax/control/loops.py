@@ -15,24 +15,11 @@ from nodejax.transforms.policy import state_reinit
 
 
 @node
-def feedback(pipe: BaseNode, output_spec: PyTree = 0.0) -> Node | PNode:
+def closed_loop(pipe: BaseNode, output_spec: PyTree = 0.0) -> Node | PNode:
     """Closes a unit-feedback loop around `pipe` using a one-step `Delay` register `last`.
 
     Feeds `error = input - last.state` into `pipe`, emits `pipe(error)`, and stores that output into `last` for the next step. Because `last.state` is read before `last` is called, forward shape propagation does not reach `last` first; `output_spec` supplies the signal spec carried around the loop. Preserves `pipe` as a direct Composite member so inner collective nodes such as `BatchNorm` remain visible to outer transforms.
     """
-    def apply(self, input) -> PyTree:
-        error = jax.tree.map(jnp.subtract, input, self.last.state)
-        out = self.pipe(error)
-        self.last(out)                        # store output for the next step
-        return out
-
-    last = Delay().with_input(output_spec)
-    return Composite(pipe=pipe, last=last)(apply, name=f'feedback({pipe.name})')
-
-
-@node(name='loop')
-def closed_loop(pipe: BaseNode, output_spec: PyTree = 0.0) -> Node | PNode:
-    """Closes a unit-feedback loop named `'loop'` mapping reference `input` to plant measurement."""
     def apply(self, input) -> PyTree:
         error = jax.tree.map(jnp.subtract, input, self.last.state)
         out = self.pipe(error)
@@ -43,7 +30,7 @@ def closed_loop(pipe: BaseNode, output_spec: PyTree = 0.0) -> Node | PNode:
     return Composite(pipe=pipe, last=last)(apply)
 
 
-@node(name='oloop')
+@node
 def observed_loop(
         pipe: BaseNode, belief_spec: PyTree, output_spec: PyTree = 0.0,
 ) -> Node | PNode:

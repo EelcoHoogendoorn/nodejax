@@ -9,8 +9,9 @@ import jax.numpy as jnp
 from nodejax.struct import Struct
 from nodejax import BaseNode, Node, PNode, PyTree, node, Leaf, Composite
 
+from examples.actuator.blocks import ClampNorm
 from examples.actuator.dq import DQ
-from nodejax.control import ClampNorm, Delay, Diff
+from nodejax.control import Delay, Diff
 from examples.actuator.motor import current_model
 
 

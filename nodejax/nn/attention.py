@@ -22,7 +22,7 @@ def tokens() -> PNode:
     return Leaf(lambda input: input.reshape(-1, input.shape[-1]))
 
 
-@node(name='pos')
+@node
 def PosEmbed() -> Node:
     """Adds a learned `(tokens, width)` position embedding sized from `node.input.shape`."""
     def param(node, rng) -> Struct:
@@ -34,7 +34,7 @@ def PosEmbed() -> Node:
     return Leaf(apply, param=param)
 
 
-@node(name='attn')
+@node
 def Attention(heads: int, causal: bool = False) -> Node:
     """Computes multi-head self-attention over one `(tokens, width)` sequence.
 

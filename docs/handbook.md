@@ -29,7 +29,7 @@ Generic  --(specialize)-->  Node  --(with_input)-->  Node  --(parameterize)-->  
 | `.node`, `.generic` | Underlying unbound `Node` view and reconstructing `Generic` (if built by `@node`) |
 | `.with_input(input_spec, *, bundle=...)` | Resolves input-dependent shapes from an example array, `Struct`, or `spec(...)` without binding runtime data |
 | `.specialize(**overrides)` | Reruns construction with updated static arguments matched by exact path or glob (`'*.train'`, `'layer.width'`), returning a fresh unbound `Node` |
-| `.parameterize(param_input=..., **fields)` | Constructs parameters (accepting `rng=key` when stochastic) and returns a `PNode` (or `PSNode` for a stateless Node that needs no state) |
+| `.parameterize(param_input=..., **fields)` | Constructs parameters on `Node` (accepting `rng=key` when stochastic) and returns a `PNode`; idempotent on `PNode` / `PSNode` when called with no overrides |
 | `.describe()`, `.tree_view(...)`, `.summary(...)`, `.statics_by_path()` | Structural and parameter/state inspection helpers (see Section 7) |
 
 ### Stage-specific view methods
@@ -121,12 +121,12 @@ Any non-reserved parameter name declared on `param`, `init`, or `apply` becomes 
 
 ### `derive`
 
-`derive(parent, *, apply=None, init=None, param=None, name=None, apply_input_spec=None, methods={}, tags=None)` produces a new leaf `Node` from an unbound leaf `parent`:
+`derive(parent, *, apply=None, init=None, param=None, name=None, apply_input_spec=None, methods={}, tags=None, boundary={})` produces a new leaf `Node` from an unbound leaf `parent`:
 
 - Omitted `param`, `init`, or `apply` hooks are inherited from `parent`.
 - When both `parent` and `derive` supply `param` or `init`, their returned `Struct` keys must be disjoint and merge into one flat `Struct`.
 - Inherited transitions update their own state fields while preserving added state fields; an explicit replacement `apply` over merged state returns the complete state `Struct`.
-- `methods` and `tags` merge by union, with child methods overriding matching names.
+- `methods`, `tags`, and `boundary` merge by union, with child `methods` and `boundary` hooks overriding matching names.
 
 ### `Composite` and `Wrapper`
 
@@ -248,9 +248,9 @@ Import via `from nodejax import nn` or `import nodejax.nn as nn`.
 
 | Category | Exports |
 | :--- | :--- |
-| Feedback loops | `closed_loop(pipe, output_spec=0.0)`, `feedback(pipe, output_spec=0.0)`, `observed_loop(pipe, belief_spec, output_spec=0.0)`, `sum_junction(**members)` |
+| Feedback loops | `closed_loop(pipe, output_spec=0.0)`, `observed_loop(pipe, belief_spec, output_spec=0.0)`, `sum_junction(**members)` |
 | Controllers | `PID(dt, dwrap=None)`, `PD(dt)` |
-| Signal & nonlinear blocks | `Gain()`, `Integrator()`, `Diff(dt)`, `Delay(warm=False)`, `EMA(dt, warm=False)`, `MovingAverage(window, warm=False)`, `Blend(dt)`, `Clamp()`, `ClampNorm()`, `Deadband()`, `Quantize(resolution)`, `RateLimit(dt)` |
+| Signal & nonlinear blocks | `Gain()`, `Integrator()`, `Diff(dt, warm=False)`, `Delay(warm=False)`, `EMA(dt, warm=False)`, `MovingAverage(window, warm=False)`, `Blend(dt)`, `Clamp()`, `Deadband()`, `Quantize(resolution)`, `RateLimit(dt)` |
 | Plants | `FirstOrder(dt, warm=False)`, `StateSpace()`, `Walker()` |
 
 The two `EMA` factories parameterize retention differently: `nn.EMA(tau, warm=False)` takes a static dimensionless retention factor `tau` (`tau * state + (1 - tau) * x`), whereas `control.EMA(dt, warm=False)` declares `tau` as a differentiable continuous-time constant in `param` (`alpha = 1 / (param.tau / dt + 1)`).

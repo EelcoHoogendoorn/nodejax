@@ -13,8 +13,7 @@ import jax.numpy as jnp
 import optax
 
 from nodejax import (
-    Composite, Leaf, Node, PNode, batch, derive, nn, node, scan, train_step,
-    trained,
+    Composite, Leaf, Node, PNode, batch, nn, node, train_step, trained,
 )
 from nodejax.struct import Struct
 from examples.util import mse

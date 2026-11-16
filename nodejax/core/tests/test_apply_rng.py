@@ -193,22 +193,20 @@ def test_batch_splits_apply_rng_per_element():
 
 def test_nonparametric_cyclic_ensemble():
     from nodejax import ensemble
-    from nodejax.control import Walker
-    import pytest as _pytest
 
-    # Builds a parameterless stochastic-state node.
+    # Builds a parameterless cyclic node that draws noise at apply time.
     def drifter():
-        def init(rng):
-            return Struct(x=jnp.asarray(0.0), rng=rng)
-        def apply(state, input):
-            new = state.x + input + 0.1 * jax.random.normal(state.rng)
-            return state.replace(x=new), new
+        def init():
+            return jnp.asarray(0.0)
+        def apply(state, input, rng):
+            new = state + input + 0.1 * jax.random.normal(rng.next())
+            return new, new
         return Leaf(apply, init=init, name='drifter')
 
     ens = ensemble(drifter().node, n=3)
     node = ens.parameterize()
-    s = node.init(rng=jax.random.PRNGKey(0))
-    s2, out = node.apply(s, jnp.asarray(1.0))
+    s = node.init()
+    s2, out = node.apply(s, jnp.asarray(1.0), rng=jax.random.PRNGKey(0))
     assert out.shape == (3,)
     assert len(set(map(float, out))) == 3
 

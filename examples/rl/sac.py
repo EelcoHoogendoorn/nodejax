@@ -152,17 +152,9 @@ def SACUpdate(
         self.temperature_trainer(logprob=replayed.logprob)
         return replayed, Aux(temperature=alpha)
 
-    def init(param):
+    def init(self) -> None:
         """Initializes `ema_critic` directly from `critic_trainer`'s initial parameters without requiring a minibatch."""
-        critic_state = critic_trainer.bind(param.critic_trainer).init()
-        fitted = critic_trainer.bind(param.critic_trainer, state=critic_state)
-        return Struct(
-            actor_trainer=actor_trainer.bind(param.actor_trainer).init(),
-            critic_trainer=critic_state,
-            temperature_trainer=temperature_trainer.bind(
-                param.temperature_trainer).init(),
-            ema_critic=ema_critic.bind(()).init(input=fitted.params()),
-        )
+        self.ema_critic.reset(input=self.critic_trainer.params())
 
     return members(apply, init=init)
 

@@ -297,7 +297,7 @@ def critic_swing_up() -> None:
         n_refinements=N_EVALUATION_REFINEMENTS,
         n_steps_per_plan=N_TRAINING_STEPS_PER_PLAN,
     )
-    learned_controller = controller if isinstance(controller, PNode) else controller.parameterize()
+    learned_controller = controller.parameterize()
     learned = receding_trajectory(
         learned_controller,
         starts,

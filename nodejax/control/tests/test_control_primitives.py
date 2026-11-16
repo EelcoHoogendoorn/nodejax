@@ -7,12 +7,26 @@ import pytest
 from nodejax import PNode, PyTree, scanned
 from nodejax.control import (
     Deadband,
+    Diff,
     FirstOrder,
     MovingAverage,
     Quantize,
     StateSpace,
 )
 from nodejax.struct import Struct
+
+
+def test_diff_cold_and_warm_initialization() -> None:
+    inputs = jnp.array([2.0, 5.0, 5.0])
+    cold = Diff(0.5).with_input(0.0).initialize()
+    cold, cold_out = cold.scan(inputs)
+    assert jnp.allclose(cold_out, jnp.array([4.0, 6.0, 0.0]))
+    assert jnp.allclose(cold.state, 5.0)
+
+    warm = Diff(0.5, warm=True).initialize(input=2.0)
+    warm, warm_out = warm.scan(inputs)
+    assert jnp.allclose(warm_out, jnp.array([0.0, 6.0, 0.0]))
+    assert jnp.allclose(warm.state, 5.0)
 
 
 def test_quantize_and_deadband_compose_over_pytrees() -> None:

@@ -5,7 +5,7 @@ Composes encoder and observer sensing, outer command control, `DQ`-frame current
 
 from examples.actuator.dq import DQ
 from examples.actuator.motor import BenchMotor, Electrical, Mechanical
-from examples.actuator.blocks import (Observer, Encoder, CurrentSensor,
+from examples.actuator.blocks import (ClampNorm, Observer, Encoder, CurrentSensor,
                                               Noisy, Bag, wrap)
 from examples.actuator.estimation import ModelEstimator
 from examples.actuator.current_controller import (CurrentController,
