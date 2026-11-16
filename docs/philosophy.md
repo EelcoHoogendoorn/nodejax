@@ -2,7 +2,7 @@
 
 ## Closure under composition and transformation
 
-NodeJAX is a functional object layer for stateful differentiable programs in JAX. JAX closes pure functions under composition and under transformations such as `jit`, `grad`, `vmap`, and `lax.scan`: transforming a function yields another function that can be composed and transformed again. NodeJAX gives larger stateful program units the same closure.
+NodeJAX builds functional objects in JAX. JAX closes pure functions under composition and under transformations such as `jit`, `grad`, `vmap`, and `lax.scan`, where transforming a function yields another function that can be composed and transformed again. NodeJAX gives program units with parameters and evolving state the same closure.
 
 NodeJAX calls its unit of organization a ***Node***. A neural layer, controller, physical plant, state estimator, KV cache, replay buffer, or training step has the same structural representation. Composition connects Nodes, transformations reinterpret Nodes, and both return ordinary Nodes.
 
@@ -88,15 +88,15 @@ advanced, output = model(input_data)
 
 ## One state model across domains
 
-Sequential evolution in JAX takes the form `(carry, input) -> (next_carry, output)`, and cyclic Nodes use the matching signature `apply(param, state, input) -> (next_state, output)`.
+NodeJAX calls a state-threading Node ***cyclic*** (`node.cyclic`) rather than stateful. In imperative object-oriented code, a stateful object holds mutable state inside itself across calls; in NodeJAX, a `Node` holds no state and a `PSNode` is an immutable `(Def, param, state)` PyTree snapshot whose call returns `(next_psnode, output)` while leaving the original value untouched. What distinguishes a recurrent cell, filter, plant, cache, or optimizer from a feed-forward map is a feedback cycle across steps, matching JAX's `lax.scan` transition `(carry, input) -> (next_carry, output)` with `apply(param, state, input) -> (next_state, output)`.
 
-An RNN hidden vector, BatchNorm running moments, Adam momentum tensors, a motor's rotor velocity and winding currents, a replay buffer, and an autoregressive KV cache all share this state contract because they advance by the same mathematical transition. Composing a neural controller, a state estimator, a physical plant, and an optimizer produces one structured state PyTree with no translation between module buffers, scan carries, optimizer stores, and simulator contexts.
+An RNN hidden vector, BatchNorm running moments, Adam momentum tensors, a motor's rotor velocity and winding currents, a replay buffer, and an autoregressive KV cache all share this cyclic transition. Composing a neural controller, a state estimator, a physical plant, and an optimizer produces one structured state PyTree with no translation between module buffers, scan carries, optimizer stores, and simulator contexts.
 
 ## State lifetimes stay attached to the state
 
 Sharing one transition contract does not force every state slot to share one reset schedule. During chunked sequence training, an RNN hidden state resets at the start of each episode while normalization statistics persist across episodes; in adaptive control, a plant restarts per trial while an online estimator carries its belief forward.
 
-NodeJAX attaches reset behavior to the Node that owns the state. `state_reinit(RNN(64), boundary='episode')` or a leaf `boundary={'episode': ...}` hook declares how that state responds when a named boundary occurs. An enclosing `scan(model, boundary='episode')` announces the boundary at the start of each call without inspecting member layouts, and the stateful Node carries its lifetime policy unchanged when composed into new rollouts or trainers.
+NodeJAX attaches reset behavior to the Node that owns the state. `state_reinit(RNN(64), boundary='episode')` or a leaf `boundary={'episode': ...}` hook declares how that state responds when a named boundary occurs. An enclosing `scan(model, boundary='episode')` announces the boundary at the start of each call without inspecting member layouts, and the cyclic Node carries its lifetime policy unchanged when composed into new rollouts or trainers.
 
 ## Generic Nodes decouple architecture from sizing
 
@@ -113,7 +113,7 @@ Dataflow-implied dimensions such as input fan-in resolve later from `with_input(
 
 ## Training lives inside the same algebra
 
-Optimization is a stateful transition over a model and a loss:
+Optimization is a cyclic transition over a model and a loss:
 
 ```python
 trainer = train_step(model, loss_fn, optax.adam(1e-3))

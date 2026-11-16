@@ -65,7 +65,7 @@ def Attention(d: int, max_len: int) -> Node:
 
 @node(name='decode')
 def Decoder(d: int, max_len: int) -> Node:
-    """Computes single-token causal attention against a stateful `KVCache` member."""
+    """Computes single-token causal attention against a cyclic `KVCache` member."""
     members = Composite(
         q=nn.Linear(d),
         k=nn.Linear(d),

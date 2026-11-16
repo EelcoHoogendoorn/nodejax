@@ -45,7 +45,7 @@ def test_freeze_whole_node_is_noncyclic_and_faithful():
 def test_tree_freeze_propagates_cyclicity():
     snet, model, state, ref = _pipe()
     tf = tree_freeze(model, tree_filter(state, 'ema'))
-    # Freezing the sole stateful member makes the enclosing pipe acyclic.
+    # Freezing the sole cyclic member makes the enclosing pipe acyclic.
     assert not tf.cyclic
     assert tf.contract.input_spec is None
     assert jnp.allclose(tf.apply(X), ref)

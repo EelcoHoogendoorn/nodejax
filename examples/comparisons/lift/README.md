@@ -31,7 +31,7 @@ Each file also tests wrapping the framework's secondary state representation (`s
 | Secondary state mechanism | carried (`single_batch_state` tag) | carried (`nnx.BatchStat`) | rejected (`eqx.nn.State` incompatible) |
 | Self-nesting `stack(stack(bare))` | preserves `takes_rng=False` | breaks via signature inspection | breaks via signature inspection |
 
-Equinox's `eqx.nn.StateIndex` fails to allocate independent per-layer slots under `eqx.filter_vmap`, forcing `lift_equinox.py` onto a `(successor, output)` return convention. That convention is incompatible with `eqx.nn.StatefulLayer` (`eqx.nn.BatchNorm`), splitting Equinox's stateful modules into two mutually incompatible worlds (`lift_equinox.py` vs. [`residual_equinox.py`](../residual/residual_equinox.py)).
+Equinox's `eqx.nn.StateIndex` fails to allocate independent per-layer slots under `eqx.filter_vmap`, forcing `lift_equinox.py` onto a `(successor, output)` return convention. That convention is incompatible with `eqx.nn.StatefulLayer` (`eqx.nn.BatchNorm`), splitting Equinox's state-carrying modules into two mutually incompatible worlds (`lift_equinox.py` vs. [`residual_equinox.py`](../residual/residual_equinox.py)).
 
 Run the three columns directly:
 

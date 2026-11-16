@@ -464,7 +464,7 @@ def test_param_shape_walk_preserves_method_only_members_and_live_slices():
 
 
 def test_pure_state_composite_binds_itself():
-    """Verifies a `Composite` of parameterless stateful members returns a bound `PNode` directly."""
+    """Verifies a `Composite` of parameterless cyclic members returns a bound `PNode` directly."""
     from nodejax import PNode
     members = Composite(plant=Servo(DT), delay=Delay())
 

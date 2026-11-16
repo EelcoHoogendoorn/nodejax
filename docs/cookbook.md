@@ -32,7 +32,7 @@ assert gain(3.0) == 6.0
 
 A `Leaf` declares up to three pure functions (`param`, `init`, and `apply`). `Gain` defines `param` to construct its parameter `Struct` from caller-supplied `scale` and `apply` to compute the forward pass. `@node` records static factory arguments and derives the default snake_case name `gain`.
 
-## 2. Cyclic stateful Nodes
+## 2. Cyclic Nodes
 
 ```python
 @node

@@ -1,4 +1,4 @@
-"""Verifies `BatchNorm` and `Whiten` as per-sample stateful Nodes over named collective axes.
+"""Verifies `BatchNorm` and `Whiten` as per-sample cyclic Nodes over named collective axes.
 
 Running statistics live in cyclic `state`, so evaluation freezes `state` rather
 than toggling a mode flag. Collective moments reduce over named mapped axes

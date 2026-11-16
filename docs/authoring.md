@@ -25,7 +25,7 @@ Transforms act on `apply` and ignore auxiliary methods. Whenever an operation su
 
 ## Control and physical simulation
 
-Control systems decompose along physical and signal boundaries, and each stateful element owns the state that evolves inside it. An `Integrator` owns its accumulator, a `Delay` owns its one-step register, and a plant owns its physical coordinates. Closing a unit-feedback loop combines an open-loop pipe with a `Delay` register inside a `Composite`:
+Control systems decompose along physical and signal boundaries, and each cyclic Node owns the state that evolves across its steps. An `Integrator` owns its accumulator, a `Delay` owns its one-step register, and a plant owns its physical coordinates. Closing a unit-feedback loop combines an open-loop pipe with a `Delay` register inside a `Composite`:
 
 ```python
 @node
@@ -48,7 +48,7 @@ rollout = scanned(loop)
 trainer = train_step(batch(rollout), tracking_loss, optax.adam(1e-2))
 ```
 
-When multiple substeps update a coupled collection of bodies within a single timestep, individual substeps stay stateless functions of the body record while the outer solver step closes the state loop with `cyclic`. In position-based dynamics (`examples/pbd/pbd.py`), unconstrained prediction, iterative constraint projection, and velocity recovery all transform a `Particle` record passed as call data, and `cyclic` turns the composed step into a stateful transition over the particle collection:
+When multiple substeps update a coupled collection of bodies within a single timestep, individual substeps stay stateless functions of the body record while the outer solver step closes the state loop with `cyclic`. In position-based dynamics (`examples/pbd/pbd.py`), unconstrained prediction, iterative constraint projection, and velocity recovery all transform a `Particle` record passed as call data, and `cyclic` closes the composed step into a state-passing transition over the particle collection:
 
 ```python
 def pbd_step(
@@ -123,7 +123,7 @@ Inner test-time updates, per-episode support fine-tuning, rematerialized ensembl
 
 ## Reinforcement learning
 
-Reinforcement learning libraries customarily center on a stateful `Agent` object with `.act()`, `.evaluate()`, and `.update()` methods surrounded by an imperative rollout loop. In NodeJAX, each transformed unit becomes a Node, and an assembly function wires complete collaborators into one iteration Node.
+Reinforcement learning libraries customarily center on a mutable `Agent` object with `.act()`, `.evaluate()`, and `.update()` methods surrounded by an imperative rollout loop. In NodeJAX, each transformed unit becomes a Node, and an assembly function wires complete collaborators into one iteration Node.
 
 Policy-plant interaction is a two-member `Composite` (`examples/rl/control.py`). Its authored `init(self, input)` primes the plant from `initial_plant_state` and initializes any recurrent policy state from the plant's initial observation:
 

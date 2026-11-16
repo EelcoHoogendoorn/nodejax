@@ -1,7 +1,7 @@
 """Host-side training control around a scanned `train_step` Node.
 
 `train_step` defines one pure, resumable optimizer update, and `scan(train_step(...))`
-fuses a chunk of updates into one compiled stateful call. Metric aggregation,
+fuses a chunk of updates into one compiled state-passing call. Metric aggregation,
 logging, and early stopping execute in ordinary Python between chunks:
 
     for chunk in chunks:

@@ -33,7 +33,7 @@ In Flax NNX, `nnx.RNNCellBase` cells take `(carry, input) -> (carry, output)` an
 
 In Equinox, subclassing `eqx.nn.StatefulLayer` works with `eqx.nn.make_with_state` and `eqx.nn.BatchNorm`, yet rejects `(successor, output)` modules, which is the exact convention [`lift_equinox.py`](../lift/lift_equinox.py) is forced to adopt because `eqx.nn.StateIndex` breaks under `filter_vmap`. Similarly, calling `state.set(...)` inside `body` marks the input `State` stale before `x + out` runs.
 
-In NodeJAX, `residual` is intentionally unary on `input` (`extra-arguments=NO` when a body expects extra runtime call fields unless a multi-argument wiring transform names which argument is the residual path), while every stateful, recurrent, primed, stochastic, and `Aux`-emitting unary `Node` shares one `Contract`.
+In NodeJAX, `residual` is intentionally unary on `input` (`extra-arguments=NO` when a body expects extra runtime call fields unless a multi-argument wiring transform names which argument is the residual path), while every cyclic, primed, stochastic, and `Aux`-emitting unary `Node` shares one `Contract`.
 
 Run the three columns directly:
 

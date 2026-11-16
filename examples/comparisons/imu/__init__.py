@@ -1,1 +1,1 @@
-"""Stateful and stochastic IMU pipeline comparisons across frameworks."""
+"""Input-primed and stochastic IMU sensor pipeline comparisons across frameworks."""

@@ -35,7 +35,7 @@ def apply_draws() -> Node:
 
 
 def init_draws() -> Node:
-    """Builds a stateful leaf that draws a PRNG key during `init` only."""
+    """Builds a cyclic leaf that draws a PRNG key during `init` only."""
     def init(rng):
         return jax.random.normal(rng.next(), ())
 

@@ -68,7 +68,7 @@ def test_remat_composes_where_depth_is_spelled():
 
 
 def test_remat_is_a_wrapper_like_any_other():
-    """Verifies that `tree_freeze` traverses through `remat` to freeze stateful inner members."""
+    """Verifies that `tree_freeze` traverses through `remat` to freeze cyclic inner members."""
     pipe = (nn.Linear(4) >> nn.EMA(0.1)).node
     model = batch(remat(pipe)).with_input(jnp.ones((3, 4))).parameterize(
         rng=jax.random.PRNGKey(0))

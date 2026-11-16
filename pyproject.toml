@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nodejax"
 version = "1.0.0"
-description = "Composable stateful objects in JAX: neural layers, physical plants, controllers, caches, replay buffers, and trainers under one algebra."
+description = "Functional objects in JAX: neural layers, physical plants, controllers, caches, replay buffers, and trainers under one algebra."
 readme = "readme.md"
 authors = [{ name = "Eelco Hoogendoorn", email = "hoogendoorn.eelco@gmail.com" }]
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 keywords = [
     "jax",
-    "stateful",
+    "pytree",
     "functional",
     "neural-networks",
     "control",

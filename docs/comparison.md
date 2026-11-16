@@ -32,9 +32,9 @@ The [`ttt`](../examples/comparisons/ttt/) benchmark isolates reusable online tes
 | Implementation | Total lines | What reusable `TTT` requires |
 | :--- | ---: | :--- |
 | Raw JAX bespoke (`ttt_jax.py`) | 89 | Hand-rolled `RNN`-only `lax.scan` baseline with zero reusable wrapper; switching to `MLP` or another optimizer rewrites the scan body |
-| NodeJAX (`ttt_nodejax.py`) | 107 | One 3-line `ttt_meta(model)` function (`next_step_ttt(train_step(model, xent, learned_sgd(TTT_LR0)))`) wraps both stateless `MLP` (`PNode`) and stateful `RNN` (`PSNode`) with zero protocol branching |
+| NodeJAX (`ttt_nodejax.py`) | 107 | One 3-line `ttt_meta(model)` function (`next_step_ttt(train_step(model, xent, learned_sgd(TTT_LR0)))`) wraps both stateless `MLP` (`PNode`) and cyclic `RNN` (`PSNode`) with zero protocol branching |
 | PyTorch (`ttt_torch.py`) | 154 | Branches on `hasattr(model, 'init_carry')`, evicts weights out of `nn.Module` into dicts for `functional_call`, mangles `.` into `/` for `ParameterDict` rate keys, abandons `torch.optim` for inner updates, and unrolls time in Python |
-| Equinox (`ttt_equinox.py`) | 162 | Branches on `hasattr(model, 'init_carry')` because `eqx.Module` has no stateful call contract, partitions arrays via `eqx.filter` for rates, and threads `(fast, carry, prev)` through `lax.scan` by hand |
+| Equinox (`ttt_equinox.py`) | 162 | Branches on `hasattr(model, 'init_carry')` because `eqx.Module` has no state-passing call contract, partitions arrays via `eqx.filter` for rates, and threads `(fast, carry, prev)` through `lax.scan` by hand |
 | Haiku (`ttt_haiku.py`) | 164 | Nests an inner `hk.transform_with_state` inside the outer `hk.transform`, lifts inner parameters via `hk.lift`, registers a parallel `hk.get_parameter` rate tree, and threads `(fast_p, fast_s, prev)` by hand |
 | Flax NNX (`ttt_nnx.py`) | 178 | Branches on `hasattr(model, 'initialize_carry')` across NNX's split `Module(x)` vs. `Cell(carry, x)` protocols, clones `self.model` per sequence, subclasses `nnx.Param` (`Rate`) to separate inner and outer parameters, and threads `(carry, prev)` manually |
 
@@ -53,7 +53,7 @@ Changing normalization statistics to reset per recording exposes who actually ow
 | Flax Linen (`chunk_linen.py`, 290 lines) | 4 | Unchecked string collection paths and manual init dicts silently compute wrong statistics |
 | Equinox (`chunk_equinox.py`, 310 lines) | 6 | Initialization, step return tuples, and outer carries still type-check and run with stale state |
 
-In NNX, Linen, Equinox, and PyTorch, state lifetimes are encoded implicitly in surrounding loop plumbing rather than on the stateful unit. Omitting one reset line produces a valid program that silently computes the wrong trajectory, forcing a reader to audit every enclosing loop body.
+In NNX, Linen, Equinox, and PyTorch, state lifetimes are encoded implicitly in surrounding loop plumbing rather than on the state-owning unit. Omitting one reset line produces a valid program that silently computes the wrong trajectory, forcing a reader to audit every enclosing loop body.
 
 ## 3. Train and evaluation mode (`mode`)
 
@@ -66,7 +66,7 @@ The [`mode`](../examples/comparisons/mode/) benchmark trains a `Dropout` + `Batc
 
 ## 4. Reusable transforms and leaky module protocols (`residual` and `lift`)
 
-Writing a toy unary `x + body(x)` works in any library. [`residual`](../examples/comparisons/residual/) and [`lift`](../examples/comparisons/lift/) test what happens when `residual` and `stack` have to act as general library transforms over stateful, stochastic, input-primed, `Aux`-emitting, and self-nested blocks.
+Writing a toy unary `x + body(x)` works in any library. [`residual`](../examples/comparisons/residual/) and [`lift`](../examples/comparisons/lift/) test what happens when `residual` and `stack` have to act as general library transforms over state-carrying, stochastic, input-primed, `Aux`-emitting, and self-nested blocks.
 
 Both Flax NNX (`residual_nnx.py`, 244 lines; `lift_nnx.py`, 344 lines) and Equinox (`residual_equinox.py`, 269 lines; `lift_equinox.py`, 359 lines) fracture across incompatible state protocols inside their own ecosystems:
 
@@ -92,7 +92,7 @@ In NodeJAX, policies (feed-forward or `GRU`), physical plants, `nn.EMA` target n
 
 In [`generics`](../examples/comparisons/generics/), width, depth, ensemble size, and inner `Block` temperature are left unspecified while assembling `serial(entry=nn.Linear(), blocks=stack(Block()), readout=nn.Linear(1))`, then resolved by path via `.specialize(...)` (`generics_nodejax.py`, 104 lines, `THREADING_TAX = 0`). NNX (`generics_nnx.py`, 139 lines), PyTorch (`generics_torch.py`, 141 lines), and Equinox (`generics_equinox.py`, 182 lines) cannot compose an unfinished architecture at all, forwarding 5 configuration arguments through intermediate `__init__` chains that never use them (`THREADING_TAX = 5`). Keras 3 (`generics_keras.py`, 250 lines) matches NodeJAX on dataflow-inferred fan-in via lazy `build(input_shape)`, while still forwarding 4 architectural hyperparameters through Python builder functions (`THREADING_TAX = 4`).
 
-In [`imu`](../examples/comparisons/imu/), chaining two input-primed finite derivatives, white noise, Ornstein-Uhlenbeck drift, and quantization (`Derivative >> Derivative >> Noise >> Drift >> Quantize`) is a single `>>` expression in NodeJAX (`imu_nodejax.py`, 90 lines) whose priming, physical state container, and call-time `KeyStream` splitting derive from the leaves. NNX (`imu_nnx.py`, 101 lines) wires priming samples and named `nnx.Rngs` streams manually inside `IMU.__init__`, while Equinox (`imu_equinox.py`, 115 lines) repeats the stage topology across `IMUState`, `IMU.init`, and `IMU.step` plus manual step-key splitting so inserting one stateful stage requires four coordinated edits.
+In [`imu`](../examples/comparisons/imu/), chaining two input-primed finite derivatives, white noise, Ornstein-Uhlenbeck drift, and quantization (`Derivative >> Derivative >> Noise >> Drift >> Quantize`) is a single `>>` expression in NodeJAX (`imu_nodejax.py`, 90 lines) whose priming, physical state container, and call-time `KeyStream` splitting derive from the leaves. NNX (`imu_nnx.py`, 101 lines) wires priming samples and named `nnx.Rngs` streams manually inside `IMU.__init__`, while Equinox (`imu_equinox.py`, 115 lines) repeats the stage topology across `IMUState`, `IMU.init`, and `IMU.step` plus manual step-key splitting so inserting one state-carrying stage requires four coordinated edits.
 
 In [`tie`](../examples/comparisons/tie/), tying input and output embeddings is a five-way capability draw across NodeJAX (`tie_nodejax.py`, 62 lines), Haiku (`tie_haiku.py`, 81 lines), Flax NNX (`tie_nnx.py`, 89 lines), PyTorch (`tie_torch.py`, 89 lines), and Equinox's `eqx.nn.Shared` (`tie_equinox.py`, 115 lines); all five keep a single parameter leaf for the optimizer and produce zero drift (only naive Equinox array aliasing duplicates the leaf on PyTree flatten and drifts on step 1).
 

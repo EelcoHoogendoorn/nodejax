@@ -1,6 +1,6 @@
 """Closed-loop motor velocity control trained by backpropagation through physics.
 
-A stateful DC motor plant (`Motor`, tracking winding current and rotor angular
+A cyclic DC motor plant (`Motor`, tracking winding current and rotor angular
 velocity under voltage saturation) follows step velocity references driven by a
 committee of residual GRU stacks (`Controller`). Differentiating the unrolled
 closed loop updates controller weights across plant dynamics, actuator clipping,

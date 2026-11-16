@@ -1,4 +1,4 @@
-"""Public surface for composing and transforming functional stateful Nodes in JAX.
+"""Public surface for composing and transforming functional Nodes in JAX.
 
 `Node`, `PNode`, and `PSNode` expose the unbound, parameter-bound, and state-bound views of a normalized internal definition (`Def`), paired with authoring helpers (`@node`, `Leaf`, `Composite`, `Wrapper`) and contract-preserving transforms.
 """

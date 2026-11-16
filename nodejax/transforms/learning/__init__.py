@@ -1,4 +1,4 @@
-"""Re-exports stateful optimization, meta-learning, and test-time-training transforms."""
+"""Re-exports cyclic optimization, meta-learning, and test-time-training transforms."""
 
 from nodejax.transforms.learning.finetune import finetune
 from nodejax.transforms.learning.train_step import (

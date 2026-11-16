@@ -1,4 +1,4 @@
-"""Implements a cyclic replay buffer as a stateful Node.
+"""Implements a fixed-capacity replay ring buffer as a cyclic Node.
 
 Stores a fixed-capacity ring buffer of row pytrees alongside a write cursor and
 fill count. Each `apply` call writes a segment of rows at the cursor and wraps

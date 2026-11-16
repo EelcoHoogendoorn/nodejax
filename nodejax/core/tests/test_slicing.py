@@ -148,7 +148,7 @@ def test_the_trainer_slices_to_the_live_model():
 
 
 def test_batch_refuses_the_state_slice_and_allows_the_acyclic_one():
-    """Verifies `batch` refuses stateful `PSNode` slicing while permitting `.pnode` and acyclic slices."""
+    """Verifies `batch` refuses cyclic `PSNode` slicing while permitting `.pnode` and acyclic slices."""
     from nodejax import batch
     b = batch(Integrator().parameterize(), n=3).initialize()
     with pytest.raises(AttributeError, match='maps state'):

@@ -2,11 +2,11 @@
 
 [![tests](https://github.com/EelcoHoogendoorn/nodejax/actions/workflows/test.yml/badge.svg)](https://github.com/EelcoHoogendoorn/nodejax/actions/workflows/test.yml)
 
-Composable stateful JAX.
+Functional objects in JAX.
 
-JAX closes pure functions under composition and transformation. NodeJAX closes stateful objects under the same algebra: neural layers, physical plants, controllers, caches, replay buffers, and trainers are all `Node`s.
+JAX closes pure functions under composition and transformation. NodeJAX gives `Node`s the same closure: feed-forward maps and `cyclic` state transitions (layers, plants, controllers, caches, buffers, trainers) compose and transform by passing immutable `param` and `state` PyTrees explicitly.
 
-| | Pure functions (`jax`) | Stateful `Node`s (`nodejax`) |
+| | Functions (`jax`) | `Node`s (`nodejax`) |
 | :--- | :--- | :--- |
 | Compose | `lambda x: jnp.sum(jax.nn.sigmoid(x))` | `nn.RNN(64) >> nn.relu` |
 | Transform | `jax.jit(jax.vmap(f))` | `batch(scanned(ensemble(stack(node))))` |

@@ -24,7 +24,7 @@ X = jnp.array([3.0, 4.0, 5.0])
 
 
 def Primed() -> Node:
-    """Builds a stateful leaf whose initial state equals its first sample."""
+    """Builds a cyclic leaf whose initial state equals its first sample."""
     def init(input):
         return jnp.asarray(input)
 

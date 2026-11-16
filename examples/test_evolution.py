@@ -2,7 +2,7 @@
 
 Plain JAX helpers `propose` and `select` generate mutant-and-crossover candidate weight PyTrees
 and retain the lower-scoring survivor per population slot. `differential_evolution` wraps those
-operations as a parameter-free stateful optimizer `PNode` carrying `Struct(params, members)` in
+operations as a parameter-free cyclic optimizer `PNode` carrying `Struct(params, members)` in
 state, with `params` holding the lowest-scoring member at the same path `train_step` uses for live
 model weights.
 
