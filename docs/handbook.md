@@ -10,13 +10,13 @@ NodeJAX separates architectural construction, shape resolution, parameter creati
 Generic  --(specialize)-->  Node  --(with_input)-->  Node  --(parameterize)-->  PNode  --(initialize)-->  PSNode
 ```
 
-`Node`, `PNode`, and `PSNode` inherit shared inspection and configuration operations from `BaseNode`. `Generic` represents an unspecialized `@node` call with one or more unbound static arguments (`is_generic(x)` tests for a `Generic`, and `REQUIRED` marks mandatory unbound fields internally).
+`Node`, `PNode`, and `PSNode` inherit shared inspection and configuration operations from `BaseNode`. `Generic` represents an unspecialized `@node` call with one or more unbound static arguments (`is_generic(x)` tests for a `Generic`, and `REQUIRED` marks mandatory unbound fields internally). Static arguments on `Generic` and `Node` determine trace-time graph structure (changing them recompiles under `jax.jit`), whereas `PNode` and `PSNode` bind post-compilation `param` and `cyclic` `state` PyTree leaves that vary across calls, `vmap` axes, or optimization steps without recompiling.
 
 | View | Bound data | JAX PyTree leaves | Calling `view(...)` |
 | :--- | :--- | :--- | :--- |
 | `Generic` | Open factory + partial statics | Not a JAX PyTree | Raises until `specialize(...)` supplies remaining `unbound()` statics |
 | `Node` | Definition only (`param` unbound) | Empty static PyTree | `node.apply(param, ...)` runs with explicit `param` |
-| `PNode` | `param` bound (stateless or uninitialized) | `param` leaves | Stateless `pnode(input)` returns `output`; cyclic `PNode` requires `.initialize(...)` first |
+| `PNode` | `param` bound (acyclic or uninitialized) | `param` leaves | Acyclic `pnode(input)` returns `output`; cyclic `PNode` requires `.initialize(...)` first |
 | `PSNode` | `param` and `state` bound | `(param, state)` leaves | `psnode(input)` steps once and returns `(next_psnode, output)` |
 
 ### Shared `BaseNode` properties and methods
@@ -202,7 +202,7 @@ def GatedResidual(transform: Node, gate: Node) -> Node:
 
 | Transform / helper | Signature | Behavior |
 | :--- | :--- | :--- |
-| `train_step` | `train_step(model, loss_fn, tx, *, trainable=None)` | Cyclic trainer Node: `param` holds initial weights; `state` holds active weights, model state, and optimizer state (`tx` is an Optax transformation or optimizer Node). `loss_fn(output, target, *, aux=...)` (or a loss `Node`) produces scalar loss. `trainable` restricts updates by member name or path predicate. Exposes `.params()` and `.trained()` view methods |
+| `train_step` | `train_step(model, loss_fn, tx, *, trainable=None)` | Cyclic trainer Node: `param` holds non-optimized parameters alongside initial values of `trainable` parameters (and any optimizer `param`s); `state` holds active `trainable` parameters, model `state`, and optimizer `state` (`tx` is an Optax transformation or gradient/population optimizer Node). `loss_fn(output, target, *, aux=...)` (or a loss `Node`) produces scalar loss. `trainable` restricts updates by member name or path predicate. Exposes `.params()` and `.trained()` view methods |
 | `trained` | `trained(step)` | Scans a `train_step` Node over a sequence of training batches and returns `step.trained()` bound to final learned weights and state |
 | `finetune` | `finetune(step)` | Episode learner over `train_step`: adapts from `param` on `support` batches via `trained(step)` and evaluates the adapted model on `query` |
 | `supervised_ttt` | `supervised_ttt(step)` | Adapts `train_step` online per call on `(input, target)` pairs while emitting pre-update predictions |

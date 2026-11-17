@@ -30,7 +30,7 @@ gain = Gain().parameterize(scale=2.0)
 assert gain(3.0) == 6.0
 ```
 
-A `Leaf` declares up to three pure functions (`param`, `init`, and `apply`). `Gain` defines `param` to construct its parameter `Struct` from caller-supplied `scale` and `apply` to compute the forward pass. `@node` records static factory arguments and derives the default snake_case name `gain`.
+A `Leaf` declares up to three pure functions (`param`, `init`, and `apply`). `@node` records compile-time static factory arguments (changing them recompiles under `jax.jit`) and derives the default snake_case name `gain`, whereas `param` constructs post-compilation PyTree values such as `scale` that can vary across calls, `vmap` sweeps, or optimization steps without recompiling.
 
 ## 2. Cyclic Nodes
 
@@ -122,7 +122,7 @@ _, preds = fitted_model(x_batch)
 assert preds.shape == (32, 1)
 ```
 
-`train_step(model, loss_fn, optimizer)` turns a model into a cyclic Node whose `param` holds initial weights and whose `state` holds active weights, any model state, and Optax moments. `trained(trainer)` scans updates across the leading step axis and returns the fitted model as a `PSNode` (`fitted_model.pnode` drops the empty state on stateless models) alongside per-step `aux.loss`.
+`train_step(model, loss_fn, optimizer, trainable=...)` turns a model into a cyclic Node whose `param` holds non-optimized parameters alongside initial values of `trainable` parameters and whose `state` holds active `trainable` parameters, any model state, and Optax moments. `trained(trainer)` scans updates across the leading step axis and returns the fitted model as a `PSNode` (`fitted_model.pnode` drops the empty state on acyclic models) alongside per-step `aux.loss`.
 
 ## 6. Runtime stochasticity and `Aux` telemetry
 

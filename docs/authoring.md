@@ -23,6 +23,15 @@ def CommandLikelihood(policy: Node) -> Node:
 
 Transforms act on `apply` and ignore auxiliary methods. Whenever an operation such as policy log-probability evaluation needs to be mapped by `batch`, unrolled by `scan`, or differentiated by `train_step`, wrapping the method call in a `Wrapper` turns that operation into a Node's `apply`.
 
+Across domains, programs differ in how state ownership and operations partition across sub-Nodes:
+
+| Domain | State ownership | Composition pattern | Primary structural yield |
+| :--- | :--- | :--- | :--- |
+| Control and plants (`nodejax.control`, `examples/actuator/`) | Disjoint physical and estimator states per block | Multi-rate `Composite`s, `Delay`, and `closed_loop` | Replaces custom simulator harnesses; unified `param` tree for sweeps, evolution, and `grad` |
+| Coupled physics solvers (`examples/pbd/`, `examples/ode.py`) | Shared multi-body record threaded across sub-passes | Stateless `batch` / `repeat` passes closed via outer `cyclic(...)` | Combinator factoring of solver passes; direct coupling to actuators and controllers |
+| Neural architectures (`nodejax.nn`) | Per-layer carries, caches, and moments | `>>`, `residual`, `stack`, `ensemble`, `tie`, `eval_mode` | High primitive reuse; closure across deep architectural and adaptation stacks |
+| Multi-phase RL (`examples/rl/`) | Policy, critic, target, plant, replay `Buffer`, and optimizers | `Wrapper` query projections inside an iteration `Composite` | Single immutable experiment `PSNode`, zero-edit MLP/GRU policy polymorphism, and `scan` / `ensemble` over training runs |
+
 ## Control and physical simulation
 
 Control systems decompose along physical and signal boundaries, and each cyclic Node owns the state that evolves across its steps. An `Integrator` owns its accumulator, a `Delay` owns its one-step register, and a plant owns its physical coordinates. Closing a unit-feedback loop combines an open-loop pipe with a `Delay` register inside a `Composite`:
@@ -43,10 +52,12 @@ def closed_loop(pipe: Node, output_spec: Any = 0.0) -> Node:
 `closed_loop` assumes nothing about the internal structure of `pipe`. Connecting a learned recurrent committee to a DC motor and unrolling across time and setpoint batches uses stock transforms at the assembly site:
 
 ```python
-loop = closed_loop(Controller() >> Motor(dt=0.05))
+loop = closed_loop(serial(controller=Controller(), motor=Motor(dt=0.05)))
 rollout = scanned(loop)
-trainer = train_step(batch(rollout), tracking_loss, optax.adam(1e-2))
+trainer = train_step(batch(rollout), tracking_loss, optax.adam(1e-2), trainable='controller')
 ```
+
+Physical plant constants that vary after compilation (such as winding resistance, inductance, rotor inertia, or friction swept across `vmap` batches or randomized domains in `examples/actuator/`) belong in `Motor`'s `param` rather than factory `statics`. Passing `trainable='controller'` restricts optimization updates to the controller subtree while keeping plant parameters fixed (or externally swept) inside the same compiled XLA graph.
 
 When multiple substeps update a coupled collection of bodies within a single timestep, individual substeps stay stateless functions of the body record while the outer solver step closes the state loop with `cyclic`. In position-based dynamics (`examples/pbd/pbd.py`), unconstrained prediction, iterative constraint projection, and velocity recovery all transform a `Particle` record passed as call data, and `cyclic` closes the composed step into a state-passing transition over the particle collection:
 
@@ -99,7 +110,7 @@ Auxiliary statistics emitted via `Aux` inside deep members (such as `nn.MoE()` l
 
 ## Training and nested adaptation
 
-`train_step(model, loss_fn, optimizer)` returns an ordinary cyclic Node whose `param` holds initial weights and whose `state` holds active weights, model state, and optimizer state. `trained` scans a trainer over a data sequence. Because trainers satisfy the same Node contract as layers and plants, multi-level adaptation stacks trainers inside standard transforms (`examples/third_order_learning.py`):
+`train_step(model, loss_fn, optimizer, trainable=...)` returns an ordinary cyclic Node whose `param` holds non-optimized parameters alongside initial values of `trainable` parameters (and any optimizer parameters), and whose `state` holds active `trainable` parameters, model state, and optimizer state. Gradient-based Optax updates and gradient-free population optimizers (`examples/test_evolution.py`) satisfy the same contract, and `trained` scans a trainer over a data sequence. Because trainers satisfy the same Node contract as layers and plants, multi-level adaptation stacks trainers inside standard transforms (`examples/third_order_learning.py`):
 
 ```python
 def predictor() -> Node:
@@ -179,6 +190,7 @@ Off-policy storage uses `Buffer(capacity)` (`examples/rl/replay.py`), which hold
 | Principle | Structural smell | Preferred NodeJAX form |
 | :--- | :--- | :--- |
 | A Node boundary marks owned parameters, state, a replaceable collaborator, or a transform seam | A `@node` whose `apply` is a single reshape or arithmetic line | Local array math stays a plain Python function inside `apply` or the loss |
+| `statics` fix trace-time structure; `param` holds rollout-invariant values varied after `jit` | Passing physical plant constants or filter gains as `@node` statics when sweeping or randomizing them | Declare post-compilation values in `param`, and pass `trainable=...` to `train_step` when optimizing only a controller subtree |
 | Standard transforms stay visible at the assembly site | Factory arguments named `n_worlds`, `n_layers`, or `n_passes` that call `batch`, `stack`, or `repeat` internally | `batch`, `scan`, `stack`, `repeat`, and `iterated` wrap collaborators in the assembly function |
 | Static configuration belongs on the Node that reads it | A static parameter accepted by an outer factory only to forward it unchanged into a child | Leaves declare their own statics, resolved directly or through `ambient(...)` and `specialize(...)` |
 | Higher composites receive complete collaborators and contain only runtime dataflow glue | An iteration `@node` factory that instantiates sub-networks, optimizers, or rollouts from raw scalars | A `snake_case` assembly function (`shac_iteration`) builds collaborators and passes them into the `@node` (`SHACIteration`) |

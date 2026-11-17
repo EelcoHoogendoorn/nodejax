@@ -2,9 +2,9 @@
 
 ## Closure under composition and transformation
 
-NodeJAX builds functional objects in JAX. JAX closes pure functions under composition and under transformations such as `jit`, `grad`, `vmap`, and `lax.scan`, where transforming a function yields another function that can be composed and transformed again. NodeJAX gives program units with parameters and evolving state the same closure.
+NodeJAX builds functional objects in JAX. JAX closes pure functions under composition and under transformations such as `jit`, `vmap`, `lax.scan`, and `grad`, where transforming a function yields another function that can be composed and transformed again. NodeJAX lifts that closure from bare functions to structured computation-graph units.
 
-NodeJAX calls its unit of organization a ***Node***. A neural layer, controller, physical plant, state estimator, KV cache, replay buffer, or training step has the same structural representation. Composition connects Nodes, transformations reinterpret Nodes, and both return ordinary Nodes.
+Because JAX traces Python programs into computation graphs for XLA, NodeJAX calls its unit of organization a ***Node***. A `Node` is first and foremost a unit of computation (its privileged `apply` function), bundled with the configuration (`statics`, `param`) and feedback state (`init`, `state`) that `apply` consumes. Rather than another neural network library, NodeJAX defines a general functional object model for JAX programs. That model makes a strong foundation for neural architectures (`nodejax.nn`), while applying identically to physical plants, industrial feedback controllers (`nodejax.control`), state estimators, KV caches, replay buffers, and optimizers. Composition connects Nodes, transformations reinterpret Nodes, and both return ordinary Nodes.
 
 | | JAX functions | NodeJAX Nodes |
 | :--- | :--- | :--- |
@@ -31,16 +31,17 @@ def LowPass(width: int, dt: float = 0.01) -> Node:
     return Leaf(apply, param=param, init=init)
 ```
 
-Each slot in that contract records a distinction that a core JAX transformation requires:
+Each slot in that contract records a distinction that compilation, recurrence, or vectorization requires:
 
-| JAX primitive | What JAX requires | What the Node declares |
+| Compiler / transform axis | What JAX requires | What `LowPass` declares |
 | :--- | :--- | :--- |
-| `jax.jit` | Compile-time structure separated from traced arrays | `width` and `dt` are statics; an unbound `width` stays recorded in a `Generic` until specialized |
-| `jax.grad` | Differentiable values passed as explicit arguments | `rate` and `gain` form the parameter PyTree |
-| `jax.lax.scan` | Step transition shaped `(carry, input) -> (next_carry, output)` | `state` and `input` occupy those exact positions in `apply` |
-| `jax.vmap` | Mapped and broadcast axes chosen per role | `param`, `state`, and `input` remain distinct trees |
+| Compilation (`jax.jit`) | Trace-time graph structure separated from post-compilation XLA values | `width` and `dt` are statics (recompiling if changed; an unbound `width` stays open in a `Generic`), while `param`, `state`, and `input` cross `jit` as traced PyTrees |
+| Recurrence (`jax.lax.scan`) | Rollout-invariant configuration separated from step-to-step carry and per-step signal | `rate` and `gain` stay fixed in `param`, while `state` and `input` occupy `(carry, input) -> (next_carry, output)` in `apply` |
+| Vectorization (`jax.vmap`) | Mapped and broadcast axes chosen independently per role | `param`, `state`, and `input` remain distinct PyTrees (`batch` broadcasts `param`; `ensemble` maps `param` and `state`) |
 
-Because the Node already separates statics, parameters, evolving state, and call inputs, transforms act on declared roles without reconstructing meaning from array shapes or object attributes.
+`param` is defined by its role in compilation and temporal recurrence rather than by gradient descent. Neural network frameworks routinely equate parameters with differentiable weights, yet a physical plant's winding resistance or `LowPass`'s `rate` and `gain` belong in `param` even when never differentiated. Unlike `statics`, `param` values can change after compilation without recompiling; unlike `state` and `input`, they stay invariant across the steps of a rollout. Sweeping `param` with `vmap`, randomizing plant physics across domains, tuning gains by evolutionary search, or taking gradients with `jax.grad` are downstream choices made after the contract is defined.
+
+Because the Node already separates statics, parameters, feedback state, and call inputs, transforms act on declared roles without reconstructing meaning from array shapes or object attributes.
 
 ## Transform products are ordinary Nodes
 
@@ -74,21 +75,21 @@ linear = ensemble(Projection(), n=3)
 
 ## Functional Object-Oriented Programming (FOOP)
 
-NodeJAX organizes programs through ***Functional Object-Oriented Programming*** (FOOP): hierarchical composition, attribute inspection, named methods, and reusable definitions built directly over immutable PyTree values.
+NodeJAX organizes programs through ***Functional Object-Oriented Programming*** (FOOP), building hierarchical composition, attribute inspection, and reusable definitions around a single privileged computation (`apply`) over immutable PyTree values.
 
-Conventional Python object-oriented libraries start from mutable instances populated inside an eager `__init__`. Architectural statics, trainable weights, running statistics, child modules, and caches land in one mutable attribute dictionary because Python provides a single construction hook, even though those values have distinct lifetimes and transformation rules. Before JAX can compile, differentiate, or vectorize the object, the library has to partition that dictionary back into pure functions and PyTree collections through split/merge passes, string-keyed variable stores, or ambient contexts.
+Conventional object-oriented libraries treat an object as a mutable noun with an instance dictionary and arbitrary peer methods (`reset`, `step`, `forward`, `update`), populated inside one eager `__init__`. Architectural statics, post-compilation parameters, running statistics, child modules, and caches all land in `self.__dict__` because Python provides a single construction hook, even though those values have distinct compilation lifetimes and axis rules. Before JAX can compile, vectorize, or scan the object, the library has to partition that dictionary back into pure functions and PyTree collections through split/merge passes, external state tables, or ambient contexts.
 
-Python class syntax also reserves its primary header for class inheritance, while differentiable architectures combine pieces horizontally through composition, axis mapping, and static specialization. NodeJAX provides `derive` for extending leaves, while dedicating `@node` factory headers to architectural statics and collaborator Nodes.
+Python class syntax also reserves its primary header for vertical class inheritance, whereas computation graphs combine Nodes horizontally through sequential piping, feedback loops, axis mapping, and static specialization. NodeJAX provides `derive` for extending leaves, while dedicating `@node` factory headers to architectural statics and collaborator Nodes.
 
-In FOOP, every Node is pure at the boundary where it is authored. Binding parameters returns a `PNode` PyTree, binding state returns a `PSNode` PyTree, and stepping a state-bound Node returns a new `PSNode` holding the successor state:
+In FOOP, a `Node` is pure at the boundary where it is authored; `apply` is the computation, while `param` and `init` construct the PyTree inputs that `apply` expects. Binding parameters returns an immutable `PNode` PyTree, binding state returns an immutable `PSNode` PyTree, and stepping a state-bound Node returns a new `PSNode` holding the successor state:
 
 ```python
 advanced, output = model(input_data)
 ```
 
-## One state model across domains
+## Cyclic Nodes and one state model across domains
 
-NodeJAX calls a state-threading Node ***cyclic*** (`node.cyclic`) rather than stateful. In imperative object-oriented code, a stateful object holds mutable state inside itself across calls; in NodeJAX, a `Node` holds no state and a `PSNode` is an immutable `(Def, param, state)` PyTree snapshot whose call returns `(next_psnode, output)` while leaving the original value untouched. What distinguishes a recurrent cell, filter, plant, cache, or optimizer from a feed-forward map is a feedback cycle across steps, matching JAX's `lax.scan` transition `(carry, input) -> (next_carry, output)` with `apply(param, state, input) -> (next_state, output)`.
+In a computation graph, a feed-forward Node (`input -> output`) is an acyclic vertex, whereas a Node whose `apply` transition feeds `next_state` back into its own `state` input on the next step (`apply(param, state, input) -> (next_state, output)`) forms a directed feedback cycle. NodeJAX therefore calls a state-threading Node ***cyclic*** (`node.cyclic`) rather than "stateful." Imperative OOP calls an object stateful because it mutates hidden storage inside itself across calls; in NodeJAX, neither an unbound `Node` nor a `PSNode` `(Def, param, state)` snapshot holds mutable storage, and calling a `PSNode` leaves the original snapshot untouched. `cyclic` names the recurrent feedback edge in the compute graph that `lax.scan` unrolls across time.
 
 An RNN hidden vector, BatchNorm running moments, Adam momentum tensors, a motor's rotor velocity and winding currents, a replay buffer, and an autoregressive KV cache all share this cyclic transition. Composing a neural controller, a state estimator, a physical plant, and an optimizer produces one structured state PyTree with no translation between module buffers, scan carries, optimizer stores, and simulator contexts.
 
@@ -111,15 +112,15 @@ model = tower.specialize(**{'*.width': 768, '*.heads': 12, '*.ratio': 4})
 
 Dataflow-implied dimensions such as input fan-in resolve later from `with_input(...)`, while open architectural statics resolve by path pattern through `specialize(...)`. Libraries can publish complete architectural patterns without locking them to one problem's dimensions or burying them in configuration plumbing.
 
-## Training lives inside the same algebra
+## Optimization lives inside the same algebra
 
-Optimization is a cyclic transition over a model and a loss:
+Optimization is one downstream application of the `cyclic` contract rather than a special outer runtime:
 
 ```python
-trainer = train_step(model, loss_fn, optax.adam(1e-3))
+trainer = train_step(system, loss_fn, optax.adam(1e-3), trainable='controller.*')
 ```
 
-In `trainer`, the initial weights occupy `param`, while the active weights, model state, and optimizer moments occupy `state`. Differentiating with respect to `trainer.param` differentiates through the optimization trajectory itself.
+When `system` combines a controller with a physical plant, not every `param` is optimized. `trainable` partitions `system`'s `param` PyTree by path so non-optimized plant parameters and initial controller parameters remain in `trainer.param`, while the evolving controller parameters, `system`'s own state, and the optimizer's moments occupy `trainer.state`. Gradient-free optimizers such as differential evolution inhabit the exact same `cyclic` contract by carrying candidate populations in `state` without calling `jax.grad`, and when the update step is differentiable, differentiating with respect to `trainer.param` differentiates through the optimization trajectory itself.
 
 JAX's `lax.scan(step, initial, sequence)` couples declaring a recurrence with immediately executing it. Because a Node contract already distinguishes `state` from `input`, NodeJAX separates `scan(step)` as a reusable Node transform and supplies initial state and sequence inputs later. Inner task adaptation, population ensembles, physical rollouts, and outer meta-optimizers all compose as ordinary Nodes.
 

@@ -4,7 +4,7 @@
 
 Functional objects in JAX.
 
-JAX closes pure functions under composition and transformation. NodeJAX gives `Node`s the same closure: feed-forward maps and `cyclic` state transitions (layers, plants, controllers, caches, buffers, trainers) compose and transform by passing immutable `param` and `state` PyTrees explicitly.
+JAX closes pure functions under composition and transformation. NodeJAX lifts that closure to computation-graph `Node`s, where each `Node` bundles an `apply` transition with immutable `param` and `state` PyTrees so acyclic maps and `cyclic` feedback transitions compose and transform under one algebra. Rather than another neural network library, NodeJAX defines a general object model for JAX computation graphs that serves equally as the foundation for neural architectures (`nodejax.nn`), physical plants, feedback controllers (`nodejax.control`), replay buffers, and gradient-based or evolutionary optimizers.
 
 | | Functions (`jax`) | `Node`s (`nodejax`) |
 | :--- | :--- | :--- |

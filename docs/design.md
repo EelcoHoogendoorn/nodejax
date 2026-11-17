@@ -36,7 +36,7 @@ Every completed Node lowers to a single immutable `Def` value (`nodejax/core/def
 
 ### `Composite`
 
-`Composite(**members)` registers a fixed `Struct` of child `Def` values (`Def.members`). Parameter, state, `Aux`, and static trees all mirror those member paths (`param.<member>`, `state.<member>`, `aux.<member>`). A composite owns no unregistered trainable weights or evolving state outside its declared members; any additional parameter or state value belongs in a registered `Leaf` member.
+`Composite(**members)` registers a fixed `Struct` of child `Def` values (`Def.members`). Parameter, state, `Aux`, and static trees all mirror those member paths (`param.<member>`, `state.<member>`, `aux.<member>`). A composite owns no unregistered parameters or cyclic state outside its declared members; any additional parameter or state value belongs in a registered `Leaf` member.
 
 When authored in routed form (`def apply(self, ...)` or `def init(self, ...)`), NodeJAX runs an abstract discovery trace over `apply` (`nodejax/core/wiring.py`) to propagate member input shapes (`apply_input_spec`), determine RNG consumption, and compile a pure functional step over member-aligned `Struct` trees.
 
@@ -131,7 +131,7 @@ def ensemble(member: Node, n: int, axis: str = 'ensemble') -> Node:
 
 Operations that alter parameter ownership or shift values across contract lifetimes operate directly on `Def` and `Layout` at T4:
 
-- `train_step` (`nodejax/transforms/learning/train_step.py`) rebinds lifetimes: the inner model's parameter constructor becomes the trainer's `param` constructor (holding differentiable initial weights), while active weights, inner model `state`, and optimizer `state` combine into the trainer's `state`.
+- `train_step` (`nodejax/transforms/learning/train_step.py`) rebinds lifetimes across a `trainable` path partition: non-optimized model parameters, initial values of `trainable` parameters, and any optimizer parameters form the trainer's `param`, while active `trainable` parameters, inner model `state`, and optimizer `state` combine into the trainer's `cyclic` `state` (supporting both Optax gradient updates and gradient-free optimizers).
 - `tie` (`nodejax/transforms/structure/tie.py`) removes aliased member slots from public `Layout.param_members` so shared tensors appear once in `param`, then expands the source tensor into aliased slots before member execution so gradients sum via standard reverse-mode AD.
 - `externalize` (`nodejax/transforms/wiring/externalize.py`) removes selected parameter subtrees from `param` (recording `Layout.externalized_param_paths`) and exposes them as explicit call-time inputs while keeping the member `Def` in `Def.members` for state, RNG, and shape propagation.
 

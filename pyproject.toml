@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nodejax"
 version = "1.0.0"
-description = "Functional objects in JAX: neural layers, physical plants, controllers, caches, replay buffers, and trainers under one algebra."
+description = "Functional objects for JAX computation graphs: layers, plants, controllers, caches, buffers, and optimizers under one algebra."
 readme = "readme.md"
 authors = [{ name = "Eelco Hoogendoorn", email = "hoogendoorn.eelco@gmail.com" }]
 requires-python = ">=3.11"

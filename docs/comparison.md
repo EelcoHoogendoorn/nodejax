@@ -1,6 +1,6 @@
 # Framework Comparison
 
-[`examples/comparisons/`](../examples/comparisons/) and [`examples/rl/`](../examples/rl/) implement identical tasks across NodeJAX, Flax NNX, Flax Linen, Equinox, Haiku, PyTorch, Keras 3 (on JAX), and Brax. Every suite shares a pure-NumPy/JAX `*_common.py` reference harness with zero `nodejax` imports in rival files, so line counts, edit counts, and failure modes come from runnable parity-checked code.
+Flax NNX, Flax Linen, Equinox, Haiku, PyTorch, and Keras 3 adapt imperative `class` modules around single-network forward passes, whereas NodeJAX defines a computation-graph `Node` contract one level below domain libraries. [`examples/comparisons/`](../examples/comparisons/) and [`examples/rl/`](../examples/rl/) implement identical tasks across these frameworks and Brax to measure what happens as programs cross `cyclic` state, multi-horizon resets, physical rollouts, and nested optimization. Every suite shares a pure-NumPy/JAX `*_common.py` reference harness with zero `nodejax` imports in rival files, so line counts, edit counts, and failure modes come from runnable parity-checked code.
 
 ## 1. Deeply transformed architectures (`tower` and `ttt`)
 
