@@ -108,6 +108,7 @@ When `system` couples a controller to a physical plant, `trainable` partitions `
 
 ## Further reading
 
+- [Functional objects in JAX](../paper/functional_objects_in_jax.md) sets out the full domain-neutral FOOP contract, binding stages, domain patterns, related work, and cross-framework benchmark appendix.
 - The [cookbook](cookbook.md) builds runnable programs from a minimal leaf through composition, transforms, and training.
 - The [authoring guide](authoring.md) covers `Node` boundary placement and decomposition patterns across control, physics, neural architectures, and reinforcement learning.
 - The [handbook](handbook.md) is the complete technical reference for views, authoring primitives, transforms, `nodejax.nn`, and `nodejax.control`.

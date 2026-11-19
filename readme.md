@@ -40,7 +40,7 @@ Recurrent hidden states, motor current and velocity, active weights, and Adam mo
 * **[Cookbook](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/cookbook.md)** [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/EelcoHoogendoorn/nodejax/blob/main/docs/cookbook.ipynb): runnable tour from a single `Leaf` to pipelines, transforms, `Generic` blueprints, and closed-loop control.
 * **[Authoring guide](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/authoring.md)**: placing `Node` boundaries across physics, control, neural architectures, and nested training.
 * **[Handbook](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/handbook.md)**: complete API reference for views, authoring hooks, transforms, `nodejax.nn`, and `nodejax.control`.
-* **[Philosophy](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/philosophy.md)** · **[Architecture & design](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/design.md)** · **[Framework comparison](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/comparison.md)**
+* **[Philosophy](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/philosophy.md)** · **[Functional objects in JAX (paper)](https://github.com/EelcoHoogendoorn/nodejax/blob/main/paper/functional_objects_in_jax.md)** · **[Architecture & design](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/design.md)** · **[Framework comparison](https://github.com/EelcoHoogendoorn/nodejax/blob/main/docs/comparison.md)**
 
 ## Install
 
