@@ -1,10 +1,10 @@
-# NodeJAX Handbook
+# nodejax Handbook
 
-Technical reference for NodeJAX views, authoring primitives, combinators, transforms, domain modules (`nodejax.nn` and `nodejax.control`), and tree utilities. For boundary placement and decomposition patterns across domains, see the [authoring guide](authoring.md). For internal `Def` lowering and T3 transform construction, see the [design document](design.md).
+Technical reference for `nodejax` views, authoring primitives, combinators, transforms, domain modules (`nodejax.nn` and `nodejax.control`), and tree utilities. For boundary placement and decomposition patterns across domains, see the [authoring guide](authoring.md). For internal `Def` lowering and T3 transform construction, see the [design document](design.md).
 
 ## 1. Views and binding stages
 
-NodeJAX separates architectural construction, shape resolution, parameter creation, and state initialization into distinct immutable values:
+`nodejax` separates architectural construction, shape resolution, parameter creation, and state initialization into distinct immutable values:
 
 ```text
 Generic  --(specialize)-->  Node  --(with_input)-->  Node  --(parameterize)-->  PNode  --(initialize)-->  PSNode
@@ -16,7 +16,7 @@ Generic  --(specialize)-->  Node  --(with_input)-->  Node  --(parameterize)-->  
 | :--- | :--- | :--- | :--- |
 | `Generic` | Open factory + partial statics | Not a JAX PyTree | Raises until `specialize(...)` supplies remaining `unbound()` statics |
 | `Node` | Definition only (`param` unbound) | Empty static PyTree | `node.apply(param, ...)` runs with explicit `param` |
-| `PNode` | `param` bound (acyclic or uninitialized) | `param` leaves | Acyclic `pnode(input)` returns `output`; cyclic `PNode` requires `.initialize(...)` first |
+| `PNode` | `param` bound (acyclic or uninitialized) | `param` leaves | Acyclic `pnode(input)` returns `output`; cyclic `pnode(state, input)` returns `(next_state, output)`, or `.initialize(...)` binds initial state into a `PSNode` |
 | `PSNode` | `param` and `state` bound | `(param, state)` leaves | `psnode(input)` steps once and returns `(next_psnode, output)` |
 
 ### Shared `BaseNode` properties and methods
@@ -138,7 +138,7 @@ Inside `Composite` or `Wrapper` `apply(self, ...)`:
 
 - `self.<member>` returns a live bound view of that member at its current state (`self.<member>.param`, `self.<member>.state`, plus any custom methods on that member).
 - `self.<member>(x)` executes the member, threads child `rng` and `Aux` automatically, writes any updated member state back into `self`, and returns the primary output.
-- `self.<member>.bind(state=s)` or `self.<member>.reset(...)` updates the member's state slot in `self` and returns the rebound member view.
+- `self.<member>.bind(state=s)` or `self.<member>.reset(...)` updates the member's state in `self` and returns the rebound member view.
 - `self.sow(key=value, ...)` records composite-level `Aux` fields.
 
 An authored `init(self, ...)` initializes member states imperatively through `self.<member>.bind(state=...)` and `self.<member>.reset(...)` when one member's initial state depends on another member or on runtime start data; untouched cyclic members initialize from their own defaults.
@@ -163,15 +163,15 @@ def GatedResidual(transform: Node, gate: Node) -> Node:
 
 | Function / operator | Signature | Behavior |
 | :--- | :--- | :--- |
-| `a >> b` | `BaseNode \| Generic \| Callable` | Chains stages sequentially; plain callables lift to stateless `Leaf` Nodes, and `>>` flattens chained anonymous pipes |
+| `a >> b` | `BaseNode \| Generic \| Callable` | Chains stages sequentially; plain callables lift to acyclic `Leaf` `Node`s, and `>>` flattens chained anonymous pipes |
 | `serial` | `serial(**members)` | Sequential pipeline with explicit member names (`serial(embed=..., core=..., head=...)`) |
 | `parallel` | `parallel(**members)` | Broadcasts the same input to every named member and returns `Struct(**outputs)` |
 | `sum_junction` | `sum_junction(**members)` | Feeds `input.<name>` to each named member and sums their outputs tree-wise (`jax.tree.map`) |
 | `residual` | `residual(body)` | Evaluates `input + body(input)` tree-wise around a shape-preserving `body` |
 | `tie` | `tie(pipe, source, *aliases)` | Removes `*aliases` from `pipe`'s `param` tree and routes `param.<source>` into every aliased member at runtime |
-| `externalize` | `externalize(inner, member=None, at_init=None, *, field=None)` | Moves `member`'s (or the whole Node's when `member=None`) parameter tree out of `param` into a runtime call input named `field` (defaulting to `member` or `'param'`), using `at_init` if needed during shape/init probing |
+| `externalize` | `externalize(inner, member=None, at_init=None, *, field=None)` | Moves `member`'s (or the whole `Node`'s when `member=None`) parameter tree out of `param` into a runtime call input named `field` (defaulting to `member` or `'param'`), using `at_init` if needed during shape/init probing |
 | `taps` | `taps(inner)` | Wraps a composite `inner` so its output becomes `Struct(output=..., taps=Struct(**per_member_outputs))` |
-| `at` | `at(inner, field)` | Applies `inner` to ` getattr(input, field)` of a `Struct` input and writes the result back via `input.replace({field: out})` |
+| `at` | `at(inner, field)` | Applies `inner` to `getattr(input, field)` of a `Struct` input and writes the result back via `input.replace({field: out})` |
 
 ## 5. Axis, iteration, learning, and structure transforms
 
@@ -179,10 +179,10 @@ def GatedResidual(transform: Node, gate: Node) -> Node:
 
 | Transform | Signature | `param` axis | `state` axis | `input` / `output` axis |
 | :--- | :--- | :--- | :--- | :--- |
-| `batch` | `batch(sample, n=None, axis='batch')` | Shared | Mapped (`vmap`) | Mapped along leading axis (enforcing length `n` when given); provides named `axis` for cross-sample ops like `BatchNorm` |
+| `batch` | `batch(sample, n=None, axis='batch')` | Shared | Mapped (`vmap`); `'single_batch_state'` members (`BatchNorm`, `Whiten`) remain unmapped | Mapped along leading axis (enforcing length `n` when given); provides named `axis` for cross-sample ops like `BatchNorm` |
 | `unbatched` | `unbatched(inner, axis='batch')` | Unchanged | Unchanged | Evaluates `inner` under a size-1 `axis_name` axis and squeezes it out so single-sample calls satisfy `lax.pmean` consumers |
 | `ensemble` | `ensemble(member, n, axis='ensemble')` | Mapped (`n`) | Mapped (`n`) | Broadcasts input across `n` independent members and stacks outputs on axis 0 |
-| `reduce` | `reduce(fn)` | Stateless `PNode` | Stateless | Applies `fn` (such as `jnp.mean` or `jnp.sum`) across axis 0 of every output leaf and emits `Aux(population=input)` |
+| `reduce` | `reduce(fn)` | Acyclic `PNode` | Acyclic | Applies `fn` (such as `jnp.mean` or `jnp.sum`) across axis 0 of every output leaf and emits `Aux(population=input)` |
 | `stack` | `stack(layer, n)` | Stacked (`n`) | Stacked (`n`) | Chains `n` identically structured layers sequentially via `lax.scan` over depth |
 | `remat` | `remat(inner, *, policy=None, prevent_cse=True)` | Unchanged | Unchanged | Wraps `inner`'s execution in `jax.checkpoint` for activation rematerialization |
 
@@ -190,25 +190,25 @@ def GatedResidual(transform: Node, gate: Node) -> Node:
 
 | Transform | Signature | State lifetime and output |
 | :--- | :--- | :--- |
-| `scan` | `scan(step, record=False, boundary=None, n=None)` | Cyclic sequence Node: carries `step`'s state across leading time axis (length `n` if given), running `boundary` hooks at call start; emits per-step states on `Aux(state=...)` when `record=True` |
-| `scanned` | `scanned(step, record=False, n=None)` | Stateless-interface rollout: initializes `step`'s state fresh per call, scans over the sequence, and discards final carry; emits per-step states on `Aux(state=...)` when `record=True` |
+| `scan` | `scan(step, record=False, boundary=None, n=None)` | Cyclic sequence `Node`: carries `step`'s state across leading time axis (length `n` if given), running `boundary` hooks at call start; emits per-step states on `Aux(state=...)` when `record=True` |
+| `scanned` | `scanned(step, record=False, n=None)` | Acyclic rollout: initializes `step`'s state fresh per call, scans over the sequence, and discards final carry; emits per-step states on `Aux(state=...)` when `record=True` |
 | `carried` | `carried(step, n=None)` | Initializes `step` fresh, scans over the sequence, and returns `step` bound as a `PSNode` to its final state |
 | `repeat` | `repeat(layer, n)` | Feeds output back as input `n` times with shared parameters, carrying state and returning the final output |
 | `repeated` | `repeated(step, n)` | Initializes state internally, feeds output back `n` times, and stacks all `n` outputs into a trajectory |
 | `iterated` | `iterated(step, n)` | Applies cyclic `step` `n` times to the *same* input while threading state, returning `(final_state, last_output)` |
-| `cyclic` | `cyclic(step)` | Turns a stateless transition `apply(state_like_first_arg, ...)` whose output is `next_state` (or `(next_state, output)`) into a cyclic `Node` carrying that first input as `state` |
+| `cyclic` | `cyclic(step)` | Turns an acyclic transition `apply(state_like_first_arg, ...)` whose output is `next_state` (or `(next_state, output)`) into a cyclic `Node` carrying that first input as `state` |
 
 ### Learning and test-time adaptation
 
 | Transform / helper | Signature | Behavior |
 | :--- | :--- | :--- |
-| `train_step` | `train_step(model, loss_fn, tx, *, trainable=None)` | Cyclic trainer Node: `param` holds non-optimized parameters alongside initial values of `trainable` parameters (and any optimizer `param`s); `state` holds active `trainable` parameters, model `state`, and optimizer `state` (`tx` is an Optax transformation or gradient/population optimizer Node). `loss_fn(output, target, *, aux=...)` (or a loss `Node`) produces scalar loss. `trainable` restricts updates by member name or path predicate. Exposes `.params()` and `.trained()` view methods |
-| `trained` | `trained(step)` | Scans a `train_step` Node over a sequence of training batches and returns `step.trained()` bound to final learned weights and state |
+| `train_step` | `train_step(model, loss_fn, tx, *, trainable=None)` | Cyclic trainer `Node`: `param` holds non-optimized parameters alongside initial values of `trainable` parameters (and any optimizer `param`s); `state` holds active `trainable` parameters, model `state`, and optimizer `state` (`tx` is an Optax transformation or gradient/population optimizer `Node`). `loss_fn(output, target, *, aux=...)` (or a loss `Node`) produces scalar loss. `trainable` restricts updates by member name or path predicate. Exposes `.params()` and `.trained()` view methods |
+| `trained` | `trained(step)` | Scans a `train_step` `Node` over a sequence of training batches and returns `step.trained()` bound to final learned weights and state |
 | `finetune` | `finetune(step)` | Episode learner over `train_step`: adapts from `param` on `support` batches via `trained(step)` and evaluates the adapted model on `query` |
 | `supervised_ttt` | `supervised_ttt(step)` | Adapts `train_step` online per call on `(input, target)` pairs while emitting pre-update predictions |
 | `next_step_ttt` | `next_step_ttt(step)` | Self-supervised online learner over `train_step` where consecutive sequence elements form `(x[:-1], x[1:])` pairs |
 | `reconstruction_ttt` | `reconstruction_ttt(step)` | Self-supervised online learner over `train_step` where each input serves as its own reconstruction target |
-| `next_step`, `reconstruction` | `next_step()`, `reconstruction()` | Stateless `PNode` stream formatters producing `Struct(input=..., target=...)` pairs for sequence prediction or autoencoding |
+| `next_step`, `reconstruction` | `next_step()`, `reconstruction()` | Acyclic `PNode` stream formatters producing `Struct(input=..., target=...)` pairs for sequence prediction or autoencoding |
 
 Additional optimizer building blocks live in `nodejax.transforms.learning`: `optimizer(tx, name='optimizer')` wraps an Optax transformation as a cyclic `PNode`, `learned_sgd(lr0)` creates SGD with per-leaf learnable step sizes, `map_loss_target(loss_fn, target_fn)` adapts loss targets while preserving `aux` inspection, `opt_reinit(inner, boundary)` resets optimizer moments on boundaries while keeping learned weights, and `ttt(step)` wraps a `train_step` for single-sample online prediction-then-update.
 

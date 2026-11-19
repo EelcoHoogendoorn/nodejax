@@ -4,7 +4,7 @@
 
 A Node is defined by a single `apply` transition. Parameter shapes, initial state, RNG requirements, and member wiring all derive from tracing how `apply` transforms inputs. Because `batch`, `scan`, `remat`, `cyclic`, and `train_step` act on one transition function, giving every Node a single primary operation makes the entire Node transformable as a unit.
 
-Conventional object-oriented code grows vertically by adding methods to shared mutable state. NodeJAX code grows horizontally by wrapping and connecting fixed Nodes through `>>`, `Composite`, `Wrapper`, and transforms. Leaf inheritance via `derive` replaces selected hooks on an existing leaf without introducing subclass dispatch, and nothing downstream distinguishes a derived leaf from a fresh `Leaf`.
+Conventional object-oriented code grows vertically by adding methods to shared mutable state. `nodejax` code grows horizontally by wrapping and connecting fixed `Node`s through `>>`, `Composite`, `Wrapper`, and transforms. Leaf inheritance via `derive` replaces selected hooks on an existing leaf without introducing subclass dispatch, and nothing downstream distinguishes a derived leaf from a fresh `Leaf`.
 
 Named methods (`methods={'observe': ..., 'logprob': ..., 'sample': ...}`) expose read-only views over a Node's parameters and state for an enclosing `Composite` or `Wrapper` to call inside its own `apply`:
 
@@ -27,10 +27,10 @@ Across domains, programs differ in how state ownership and operations partition 
 
 | Domain | State ownership | Composition pattern | Primary structural yield |
 | :--- | :--- | :--- | :--- |
-| Control and plants (`nodejax.control`, `examples/actuator/`) | Disjoint physical and estimator states per block | Multi-rate `Composite`s, `Delay`, and `closed_loop` | Replaces custom simulator harnesses; unified `param` tree for sweeps, evolution, and `grad` |
-| Coupled physics solvers (`examples/pbd/`, `examples/ode.py`) | Shared multi-body record threaded across sub-passes | Stateless `batch` / `repeat` passes closed via outer `cyclic(...)` | Combinator factoring of solver passes; direct coupling to actuators and controllers |
+| Control and block-diagram systems (`nodejax.control`, `examples/actuator/`) | Small private carries per block | `>>`, multi-rate `Composite`s, `Delay`, and `closed_loop` | Hierarchical `state` composition without manual carry plumbing, plus unified `param` trees for sweeps, evolution, and `grad` |
+| Physics simulation (`examples/pbd/`) | Shared multi-body record threaded across sub-passes | Acyclic `batch` / `repeat` passes closed via outer `cyclic(...)` | Gather-scatter solver passes closed into a `cyclic` `Node` that couples directly to actuators and controllers |
 | Neural architectures (`nodejax.nn`) | Per-layer carries, caches, and moments | `>>`, `residual`, `stack`, `ensemble`, `tie`, `eval_mode` | High primitive reuse; closure across deep architectural and adaptation stacks |
-| Multi-phase RL (`examples/rl/`) | Policy, critic, target, plant, replay `Buffer`, and optimizers | `Wrapper` query projections inside an iteration `Composite` | Single immutable experiment `PSNode`, zero-edit MLP/GRU policy polymorphism, and `scan` / `ensemble` over training runs |
+| Reinforcement learning (`examples/rl/`) | Policy, critic, target, plant, replay `Buffer`, and optimizers | Per-phase `Wrapper` `Node`s plus `externalize` inside an iteration `Composite` | Single immutable experiment `PSNode`, zero-edit MLP/GRU policy polymorphism, and `scan` / `ensemble` over training runs |
 
 ## Control and physical simulation
 
@@ -59,7 +59,7 @@ trainer = train_step(batch(rollout), tracking_loss, optax.adam(1e-2), trainable=
 
 Physical plant constants that vary after compilation (such as winding resistance, inductance, rotor inertia, or friction swept across `vmap` batches or randomized domains in `examples/actuator/`) belong in `Motor`'s `param` rather than factory `statics`. Passing `trainable='controller'` restricts optimization updates to the controller subtree while keeping plant parameters fixed (or externally swept) inside the same compiled XLA graph.
 
-When multiple substeps update a coupled collection of bodies within a single timestep, individual substeps stay stateless functions of the body record while the outer solver step closes the state loop with `cyclic`. In position-based dynamics (`examples/pbd/pbd.py`), unconstrained prediction, iterative constraint projection, and velocity recovery all transform a `Particle` record passed as call data, and `cyclic` closes the composed step into a state-passing transition over the particle collection:
+When multiple substeps update a coupled collection of bodies within a single timestep, individual substeps stay acyclic functions of the body record while the outer solver step closes the state loop with `cyclic`. In position-based dynamics (`examples/pbd/pbd.py`), unconstrained prediction, iterative constraint projection, and velocity recovery all transform a `Particle` record passed as call data, and `cyclic` closes the composed step into a state-passing transition over the particle collection:
 
 ```python
 def pbd_step(
@@ -134,7 +134,7 @@ Inner test-time updates, per-episode support fine-tuning, rematerialized ensembl
 
 ## Reinforcement learning
 
-Reinforcement learning libraries customarily center on a mutable `Agent` object with `.act()`, `.evaluate()`, and `.update()` methods surrounded by an imperative rollout loop. In NodeJAX, each transformed unit becomes a Node, and an assembly function wires complete collaborators into one iteration Node.
+Reinforcement learning libraries customarily center on a mutable `Agent` object with `.act()`, `.evaluate()`, and `.update()` methods surrounded by an imperative rollout loop. In `nodejax`, each transformed unit becomes a `Node`, and an assembly function wires complete collaborators into one iteration `Node`.
 
 Policy-plant interaction is a two-member `Composite` (`examples/rl/control.py`). Its authored `init(self, input)` primes the plant from `initial_plant_state` and initializes any recurrent policy state from the plant's initial observation:
 
@@ -187,7 +187,7 @@ Off-policy storage uses `Buffer(capacity)` (`examples/rl/replay.py`), which hold
 
 ## Boundary design rules
 
-| Principle | Structural smell | Preferred NodeJAX form |
+| Principle | Structural smell | Preferred `nodejax` form |
 | :--- | :--- | :--- |
 | A Node boundary marks owned parameters, state, a replaceable collaborator, or a transform seam | A `@node` whose `apply` is a single reshape or arithmetic line | Local array math stays a plain Python function inside `apply` or the loss |
 | `statics` fix trace-time structure; `param` holds rollout-invariant values varied after `jit` | Passing physical plant constants or filter gains as `@node` statics when sweeping or randomizing them | Declare post-compilation values in `param`, and pass `trainable=...` to `train_step` when optimizing only a controller subtree |

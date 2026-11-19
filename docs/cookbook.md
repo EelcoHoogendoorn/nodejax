@@ -1,4 +1,4 @@
-# The NodeJAX Cookbook
+# The nodejax Cookbook
 
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/EelcoHoogendoorn/nodejax/blob/main/docs/cookbook.ipynb)
 

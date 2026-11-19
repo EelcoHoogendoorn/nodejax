@@ -1,4 +1,4 @@
-# NodeJAX Architecture and Transform Design
+# nodejax Architecture and Transform Design
 
 Implementation architecture of `Def` lowering, canonical `Contract` roles, T3 transform construction, and T4 structural seams. For public usage and T1/T2 authoring APIs, see the [handbook](handbook.md). For boundary and composition design across domains, see the [authoring guide](authoring.md).
 
@@ -32,13 +32,13 @@ Every completed Node lowers to a single immutable `Def` value (`nodejax/core/def
 
 ### `Leaf`
 
-`Leaf` compiles plain Python `param`, `init`, and `apply` functions once (`nodejax/core/lifting.py`). Signature inspection happens exclusively at `Leaf` lowering: reserved names (`param`, `state`, `input`, `node`, `rng`) bind to canonical contract slots, any remaining parameter names become fields of a `CallForm` input specification, and downstream combinators and transforms never inspect the authored Python signature again.
+`Leaf` compiles plain Python `param`, `init`, and `apply` functions once (`nodejax/core/lifting.py`). Signature inspection happens exclusively at `Leaf` lowering: reserved names (`param`, `state`, `input`, `node`, `rng`) bind to canonical contract roles, any remaining parameter names become fields of a `CallForm` input specification, and downstream combinators and transforms never inspect the authored Python signature again.
 
 ### `Composite`
 
 `Composite(**members)` registers a fixed `Struct` of child `Def` values (`Def.members`). Parameter, state, `Aux`, and static trees all mirror those member paths (`param.<member>`, `state.<member>`, `aux.<member>`). A composite owns no unregistered parameters or cyclic state outside its declared members; any additional parameter or state value belongs in a registered `Leaf` member.
 
-When authored in routed form (`def apply(self, ...)` or `def init(self, ...)`), NodeJAX runs an abstract discovery trace over `apply` (`nodejax/core/wiring.py`) to propagate member input shapes (`apply_input_spec`), determine RNG consumption, and compile a pure functional step over member-aligned `Struct` trees.
+When authored in routed form (`def apply(self, ...)` or `def init(self, ...)`), `nodejax` runs an abstract discovery trace over `apply` (`nodejax/core/wiring.py`) to propagate member input shapes (`apply_input_spec`), determine RNG consumption, and compile a pure functional step over member-aligned `Struct` trees.
 
 ### `Wrapper`
 
@@ -132,8 +132,8 @@ def ensemble(member: Node, n: int, axis: str = 'ensemble') -> Node:
 Operations that alter parameter ownership or shift values across contract lifetimes operate directly on `Def` and `Layout` at T4:
 
 - `train_step` (`nodejax/transforms/learning/train_step.py`) rebinds lifetimes across a `trainable` path partition: non-optimized model parameters, initial values of `trainable` parameters, and any optimizer parameters form the trainer's `param`, while active `trainable` parameters, inner model `state`, and optimizer `state` combine into the trainer's `cyclic` `state` (supporting both Optax gradient updates and gradient-free optimizers).
-- `tie` (`nodejax/transforms/structure/tie.py`) removes aliased member slots from public `Layout.param_members` so shared tensors appear once in `param`, then expands the source tensor into aliased slots before member execution so gradients sum via standard reverse-mode AD.
-- `externalize` (`nodejax/transforms/wiring/externalize.py`) removes selected parameter subtrees from `param` (recording `Layout.externalized_param_paths`) and exposes them as explicit call-time inputs while keeping the member `Def` in `Def.members` for state, RNG, and shape propagation.
+- `tie` (`nodejax/transforms/structure/tie.py`) removes aliased member entries from public `Layout.param_members` so shared tensors appear once in `param`, then expands the source tensor into aliased entries before member execution so gradients sum via standard reverse-mode AD.
+- `externalize` (`nodejax/transforms/structure/externalize.py`) removes selected parameter subtrees from `param` (recording `Layout.externalized_param_paths`) and exposes them as explicit call-time inputs while keeping the member `Def` in `Def.members` for state, RNG, and shape propagation.
 
 ## 5. Module map
 
@@ -145,5 +145,5 @@ Operations that alter parameter ownership or shift values across contract lifeti
 | `nodejax/core/wiring.py`, `nodejax/core/composite.py`, `nodejax/core/compose.py`, `nodejax/core/wrapper.py` | `self` discovery traces, `Composite`, `serial` / `parallel` / `sum_junction`, and `Wrapper` |
 | `nodejax/core/ambient.py`, `nodejax/core/generic.py` | `@node`, `ambient`, `Generic`, and `specialize` |
 | `nodejax/core/node.py`, `nodejax/core/pnode.py`, `nodejax/core/psnode.py` | Public `BaseNode`, `Node`, `PNode`, and `PSNode` PyTree views |
-| `nodejax/core/rng.py`, `nodejax/core/spec.py`, `nodejax/core/introspection.py` | `KeyStream` / `MaybeKeyStream`, shape specs, and `describe` / `tree_view` / `summary` |
+| `nodejax/core/rng.py`, `nodejax/core/spec.py`, `nodejax/core/printing.py` | `KeyStream` / `MaybeKeyStream`, shape specs, and `describe` / `tree_view` / `summary` |
 | `nodejax/transforms/transform.py` | `@transform` and T3 `vmap_*` / `scan_*` / `bind` helpers |
