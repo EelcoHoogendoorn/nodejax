@@ -49,7 +49,7 @@ def finetune(step: BaseNode) -> Node | PNode:
         fitted = bind(current, param, state=final).trained()
         _, output = fitted.contract.apply(
             fitted.param,
-            fitted.state,
+            fitted.state if fitted.state_bound else (),
             fitted.contract.feed(input.query),
             rng.child(current_model.apply_takes_rng),
         )

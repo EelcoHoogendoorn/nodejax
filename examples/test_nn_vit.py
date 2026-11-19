@@ -80,7 +80,7 @@ def test_nn_vit_trains_on_real_digits() -> None:
     assert jnp.all(jnp.isfinite(aux.loss))
     assert not jax.tree.all(jax.tree.map(jnp.array_equal, done.param, initial.param))
 
-    _, logits = done(X_test[:BATCH])
+    logits = done(X_test[:BATCH])
     assert logits.shape == (BATCH, 10)
     assert jnp.all(jnp.isfinite(logits))
     assert jnp.isfinite(accuracy(logits, y_test[:BATCH]))

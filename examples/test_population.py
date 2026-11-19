@@ -39,7 +39,7 @@ def test_population_trains_in_one_line() -> None:
     assert not jax.tree.all(jax.tree.map(jnp.array_equal, done.param, population.param))
 
     # Indexing the mapped parameter axis extracts the best member's weights to bind onto `MLP()`.
-    _, outs = done(X)
+    outs = done(X)
     per_member = jnp.mean((outs - y) ** 2, axis=(1, 2))
     assert per_member.shape == (POP,)
     assert jnp.unique(per_member).size == POP

@@ -118,11 +118,11 @@ trainer = train_step(model, mse, optax.adam(1e-2))
 fitted_model, aux = split_aux(trained(trainer)(input=train_x, target=train_y))
 
 assert aux.loss[-1] < 0.01
-_, preds = fitted_model(x_batch)
+preds = fitted_model(x_batch)
 assert preds.shape == (32, 1)
 ```
 
-`train_step(model, loss_fn, optimizer, trainable=...)` turns a model into a cyclic Node whose `param` holds non-optimized parameters alongside initial values of `trainable` parameters and whose `state` holds active `trainable` parameters, any model state, and Optax moments. `trained(trainer)` scans updates across the leading step axis and returns the fitted model as a `PSNode` (`fitted_model.pnode` drops the empty state on acyclic models) alongside per-step `aux.loss`.
+`train_step(model, loss_fn, optimizer, trainable=...)` turns a model into a cyclic Node whose `param` holds non-optimized parameters alongside initial values of `trainable` parameters and whose `state` holds active `trainable` parameters, any model state, and Optax moments. `trained(trainer)` scans updates across the leading step axis and returns the fitted model (as a `PNode` when acyclic, or a `PSNode` carrying live state when cyclic) alongside per-step `aux.loss`.
 
 ## 6. Runtime stochasticity and `Aux` telemetry
 

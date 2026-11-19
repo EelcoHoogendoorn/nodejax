@@ -65,9 +65,9 @@ def test_batchnorm_trains_and_freezes() -> None:
     # Freezing the state-bound model absorbs its accumulated moments and makes evaluation deterministic.
     frozen = tree_freeze(final)
     assert not frozen.cyclic
-    _, logits = frozen(X_test[:BATCH])
-    assert jnp.allclose(logits, frozen(X_test[:BATCH])[1])
+    logits = frozen(X_test[:BATCH])
+    assert jnp.allclose(logits, frozen(X_test[:BATCH]))
 
     # Freezing fresh (0, 1) moments on the same trained weights alters evaluation logits.
-    _, cold = tree_freeze(final.pnode.initialize())(X_test[:BATCH])
+    cold = tree_freeze(final.pnode.initialize())(X_test[:BATCH])
     assert not jnp.allclose(cold, logits)

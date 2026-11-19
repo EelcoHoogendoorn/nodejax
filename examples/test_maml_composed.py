@@ -50,8 +50,10 @@ def Adapted(trainer: PSNode) -> PNode:
 
     def answer(self, support, query, rng):
         done = self.run(input=support.input, target=support.target)
-        _, output = done(query, rng=rng)
-        return output
+        if done.state_bound:
+            _, output = done(query, rng=rng)
+            return output
+        return done(query, rng=rng)
 
     return Wrapper(run=run)(
         answer, name='adapted',
@@ -83,8 +85,7 @@ def test_maml_is_two_train_steps() -> None:
     meta_init = final.param.objective.model.scale
     assert not jnp.array_equal(meta_init, initial_scale)
 
-    _, out = final(support=tasks.support, query=tasks.query)
-    predictions, _ = split_aux(out)
+    predictions, _ = split_aux(final(support=tasks.support, query=tasks.query))
     assert predictions.shape == (2,)
     assert jnp.all(jnp.isfinite(predictions))
 

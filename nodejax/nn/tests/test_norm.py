@@ -29,7 +29,7 @@ def test_batchnorm_unbatched_single_sample_eval():
 
     # Freezing the state-bound pipe holds the running statistics at their initial values.
     frozen = tree_freeze(bound_pipe.initialize())
-    _, sample_out = frozen(jnp.ones(4))
+    sample_out = frozen(jnp.ones(4))
     assert sample_out.shape == (4,)
 
 

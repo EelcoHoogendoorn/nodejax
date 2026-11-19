@@ -425,8 +425,8 @@ def test_trained_rebuilds_its_current_run():
         if member.name == 'target' else member)
     rebuilt = rebuilt_node.bind(run.param)
     rebuilt_done, _ = rebuilt.apply(bundle=sequence)
-    _, original_output = done.apply(jnp.asarray(1.0))
-    _, rebuilt_output = rebuilt_done.apply(jnp.asarray(1.0))
+    original_output = done.apply(jnp.asarray(1.0))
+    rebuilt_output = rebuilt_done.apply(jnp.asarray(1.0))
 
     assert rebuilt_done.name == 'replacement'
     assert not jnp.allclose(rebuilt_output, original_output)

@@ -114,13 +114,13 @@ def test_trains_on_real_digits() -> None:
 
     # `nn.eval_mode` disables dropout and freezes the accumulated ZCA whitening moments.
     evaluator = nn.eval_mode(final)
-    assert not evaluator.cyclic and evaluator.state == ()
+    assert not evaluator.cyclic and not evaluator.state_bound
 
     X_eval = X_test[:BATCH]
-    _, logits1 = evaluator(X_eval)
-    _, logits2 = evaluator(X_eval)
+    logits1 = evaluator(X_eval)
+    logits2 = evaluator(X_eval)
     assert jnp.allclose(logits1, logits2)
 
     # Frozen whitening moments make each sample's logits independent of sibling batch elements.
-    _, logits_solo = evaluator(X_eval[:16])
+    logits_solo = evaluator(X_eval[:16])
     assert jnp.allclose(logits_solo, logits1[:16], atol=1e-5)

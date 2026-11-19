@@ -70,7 +70,7 @@ def test_methods_bind_the_state_seat():
 
 
 def test_trained_hands_back_a_callable_model():
-    """Verifies `trained(trainer)` returns a callable `PSNode` carrying the fitted model weights."""
+    """Verifies `trained(trainer)` returns an acyclic `PNode` carrying the fitted weights."""
     key = jax.random.PRNGKey(0)
     net = nn.Linear(1).with_input(jnp.zeros(3)).parameterize(rng=key).initialize()
     trainer = train_step(net, lambda out, target: jnp.mean((out - target) ** 2),
@@ -79,21 +79,31 @@ def test_trained_hands_back_a_callable_model():
     w_true = jnp.asarray([[1.0], [-2.0], [0.5]])
     done, aux = trained(trainer).apply(input=xs, target=xs @ w_true)
 
-    assert type(done) is PSNode
+    assert type(done) is PNode
     assert jnp.allclose(done.param.w, w_true, atol=0.1)
-    _, pred = done(jnp.ones(3))
+    pred = done(jnp.ones(3))
     assert pred.shape == (1,)
     assert type(done.pnode) is PNode
 
 
+def test_trained_returns_psnode_for_cyclic_model():
+    """Verifies `trained(trainer)` returns a `PSNode` carrying live state for a cyclic model."""
+    model = Integrator().parameterize(decay=0.1).initialize()
+    trainer = train_step(model, lambda out, target: (out - target) ** 2,
+                         optax.sgd(0.05))
+    done, _ = trained(trainer).apply(input=jnp.ones(4), target=jnp.ones(4))
+    assert type(done) is PSNode and done.cyclic
+    successor, out = done(1.0)
+    assert type(successor) is PSNode and out.shape == ()
+
+
 def test_a_whole_tree_freeze_makes_a_plain_function():
-    """Verifies `tree_freeze(psnode)` embeds the bound state and leaves `state == ()`."""
+    """Verifies `tree_freeze(psnode)` embeds the bound state and returns an acyclic `PNode`."""
     pipe = (Integrator() >> Integrator()).parameterize()
     session = pipe.bind(state=pipe.init())
     successor, _ = session(1.0)
     frozen = tree_freeze(successor)
-    assert type(frozen) is PSNode and frozen.state == ()
-    f2, a = frozen(1.0)
-    f3, b = frozen(1.0)
+    assert type(frozen) is PNode and not frozen.cyclic
+    a = frozen(1.0)
+    b = frozen(1.0)
     assert jnp.allclose(a, b)                    # frozen state: same answer
-    assert f2.state == () == f3.state

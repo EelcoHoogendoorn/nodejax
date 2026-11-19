@@ -154,13 +154,13 @@ def test_fractalnet_trains_and_evaluates_subfractals() -> None:
     evaluator = nn.eval_mode(final)
     assert not evaluator.cyclic
     X_eval = X_test[:BATCH]
-    _, logits = evaluator(X_eval)
-    assert jnp.allclose(logits, evaluator(X_eval)[1])
+    logits = evaluator(X_eval)
+    assert jnp.allclose(logits, evaluator(X_eval))
 
     for levels in range(1, LEVELS + 1):
         budget = batch(fractalnet(levels)).bind(
             final.param, state=final.state)
-        _, budget_logits = nn.eval_mode(budget)(X_eval)
+        budget_logits = nn.eval_mode(budget)(X_eval)
         assert budget_logits.shape == (BATCH, 10)
         assert jnp.all(jnp.isfinite(budget_logits))
         if levels == LEVELS:

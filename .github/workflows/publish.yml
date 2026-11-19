@@ -36,15 +36,16 @@ jobs:
           python -m venv "$RUNNER_TEMP/wheel-env"
           "$RUNNER_TEMP/wheel-env/bin/pip" install dist/*.whl
           (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/wheel-env/bin/python" -c '
-          import pathlib, jax, jax.numpy as jnp, optax, nodejax
+          import pathlib, jax, jax.numpy as jnp, nodejax
           from nodejax import batch, nn, scanned, split_aux, train_step, trained
+          from nodejax.transforms.learning import learned_sgd
           assert "site-packages" in str(pathlib.Path(nodejax.__file__).resolve())
           assert (pathlib.Path(nodejax.__file__).parent / "py.typed").is_file()
           model = batch(scanned(nn.GRU(8) >> nn.Linear(1)))
           xs = jnp.ones((5, 4, 6, 3))
           ys = jnp.zeros((5, 4, 6, 1))
           bound = model.with_input(xs[0]).parameterize(rng=jax.random.PRNGKey(0))
-          step = train_step(bound, lambda pred, target: jnp.mean((pred - target) ** 2), optax.adam(1e-2))
+          step = train_step(bound, lambda pred, target: jnp.mean((pred - target) ** 2), learned_sgd(1e-2))
           fitted, aux = split_aux(trained(step)(input=xs, target=ys))
           assert fitted.param is not None and jnp.isfinite(aux.loss).all()
           ')

@@ -47,7 +47,20 @@ Once `statics` and step-invariant `param` are separated, temporal recurrence (`j
 
 In a computation graph, a feed-forward unit (`input -> output`) is an acyclic vertex, whereas a unit that routes `next_state` back into its own `state` argument on the following step forms a directed feedback cycle across time. Such a unit is here termed ***cyclic***. Imperative object-oriented programming calls an object stateful when calls mutate storage hidden inside the instance; in a functional model neither an unbound definition nor an initialized PyTree snapshot mutates storage, because stepping a snapshot returns a new snapshot paired with its output. `cyclic` names the recurrent graph edge shared by integrators, recurrent cells, running normalizers, physical plants, key-value caches, replay buffers, and optimizers.
 
-Nested units also emit diagnostics, regularizer terms, or recorded trajectories read by outer losses or monitors without changing downstream stage inputs. Accumulating an explicit auxiliary PyTree (`aux`) alongside `output` preserves unary pipeline composition while keeping every emitted array in the return value.
+Nested units also emit diagnostics, regularizer terms, or recorded trajectories read by outer losses or monitors without changing downstream stage inputs. Accumulating an explicit auxiliary PyTree (`aux`) alongside `output` preserves unary pipeline composition while keeping every emitted array in the return value. The resulting step dataflow separates trace-time `statics`, step-invariant `param`, horizontal per-step signal, and the `cyclic` feedback edge:
+
+```text
+                    statics (treedef)     param (step-invariant)
+                            \                     /
+                             v                   v
+                           +-----------------------+
+    input (per step) ----> |         apply         | ----> output (+ aux)
+                           +-----------------------+
+                             ^                   |
+                             |    cyclic state   |
+                             +-------------------+
+                               (carried by scan)
+```
 
 ### Vectorization axes and explicit randomness
 
@@ -259,7 +272,7 @@ Nine shared-task benchmark suites in `examples/comparisons/` evaluate identical 
 | Suite | Property tested | `nodejax` | `class` frameworks |
 | :--- | :--- | :--- | :--- |
 | `tower` | 8 stacked transforms + MAML | 58 lines, single algebra | 76–213 lines; exits module protocol |
-| `ttt` | Online TTT on `MLP` and `RNN` | 53 lines, 1 wrapper | 92–105 lines; manual fast-weight carry |
+| `ttt` | Online TTT on `MLP` and `RNN` | 52 lines, 1 wrapper | 92–105 lines; manual fast-weight carry |
 | `chunk` | Multi-horizon state reset change | 1 `Node` edit (65 lines) | 2–6 loop edits (115–123 lines; `Haiku` 1 in 83) |
 | `residual` | Library `residual` over all roles | 9-line transform (0 user lines) | 6–26 lines; split state protocols |
 | `lift` | Lifted `stack` + `stack(stack(...))` | 41-line transform (all probes pass) | 41–42 lines; state / wrapper limits |
@@ -273,7 +286,7 @@ Line counts measure executable model, transform, and training code, excluding bl
 Empirical outcomes across the nine suites break down as follows:
 
 - In the `tower` suite (`residual`, `stack`, `scanned`, running `Norm`, `ensemble`, `finetune`, `batch`, `trained`), `nodejax` (58 lines) stays inside one `Node` algebra, whereas `PyTorch` (76), `Equinox` (81), bespoke `Flax NNX` (98), and `Keras 3` (127, via stacked variable lists and `stateless_call`) exit their module protocols into manual closures, and reusable `Flax NNX` wrappers reach 213 lines before abandoning the protocol at MAML.
-- In the `ttt` suite, a 3-line `next_step_ttt(train_step(...))` definition wraps both acyclic `MLP` and `cyclic` `RNN` predictors in `nodejax` (53 lines, versus a 47-line `RNN`-only raw-JAX baseline), whereas `PyTorch` (92), `Equinox` (96), and `Flax NNX` (104) branch on `hasattr` for carry initialization, `Haiku` (105) nests `hk.transform_with_state` inside `hk.lift`, and all four thread fast weights through the sequence loop by hand.
+- In the `ttt` suite, a 3-line `next_step_ttt(train_step(...))` definition wraps both acyclic `MLP` and `cyclic` `RNN` predictors in `nodejax` (52 lines, versus a 47-line `RNN`-only raw-JAX baseline), whereas `PyTorch` (92), `Equinox` (96), and `Flax NNX` (104) branch on `hasattr` for carry initialization, `Haiku` (105) nests `hk.transform_with_state` inside `hk.lift`, and all four thread fast weights through the sequence loop by hand.
 - In the `chunk` suite, moving a normalizer's reset boundary from outer run to per-recording is 1 `state_reinit` edit in `nodejax` (65 lines; `Haiku` is 1 rollout-loop edit inside `_recordings` in 83 lines that silently drops on reuse, while its multi-session trainer carries `state0` separately across raw `lax.scan` loops), versus 2 coordinated edits in `PyTorch` (115) and `Flax NNX` (118), 4 in `Flax Linen` (123), and 6 in `Equinox` (118), where omitting one edit silently computes stale statistics.
 - In the `residual` and `lift` suites, `nodejax`'s library transforms (`residual`, 9 lines; `stack`, 41 lines) require zero custom wrapper code at the call site and pass every composition probe. At the framework level, `Flax NNX` wrappers (`Residual`, 6 lines; `LayerStack`, 41 lines) split between `Variable` mutation and `RNNCellBase` carries, while `Equinox` wrappers (`Residual`, 26 lines including its local `WithAux` protocol; `LayerStack`, 42 lines) split between `StatefulLayer` (`StateIndex` fails under `filter_vmap`) and `(successor, output)`; at the wrapper level, because neither framework records per-role `rng` metadata on modules, both `LayerStack` implementations infer stochasticity via `inspect.signature` and fail on `stack(stack(bare))`.
 - In the `mode`, `generics`, `imu`, and `tie` suites, `class` frameworks match `nodejax` on single-network weight tying (`tie` is a five-way capability tie across `nodejax` at 24 lines, `Haiku` at 42, `Flax NNX` at 48, `PyTorch` at 50, and `eqx.nn.Shared` at 61), while requiring in-place flag mutation or manual `eqx.nn.State` threading in `mode` (28 vs. 30–64 lines), 4 to 5 forwarded constructor arguments in `generics` (53 vs. 61–129 lines), and manual stage-init wiring in `Flax NNX` (61 lines) or 4-site topology edits in `Equinox` (70 lines) in `imu` (43 lines in `nodejax`).

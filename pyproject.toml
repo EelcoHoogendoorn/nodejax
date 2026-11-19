@@ -36,12 +36,12 @@ classifiers = [
 ]
 dependencies = [
     "jax>=0.10.0",
-    "optax>=0.2.0",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7", "pytest-xdist", "scikit-learn", "matplotlib"]
-comparisons = ["equinox", "flax", "dm-haiku", "torch", "keras"]
+optax = ["optax>=0.2.0"]
+test = ["optax>=0.2.0", "pytest>=7", "pytest-xdist", "scikit-learn", "matplotlib"]
+comparisons = ["optax>=0.2.0", "equinox", "flax", "dm-haiku", "torch", "keras"]
 
 [project.urls]
 Homepage = "https://github.com/EelcoHoogendoorn/nodejax"

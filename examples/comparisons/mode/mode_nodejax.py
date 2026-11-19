@@ -1,6 +1,6 @@
-"""Train and evaluation mode construction in NodeJAX.
+"""Train and evaluation mode construction in `nodejax`.
 
-NodeJAX represents evaluation as a distinct `PSNode` rather than a mutable flag or call-time boolean. `nn.eval_mode(final)` runs `final.specialize(**{'*.train': False})` so `nn.Dropout` rebuilds as the identity with no `rng` requirement, and freezes `tag='running_stats'` state slots via `tree_freeze` so `nn.BatchNorm` folds its accumulated statistics into constants (`not evaluator.cyclic`).
+`nodejax` represents evaluation as a distinct acyclic `PNode` rather than a mutable flag or call-time boolean. `nn.eval_mode(final)` runs `final.specialize(**{'*.train': False})` so `nn.Dropout` rebuilds as the identity with no `rng` requirement, and freezes `tag='running_stats'` state via `tree_freeze` so `nn.BatchNorm` folds its accumulated statistics into constants (`not evaluator.cyclic`).
 
 Run directly with `python -m examples.comparisons.mode.mode_nodejax`.
 """
@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from nodejax import Node, Struct, batch, nn, tile, train_step, trained, tree_freeze
+from nodejax import Node, PNode, Struct, batch, nn, tile, train_step, trained, tree_freeze
 
 from examples.comparisons.mode.mode_common import (
     CLASSES, HIDDEN, LR, MOMENTUM, RATE, STEPS, make_data, report,
@@ -49,13 +49,13 @@ def main() -> None:
         final.specialize(**{'*.train': False}).bind(final.param, state=final.state),
         tag='running_stats',
     )
-    assert not evaluator.cyclic and evaluator.state == ()
-    _, eval_a = evaluator(xs)
-    _, manual_a = manual(xs)
+    assert type(evaluator) is PNode and not evaluator.cyclic
+    eval_a = evaluator(xs)
+    manual_a = manual(xs)
     assert jnp.allclose(eval_a, manual_a)
 
-    _, eval_b = evaluator(xs)
-    _, solo = evaluator(xs[:16])
+    eval_b = evaluator(xs)
+    solo = evaluator(xs[:16])
     report(
         'nodejax',
         train_stochastic,

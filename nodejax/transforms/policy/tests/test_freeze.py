@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 
 from nodejax import (
-    Node, PSNode, Leaf, nn, Composite, serial, freeze, tree_freeze, tree_filter,
+    Node, PNode, PSNode, Leaf, nn, Composite, serial, freeze, tree_freeze, tree_filter,
     cyclic, detach, tree_detach, map_members,
 )
 from nodejax.struct import Struct
@@ -94,6 +94,11 @@ def test_tree_freeze_partial_drops_only_frozen_slots():
     n_after = len(jax.tree.leaves(after))
     assert 0 < n_after < n_before
 
+    bound_tf = tree_freeze(model.bind(state=state), Struct(ema=state.ema))
+    assert type(bound_tf) is PSNode and bound_tf.cyclic
+    successor, out = bound_tf(X)
+    assert type(successor) is PSNode and out.shape == X.shape
+
 
 def test_tree_freeze_hand_built_sparse_spec():
     # A sparse `Struct` naming only the target member freezes that member directly.
@@ -124,10 +129,9 @@ def test_tree_freeze_pins_state_owned_by_a_transparent_wrapper() -> None:
     assert explicit(push=jnp.asarray(2.0)).value == 7.0
 
     bound = tree_freeze(world.bind(state=state), tag='held')
-    assert type(bound) is PSNode and bound.state == ()
+    assert type(bound) is PNode and not bound.cyclic
     assert bound.param == world.param
-    successor, output = bound(push=jnp.asarray(2.0))
-    assert successor.state == ()
+    output = bound(push=jnp.asarray(2.0))
     assert output.value == 7.0
 
 

@@ -1,6 +1,6 @@
 """State-freezing transforms (`freeze` and `tree_freeze`) for inference and evaluation.
 
-`freeze` converts a cyclic `Node` into a stateless `Node` by evaluating every
+`freeze` converts a cyclic `Node` into an acyclic `Node` by evaluating every
 `apply` call against a fixed `state` tree and discarding the state update.
 `tree_freeze` applies `freeze` selectively across member subtrees addressed
 either by a sparse `Struct` of frozen states or by a semantic `tag` (such as
@@ -48,7 +48,7 @@ def _Freeze(inner: Node, state) -> Node:
 
 @transform(preserves='param')
 def freeze(inner: Node, state) -> Node:
-    """Fixes `inner`'s state at `state`, discards step state updates, and returns a stateless `Node`."""
+    """Fixes `inner`'s state at `state`, discards step state updates, and returns an acyclic `Node`."""
     return _Freeze(inner, state)
 
 
@@ -61,14 +61,16 @@ def tree_freeze(node, frozen: Struct | None = None,
     `frozen` supplies the full state tree (or is read directly from `node.state`
     when `node` is a `PSNode`) and every cyclic member declaring `tag` is
     frozen; when `node` starts as a `PSNode`, the returned view retains any
-    unfrozen state residue as a `PSNode` (or becomes a stateless `PNode` when
+    unfrozen state residue as a `PSNode` (or becomes an acyclic `PNode` when
     no cyclic members remain).
     """
     if node.state_bound:
         rebuilt = tree_freeze(node.node, node.state if frozen is None else frozen,
                               tag=tag)
-        return node.pnode._with_definition(rebuilt._def).bind(
-            state=_state_residue(rebuilt, node.state))
+        bound = node.pnode._with_definition(rebuilt._def)
+        if rebuilt.cyclic:
+            return bound.bind(state=_state_residue(rebuilt, node.state))
+        return bound
     if frozen is None:
         raise TypeError('tree_freeze needs the state to pin: a sparse spec, a '
                         'full state with tag=, or a state-bound node that '

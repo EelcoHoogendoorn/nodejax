@@ -46,8 +46,8 @@ def test_the_ensemble_layer_trains_like_any_layer():
     final, aux = trained(trainer).apply(input=xs, target=jnp.einsum('sbi,oi->sbo', xs, w_true))
 
     assert aux.loss[-1] < 1e-3 * aux.loss[0]
-    from nodejax import PSNode
-    assert isinstance(final, PSNode)
+    from nodejax import PNode
+    assert type(final) is PNode
     assert jnp.allclose(final.param.w, w_true, atol=0.05)
 
 

@@ -179,12 +179,11 @@ def evolve(model: PSNode, fitness: Callable, optimizer: Node | PNode,
         )
         return None, Aux(loss=best)
 
-    def trained(node, state) -> PSNode:
+    def trained(node, state) -> PNode | PSNode:
         """Binds the champion weights from `state.opt.params` onto the model member."""
-        return node.members.model.bind(
-            state.opt.params,
-            state=state.model,
-        )
+        if model.cyclic:
+            return model.node.bind(state.opt.params, state=state.model)
+        return model.node.bind(state.opt.params)
 
     trainer = members(
         apply,
@@ -228,8 +227,8 @@ def test_generations_scan_and_trained_finalizes() -> None:
     done, done_aux = trained(trainer).apply(input=tile(inputs, generations),
                                             target=tile(targets, generations),
                                             rng=scan_key)
-    assert done.state_bound
+    assert type(done) is PNode
     assert jnp.allclose(done_aux.loss, aux.loss)
     assert jax.tree.all(jax.tree.map(jnp.array_equal, done.param, advanced.state.opt.params))
-    _, prediction = done(jnp.asarray(0.5))
+    prediction = done(jnp.asarray(0.5))
     assert prediction.shape == () and jnp.isfinite(prediction)

@@ -133,9 +133,9 @@ def test_a_state_bound_tree_slices_members_with_their_state():
 
 
 def test_the_trainer_slices_to_the_live_model():
-    """Verifies `trainer.trained()` returns a `PSNode` carrying the updated model weights."""
+    """Verifies `trainer.trained()` returns an acyclic `PNode` carrying the updated model weights."""
     import optax
-    from nodejax import PSNode, train_step
+    from nodejax import PNode, train_step
     trainer = train_step(
         nn.Linear(2).with_input(jnp.zeros(3)).parameterize(
             rng=jax.random.PRNGKey(0)).initialize(),
@@ -143,7 +143,7 @@ def test_the_trainer_slices_to_the_live_model():
         optax.sgd(0.1))
     trainer, _ = trainer(input=jnp.ones(3), target=jnp.zeros(2))
     live = trainer.trained()
-    assert type(live) is PSNode
+    assert type(live) is PNode
     assert jnp.allclose(live.param.w, trainer.state.opt.params.model.w)
 
 

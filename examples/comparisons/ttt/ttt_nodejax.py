@@ -84,8 +84,7 @@ def run_variant(variant: str, model: Node, tokens: jax.Array,
 
     trainer = meta.parameterize(rng=jax.random.PRNGKey(0))
     final, aux = trained(trainer).apply(input=tokens, target=tokens)
-    _, preds1 = final(held_out)
-    preds1, _ = split_aux(preds1)
+    preds1, _ = split_aux(final(held_out))
 
     n_weights = sum(leaf.size for leaf in jax.tree.leaves(final.param))
     report(

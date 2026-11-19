@@ -493,14 +493,14 @@ def _build_train_step(objective: Node, opt: Node, trainable: str | Callable | No
                 if current_model.parametric else ())
 
     def trained(node, param, state):
-        """Returns `model` bound to the step's current adapted parameters and live model state."""
+        """Returns `model` bound to adapted parameters (as `PNode` when acyclic, `PSNode` with live state when cyclic)."""
         current_model = node.members.objective.members.model
         model_param = (getattr(objective_params(node, param, state), 'model')
                        if current_model.parametric else ())
-        model_state = (getattr(state.objective, 'model')
-                       if current_model.cyclic else ())
-        return current_model.bind(
-            model_param, state=model_state)
+        if current_model.cyclic:
+            return current_model.bind(
+                model_param, state=getattr(state.objective, 'model'))
+        return current_model.bind(model_param)
 
     return Composite(objective=objective, opt=opt)._roles_with_forms(
         apply_fn,
@@ -519,7 +519,7 @@ def _build_train_step(objective: Node, opt: Node, trainable: str | Callable | No
 
 @node
 def train_step(model: BaseNode, loss_fn: LossFn | BaseNode,
-               tx: optax.GradientTransformation, *,
+               tx: BaseNode | optax.GradientTransformation, *,
                trainable: str | Callable | None = None) -> BaseNode:
     """Composes `model`, `loss_fn`, and optimizer `tx` into a cyclic gradient-update `Node`.
 

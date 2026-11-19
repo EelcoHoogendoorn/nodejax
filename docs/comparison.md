@@ -34,7 +34,7 @@ The [`ttt`](../examples/comparisons/ttt/) benchmark isolates reusable online tes
 | Implementation | Core lines | What reusable `TTT` requires |
 | :--- | ---: | :--- |
 | Raw `JAX` bespoke (`ttt_jax.py`) | 47 | Hand-rolled `RNN`-only `lax.scan` baseline with zero reusable wrapper; switching to `MLP` or another optimizer rewrites the scan body |
-| `nodejax` (`ttt_nodejax.py`) | 53 | One 3-line `ttt_meta(model)` function (`next_step_ttt(train_step(model, xent, learned_sgd(TTT_LR0)))`) wraps both acyclic `MLP` and `cyclic` `RNN` `Node`s with zero protocol branching |
+| `nodejax` (`ttt_nodejax.py`) | 52 | One 3-line `ttt_meta(model)` function (`next_step_ttt(train_step(model, xent, learned_sgd(TTT_LR0)))`) wraps both acyclic `MLP` and `cyclic` `RNN` `Node`s with zero protocol branching |
 | `PyTorch` (`ttt_torch.py`) | 92 | Branches on `hasattr(model, 'init_carry')`, evicts weights out of `nn.Module` into dicts for `functional_call`, mangles `.` into `/` for `ParameterDict` rate keys, abandons `torch.optim` for inner updates, and unrolls time in Python |
 | `Equinox` (`ttt_equinox.py`) | 96 | Branches on `hasattr(model, 'init_carry')` because `eqx.Module` leaves step methods unspecialized, partitions arrays via `eqx.filter` for rates, and threads `(fast, carry, prev)` through `lax.scan` by hand |
 | `Flax NNX` (`ttt_nnx.py`) | 104 | Branches on `hasattr(model, 'initialize_carry')` across NNX's split `Module(x)` vs. `Cell(carry, x)` protocols, clones `self.model` per sequence, subclasses `nnx.Param` (`Rate`) to separate inner and outer parameters, and threads `(carry, prev)` manually |
