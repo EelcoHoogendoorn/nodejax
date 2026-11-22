@@ -167,6 +167,8 @@ class _Member:
             _bind_call(runner._def, args, fields), sequence=True)
 
     def __getattr__(self, name: str):
+        if name.startswith('_'):
+            raise AttributeError(name)
         methods = self._def.methods
         if methods and name in methods:
             return _bind_method(methods[name],
@@ -324,6 +326,8 @@ class _BuildingMember:
             value)
 
     def __getattr__(self, name: str):
+        if name.startswith('_'):
+            raise AttributeError(name)
         methods = self._def.methods
         if methods and name in methods:
             return _bind_method(

@@ -226,3 +226,21 @@ def test_a_member_primed_inside_a_jax_transformation_is_refused():
     program = Composite(a=primed, b=primed)(apply).parameterize()
     with pytest.raises(TypeError, match="member 'a' took its initial state inside"):
         program.initialize(input=Struct(flag=jnp.asarray(True), input=jnp.asarray(1.0)))
+
+
+def test_value_and_grad_on_a_lazy_shape_member():
+    """Passing a wired lazy-shape member directly to `jax.value_and_grad` must survive `inspect` dunder probes."""
+    from nodejax import nn
+
+    def apply(self, input):
+        value, grad = jax.value_and_grad(self.potential)(input)
+        return Struct(value=value, grad=grad)
+
+    potential = nn.Linear(4) >> nn.silu >> nn.Projection()
+    wrapper = Wrapper(potential=potential)(apply).with_input(
+        jnp.zeros((3,)),
+    ).parameterize(rng=jax.random.PRNGKey(0))
+    out = wrapper.apply(jnp.array([1.0, -0.5, 0.25]))
+    assert out.value.shape == ()
+    assert out.grad.shape == (3,)
+    assert jnp.all(jnp.isfinite(out.grad))
