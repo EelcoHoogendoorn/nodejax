@@ -1,4 +1,4 @@
-"""Implements Energy-Based Reasoners (Chen et al., 2026) with `nodejax` transforms.
+"""Implements Energy-Based Reasoners (Chen et al., 2026, https://arxiv.org/abs/2611.08977) with `nodejax` transforms.
 
 Separates four orthogonal choices: the scalar energy model (`energy_model` built as a
 `serial` pipe over a caller-supplied `backbone` and token activation), the single-step
@@ -8,12 +8,13 @@ training regime (`TrainingSegment` for single-trajectory supervision or `SXMSegm
 for state-based explorative modeling over `K` persistent trajectories).
 
 Truncated backpropagation through time (`descent_segment`) is assembled declaratively
-from `tie`, `detach`, `repeat`, `at`, `repeated`, and `remat`: `warmup` runs without
-parameter or carry gradients, `cut` stops gradients on `latent` while leaving `cond`
-live for problem-embedding gradients, and `tail` checkpoints and stacks the final `H`
-latent states under one shared parameter tree. `eval_reasoner` mirrors `reasoner`'s
-parameter layout so inference binds trained weights directly via `.bind(param)` and
-lifts to Best-of-N energy selection with `batch` and `reduce`.
+from `tie`, `detach`, `repeat`, `repeated`, and `remat`: `warmup` runs without
+parameter or carry gradients, `cut` stops gradients on `latent` while recording the
+detached post-warmup state as `cut_latent` and leaving `cond` live for problem-embedding
+gradients, and `tail` checkpoints and stacks the final `H` latent states under one
+shared parameter tree. `tail_reasoner` and `eval_reasoner` mirror `reasoner`'s exact
+parameter layout so tail-anchored SXM replay and inference bind weights directly without
+remapping, while `nn.EMA` tracks exponential-moving-average weights across updates.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ from nodejax import (
     PyTree,
     Struct,
     Wrapper,
-    at,
     batch,
     detach,
     externalize,
@@ -50,6 +50,16 @@ from nodejax import (
     train_step,
     tree_stop_gradient,
 )
+
+
+_MUON_WEIGHT_NAMES = frozenset({
+    'w',
+    'wqkv',
+    'wo',
+    'gate_weight',
+    'value_weight',
+    'output_weight',
+})
 
 
 def rms_project(latent: jax.Array, eps: float = 1e-6) -> jax.Array:
@@ -101,6 +111,30 @@ def convergence_residual(
     return jnp.mean(safe_norm(diffs, eps=eps) / safe_norm(previous, eps=eps), axis=-1)
 
 
+def noisy_solution_latent(
+    key: jax.Array,
+    readout_weight: jax.Array,
+    targets: jax.Array,
+    shape: tuple[int, ...],
+    *,
+    pure_noise_prob: float = 0.5,
+) -> jax.Array:
+    """Mixes `targets` into the readout-decodable subspace of Gaussian noise with a per-row mix level `a ~ U(0, 1)`."""
+    noise_key, mix_key, gate_key = jax.random.split(key, 3)
+    noise = jax.random.normal(noise_key, shape)
+    basis, _ = jnp.linalg.qr(readout_weight)
+    projected = (noise @ basis) @ basis.T
+    one_hot = jax.nn.one_hot(targets, readout_weight.shape[-1])
+    signal = rms_project(one_hot @ readout_weight.T)
+    # Sample mix per graph row (axis 0) so all K candidates of a graph start at the same noise level.
+    row_shape = (shape[0],) + (1,) * (len(shape) - 1)
+    mix = jax.random.uniform(mix_key, row_shape)
+    pure_noise = jax.random.bernoulli(gate_key, pure_noise_prob, row_shape)
+    mix = jnp.where(pure_noise, 0.0, mix)
+    mixed = (noise - projected) + jnp.sqrt(1.0 - jnp.square(mix)) * projected + mix * signal
+    return rms_project(mixed)
+
+
 def lowest_energy(candidates: Struct, axis: int = 0) -> Struct:
     """Selects the candidate record along `axis` with the minimum scalar `energy`."""
     best = jnp.argmin(candidates.energy, axis=axis)
@@ -134,10 +168,112 @@ def select_sxm(
     return best_candidate, best_target, next_used
 
 
-def ebr_block(width: int, heads: int, ratio: int) -> Node:
-    """Assembles a post-norm Transformer block with residual self-attention and SwiGLU."""
+def ebr_muon_optimizer(
+    schedule: float | Callable,
+    *,
+    weight_decay: float = 1e-2,
+    grad_clip: float = 1.0,
+) -> optax.GradientTransformation:
+    """Applies Muon (5 Newton-Schulz steps, RMS 0.2) to hidden segment matrices and AdamW to embeddings, readout, and vectors."""
+    def muon_dims(tree: PyTree) -> PyTree:
+        def classify(path, leaf):
+            keys = [getattr(part, 'name', getattr(part, 'key', '')) for part in path]
+            if (
+                'segment' in keys
+                and keys[-1] in _MUON_WEIGHT_NAMES
+                and leaf.ndim >= 2
+                and min(leaf.shape[-2:]) > 1
+            ):
+                return optax.contrib.MuonDimensionNumbers(reduction_axis=-2, output_axis=-1)
+            return None
+
+        return jax.tree_util.tree_map_with_path(classify, tree)
+
+    return optax.chain(
+        optax.clip_by_global_norm(grad_clip),
+        optax.contrib.muon(
+            learning_rate=schedule,
+            ns_steps=5,
+            beta=0.95,
+            nesterov=True,
+            consistent_rms=0.2,
+            weight_decay=weight_decay,
+            adam_b1=0.9,
+            adam_b2=0.95,
+            adam_weight_decay=weight_decay,
+            muon_weight_dimension_numbers=muon_dims,
+        ),
+    )
+
+
+def _rotate_half(tensor: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
+    even = tensor[..., 0::2]
+    odd = tensor[..., 1::2]
+    rotated_even = even * cos - odd * sin
+    rotated_odd = even * sin + odd * cos
+    return jnp.stack((rotated_even, rotated_odd), axis=-1).reshape(tensor.shape)
+
+
+def _rope_2d_tables(
+    grid_shape: tuple[int, int],
+    head_dim: int,
+    base: float = 10000.0,
+) -> tuple[jax.Array, jax.Array]:
+    if head_dim % 4 != 0:
+        raise ValueError(f'2D RoPE requires head_dim divisible by 4, got {head_dim}')
+    rows, cols = grid_shape
+    quarter = head_dim // 4
+    inv_freq = 1.0 / (base ** (jnp.arange(0, quarter, dtype=jnp.float32) / quarter))
+    row_coords = jnp.repeat(jnp.arange(rows, dtype=jnp.float32), cols)
+    col_coords = jnp.tile(jnp.arange(cols, dtype=jnp.float32), rows)
+    row_angles = row_coords[:, None] * inv_freq[None, :]
+    col_angles = col_coords[:, None] * inv_freq[None, :]
+    angles = jnp.concatenate((row_angles, col_angles), axis=-1)
+    return jnp.cos(angles)[:, None, :], jnp.sin(angles)[:, None, :]
+
+
+@node
+def TemperedAttention(
+    heads: int,
+    grid_shape: tuple[int, int] | None = None,
+) -> Node:
+    """Computes multi-head self-attention with a learned log-space per-head temperature and optional 2D RoPE."""
+    def param(node, rng) -> Struct:
+        width = node.input.shape[-1]
+        if width % heads:
+            raise ValueError(f'tempered_attention: width {width} not divisible by {heads} heads')
+        return Struct(
+            wqkv=jax.random.normal(rng.next(), (width, 3 * width)) / jnp.sqrt(width),
+            wo=jax.random.normal(rng.next(), (width, width)) / jnp.sqrt(width),
+            log_temp=jnp.zeros((heads,)),
+        )
+
+    def apply(param, input) -> jax.Array:
+        dim = input.shape[-1] // heads
+        qkv = (input @ param.wqkv).reshape(*input.shape[:-1], 3, heads, dim)
+        queries, keys, values = jnp.unstack(qkv, axis=-3)
+        if grid_shape is not None:
+            cos, sin = _rope_2d_tables(grid_shape, dim)
+            queries = _rotate_half(queries, cos, sin)
+            keys = _rotate_half(keys, cos, sin)
+        scale = jnp.exp(param.log_temp)[:, None, None] / jnp.sqrt(dim)
+        logits = jnp.einsum('qhd,khd->hqk', queries, keys) * scale
+        mixed = jnp.einsum('hqk,khd->qhd', jax.nn.softmax(logits, axis=-1), values)
+        return mixed.reshape(input.shape) @ param.wo
+
+    return Leaf(apply, param=param)
+
+
+def ebr_block(
+    width: int,
+    heads: int,
+    ratio: int,
+    *,
+    grid_shape: tuple[int, int] | None = None,
+) -> Node:
+    """Assembles a post-norm Transformer block with tempered self-attention and SwiGLU."""
     return serial(
-        attn=residual(nn.Attention(heads)) >> nn.RMSNorm(),
+        attn=residual(TemperedAttention(heads, grid_shape=grid_shape)) >> nn.RMSNorm(),
         mlp=residual(nn.SwiGLU(width, ratio)) >> nn.RMSNorm(),
     )
 
@@ -157,15 +293,12 @@ def energy_model(
 
 @node
 def EnergyStep(potential: BaseNode) -> Node | PNode:
-    """Applies one projected Langevin descent step on `potential(noisy + input.cond)` and sows `energy` and `grad_norm`."""
+    """Applies one projected Langevin descent step on `potential(noisy + input.cond)` and emits `energy` and `grad_norm` via `Aux`."""
     def apply(self, input, rng) -> tuple[Struct, Aux]:
         noisy = rms_project(input.latent) + input.noise * jax.random.normal(
             rng.next(), input.latent.shape,
         )
-        # Lambda avoids `inspect` dunder probes on the lazy-shape member proxy before first call.
-        energy, grad = jax.value_and_grad(lambda tokens: self.potential(tokens))(
-            noisy + input.cond,
-        )
+        energy, grad = jax.value_and_grad(self.potential)(noisy + input.cond)
         next_latent = rms_project(noisy - input.alpha * grad)
         return input.replace(latent=next_latent), Aux(
             energy=energy,
@@ -222,9 +355,7 @@ def Decode(readout: BaseNode) -> Node | PNode:
 def EvalCheck(potential: BaseNode, *, tau: float) -> Node | PNode:
     """Evaluates clean endpoint energy and tangent gradient norm, zero-masking `input.active` once `grad_norm < tau`."""
     def apply(self, input) -> Struct:
-        energy, grad = jax.value_and_grad(lambda tokens: self.potential(tokens))(
-            input.latent + input.cond,
-        )
+        energy, grad = jax.value_and_grad(self.potential)(input.latent + input.cond)
         grad_norm = tangent_grad_norm(input.latent, grad)
         next_active = input.active * (grad_norm >= tau).astype(input.active.dtype)
         return input.replace(active=next_active, energy=energy, grad_norm=grad_norm)
@@ -232,9 +363,12 @@ def EvalCheck(potential: BaseNode, *, tau: float) -> Node | PNode:
     return Wrapper(potential=potential)(apply)
 
 
-stop_latent = at(
-    Leaf(lambda input: tree_stop_gradient(input), name='stop_grad'),
-    'latent',
+cut_latent = Leaf(
+    lambda input: input.replace(
+        latent=tree_stop_gradient(input.latent),
+        cut_latent=tree_stop_gradient(input.latent),
+    ),
+    name='cut',
 )
 
 
@@ -243,7 +377,7 @@ def descent_segment(step: BaseNode, *, warmup: int, tail: int) -> Node:
     return tie(
         serial(
             warmup=detach(repeat(step, n=warmup)),
-            cut=stop_latent,
+            cut=cut_latent,
             tail=repeated(remat(step), n=tail),
         ),
         'tail',
@@ -263,6 +397,21 @@ def reasoner(
     return serial(
         encode=Encode(embed),
         segment=descent_segment(step, warmup=warmup, tail=tail),
+        decode=Decode(batch(readout, n=tail)),
+    )
+
+
+def tail_reasoner(
+    embed: BaseNode,
+    step: BaseNode,
+    readout: BaseNode,
+    *,
+    tail: int,
+) -> Node:
+    """Assembles the `tail`-only differentiated replay model with the exact same parameter layout as `reasoner`."""
+    return serial(
+        encode=Encode(embed),
+        segment=serial(tail=repeated(remat(step), n=tail)),
         decode=Decode(batch(readout, n=tail)),
     )
 
@@ -352,10 +501,13 @@ def ebr_loss(
 
 
 @node
-def TrainingSegment(trainer: BaseNode, *, delta: float) -> Node:
-    """Advances `trainer` on one segment, carries detached final `latent`, and zero-masks converged rows."""
+def TrainingSegment(trainer: BaseNode, ema: BaseNode, *, delta: float) -> Node:
+    """Advances `trainer` on one segment, updates `ema`, carries detached final `latent`, and zero-masks converged rows."""
+    members = Composite(trainer=trainer, ema=ema)
+
     def apply(self, input) -> tuple[Struct, Aux]:
         trajectory = self.trainer(input=input.state, target=input.target)
+        self.ema(self.trainer.params())
         residual_val = convergence_residual(trajectory.latent)
         next_active = input.state.active * (residual_val >= delta).astype(
             input.state.active.dtype,
@@ -369,12 +521,23 @@ def TrainingSegment(trainer: BaseNode, *, delta: float) -> Node:
             active_frac=jnp.mean(next_active),
         )
 
-    return Wrapper(trainer=trainer)(apply)
+    def init(self) -> None:
+        self.ema.reset(input=self.trainer.params())
+
+    return members(apply, init=init)
 
 
 @node
-def SXMSegment(explorer: BaseNode, trainer: BaseNode, *, delta: float) -> Node:
-    """Explores `K` detached trajectories via `explorer`, trains `trainer` on the best `(candidate, target)` pair, and carries all `K` endpoints."""
+def SXMSegment(
+    explorer: BaseNode,
+    trainer: BaseNode,
+    ema: BaseNode,
+    *,
+    delta: float,
+) -> Node:
+    """Explores `K` detached trajectories via `explorer`, replays the best candidate's tail in `trainer`, updates `ema`, and carries all `K` endpoints."""
+    members = Composite(explorer=explorer, trainer=trainer, ema=ema)
+
     def apply(self, input) -> tuple[Struct, Aux]:
         candidates = self.explorer(
             input=input.state,
@@ -387,14 +550,17 @@ def SXMSegment(explorer: BaseNode, trainer: BaseNode, *, delta: float) -> Node:
             input.used,
         )
         row_indices = jnp.arange(best_candidate.shape[0])
-        selected_start = jax.tree.map(
+        # Anchor gradient replay at the detached post-warmup latent rather than re-running warmup.
+        cut_latents = tree_stop_gradient(candidates.cut_latent[:, :, 0])
+        selected_cut = jax.tree.map(
             lambda leaf: leaf[row_indices, best_candidate],
-            input.state,
+            input.state.replace(latent=cut_latents),
         )
         self.trainer(
-            input=selected_start,
+            input=selected_cut,
             target=input.targets[row_indices, best_target],
         )
+        self.ema(self.trainer.params())
         residual_val = convergence_residual(candidates.latent)
         next_active = input.state.active * (residual_val >= delta).astype(
             input.state.active.dtype,
@@ -408,7 +574,10 @@ def SXMSegment(explorer: BaseNode, trainer: BaseNode, *, delta: float) -> Node:
             active_frac=jnp.mean(next_active),
         )
 
-    return Composite(explorer=explorer, trainer=trainer)(apply)
+    def init(self) -> None:
+        self.ema.reset(input=self.trainer.params())
+
+    return members(apply, init=init)
 
 
 def ebr_episode(
@@ -420,19 +589,24 @@ def ebr_episode(
     batch_size: int,
     segments: int,
     delta: float,
+    ema_decay: float = 0.995,
 ) -> Node:
-    """Assembles a multi-segment single-trajectory training episode from a per-sample `model`."""
+    """Assembles a multi-segment single-trajectory training episode with EMA parameter tracking."""
     batched_sample = jax.tree.map(
         lambda leaf: jnp.broadcast_to(leaf, (batch_size,) + leaf.shape),
         sample_state,
     )
     batched_model = batch(model, n=batch_size).with_input(batched_sample)
     trainer = train_step(batched_model, loss_fn, optimizer)
-    return repeat(TrainingSegment(trainer, delta=delta), n=segments)
+    return repeat(
+        TrainingSegment(trainer, nn.EMA(tau=ema_decay, warm=True), delta=delta),
+        n=segments,
+    )
 
 
 def sxm_episode(
-    model: Node,
+    explore_model: Node,
+    replay_model: Node,
     sample_state: PyTree,
     *,
     loss_fn: Callable,
@@ -441,16 +615,20 @@ def sxm_episode(
     n_candidates: int,
     segments: int,
     delta: float,
+    ema_decay: float = 0.995,
 ) -> Node:
-    """Assembles a multi-segment SXM training episode sharing one parameter tree between `explorer` and `trainer`."""
+    """Assembles a multi-segment tail-anchored SXM episode sharing one parameter tree between `explorer` and `trainer`."""
     batched_sample = jax.tree.map(
         lambda leaf: jnp.broadcast_to(leaf, (batch_size,) + leaf.shape),
         sample_state,
     )
-    batched_model = batch(model, n=batch_size).with_input(batched_sample)
-    trainer = train_step(batched_model, loss_fn, optimizer)
+    batched_replay = batch(replay_model, n=batch_size).with_input(batched_sample)
+    trainer = train_step(batched_replay, loss_fn, optimizer)
     explorer = externalize(
-        batch(batch(model, n=n_candidates), n=batch_size),
+        batch(batch(explore_model, n=n_candidates), n=batch_size),
         field='weights',
     )
-    return repeat(SXMSegment(explorer, trainer, delta=delta), n=segments)
+    return repeat(
+        SXMSegment(explorer, trainer, nn.EMA(tau=ema_decay, warm=True), delta=delta),
+        n=segments,
+    )

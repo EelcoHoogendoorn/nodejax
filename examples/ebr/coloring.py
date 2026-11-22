@@ -4,11 +4,13 @@ Each graph instance supplies one token per vertex carrying its adjacency row tog
 with a one-hot indicator for one pinned seed vertex, and pairs that input with up to
 `max_solutions` enumerated valid colorings. Because every k-colorable graph admits
 multiple valid completions, the task exercises single-trajectory energy descent
-(`ebr`), state-based explorative modeling (`sxm`), direct looped recurrence (`direct`),
-zero-masked halting, and energy-ranked Best-of-N selection under one shared assembly.
+(`ebr`), tail-anchored state-based explorative modeling (`sxm`), direct looped
+recurrence (`direct`), shared-per-puzzle noisy solution initialization, EMA evaluation
+weights, zero-masked halting, and energy-ranked Best-of-N selection under one shared
+assembly.
 
 `CPU_CONFIG` solves 5-vertex 3-coloring on a laptop CPU in seconds, while `GPU_CONFIG`
-scales the exact same composition to 8-vertex 3-coloring for a single GPU.
+(8-vertex) and `GPU10_CONFIG` (10-vertex) scale the same composition to a single GPU.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from nodejax import (
     node,
     split_aux,
     stack,
+    tree_stop_gradient,
 )
 from examples.ebr.core import (
     DirectStep,
@@ -42,12 +45,15 @@ from examples.ebr.core import (
     ebr_block,
     ebr_episode,
     ebr_loss,
+    ebr_muon_optimizer,
     energy_model,
     eval_direct_reasoner,
     eval_reasoner,
+    noisy_solution_latent,
     reasoner,
     rms_project,
     sxm_episode,
+    tail_reasoner,
 )
 
 
@@ -74,10 +80,13 @@ CPU_CONFIG = Struct(
     alpha_max=1.8,
     eval_alpha=1.5,
     noise=0.05,
+    pure_noise_prob=1.0,
     delta=0.12,
     kappa=0.05,
     conv_weight=0.1,
     tau=0.2,
+    ema_decay=0.99,
+    optimizer='adamw',
     learning_rate=2e-3,
     weight_decay=1e-3,
     eval_samples=8,
@@ -101,18 +110,28 @@ GPU_CONFIG = Struct(
     eval_segments=4,
     n_candidates=2,
     batch_size=256,
-    rounds=2400,
-    alpha_min=5.0,
-    alpha_max=8.0,
-    eval_alpha=6.5,
-    noise=0.05,
-    delta=0.2,
+    rounds=1500,
+    alpha_min=180.0,
+    alpha_max=240.0,
+    eval_alpha=220.0,
+    noise=0.3,
+    pure_noise_prob=1.0,
+    delta=0.25,
     kappa=0.05,
     conv_weight=0.25,
-    tau=0.5,
-    learning_rate=4e-4,
+    tau=0.2,
+    ema_decay=0.995,
+    optimizer='muon',
+    learning_rate=1e-3,
     weight_decay=1e-2,
     eval_samples=20,
+)
+
+GPU10_CONFIG = GPU_CONFIG.replace(
+    vertices=10,
+    edge_prob=0.50,
+    max_solutions=24,
+    rounds=1800,
 )
 
 
@@ -248,7 +267,6 @@ def solution_coverage(
     valid_mask: jax.Array,
 ) -> jax.Array:
     """Computes Cov@N (fraction of distinct valid solutions recovered across `N` samples, capped by `N`)."""
-    # predictions: (graphs, samples, vertices), targets: (graphs, max_solutions, vertices)
     matches = jnp.all(
         predictions[:, :, None, :] == targets[:, None, :, :],
         axis=-1,
@@ -295,13 +313,20 @@ def SingleTrajectoryRound(
 ) -> Node:
     """Draws one minibatch of graphs and initial latents and advances a single-trajectory `episode`."""
     num_graphs = dataset.features.shape[0]
+    latent_shape = (config.batch_size, config.vertices, config.width)
 
     def apply(self, tick, rng) -> Struct:
         del tick
         index_key, latent_key, alpha_key = jax.random.split(rng.next(), 3)
         indices = jax.random.randint(index_key, (config.batch_size,), 0, num_graphs)
-        latent = rms_project(
-            jax.random.normal(latent_key, (config.batch_size, config.vertices, config.width)),
+        targets = dataset.targets[indices, 0]
+        readout_weight = tree_stop_gradient(self.episode.layer.trainer.params().decode.w)
+        latent = noisy_solution_latent(
+            latent_key,
+            readout_weight,
+            targets,
+            latent_shape,
+            pure_noise_prob=config.pure_noise_prob,
         )
         alpha = jax.random.uniform(
             alpha_key,
@@ -316,7 +341,7 @@ def SingleTrajectoryRound(
             noise=jnp.full((config.batch_size,), config.noise, dtype=jnp.float32),
             active=jnp.ones((config.batch_size,), dtype=jnp.float32),
         )
-        return self.episode(Struct(state=state, target=dataset.targets[indices, 0]))
+        return self.episode(Struct(state=state, target=targets))
 
     return Wrapper(episode=episode)(apply)
 
@@ -331,16 +356,21 @@ def ExplorativeRound(
     num_graphs = dataset.features.shape[0]
     feature_width = dataset.features.shape[-1]
     batch_shape = (config.batch_size, config.n_candidates)
+    latent_shape = batch_shape + (config.vertices, config.width)
 
     def apply(self, tick, rng) -> Struct:
         del tick
         index_key, latent_key, alpha_key = jax.random.split(rng.next(), 3)
         indices = jax.random.randint(index_key, (config.batch_size,), 0, num_graphs)
-        latent = rms_project(
-            jax.random.normal(
-                latent_key,
-                batch_shape + (config.vertices, config.width),
-            ),
+        # Seed each candidate from a distinct valid solution at a shared per-row noise level.
+        seed_targets = dataset.targets[indices, :config.n_candidates]
+        readout_weight = tree_stop_gradient(self.episode.layer.trainer.params().decode.w)
+        latent = noisy_solution_latent(
+            latent_key,
+            readout_weight,
+            seed_targets,
+            latent_shape,
+            pure_noise_prob=config.pure_noise_prob,
         )
         alpha = jax.random.uniform(
             alpha_key,
@@ -369,6 +399,26 @@ def ExplorativeRound(
     return Wrapper(episode=episode)(apply)
 
 
+def _build_optimizer(config: Struct) -> optax.GradientTransformation:
+    total_updates = max(config.rounds * config.segments, 2)
+    warmup_updates = min(100, total_updates // 4)
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=config.learning_rate * 0.1,
+        peak_value=config.learning_rate,
+        warmup_steps=warmup_updates,
+        decay_steps=total_updates,
+        end_value=config.learning_rate * 0.1,
+    )
+    if config.optimizer == 'muon':
+        return ebr_muon_optimizer(schedule, weight_decay=config.weight_decay)
+    if config.optimizer == 'adamw':
+        return optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adamw(schedule, b1=0.9, b2=0.95, weight_decay=config.weight_decay),
+        )
+    raise ValueError(f"optimizer must be 'muon' or 'adamw', got {config.optimizer!r}")
+
+
 def coloring_program(
     components: Struct,
     train_split: Struct,
@@ -385,7 +435,7 @@ def coloring_program(
         if mode == 'direct'
         else Masked(EnergyStep(components.potential))
     )
-    model = reasoner(
+    explore_model = reasoner(
         components.embed,
         step,
         components.readout,
@@ -393,19 +443,7 @@ def coloring_program(
         tail=config.tail,
     )
     sample_state = sample_coloring_state(config, train_split.features[0])
-    total_updates = max(config.rounds * config.segments, 2)
-    warmup_updates = min(40, total_updates // 2)
-    schedule = optax.warmup_cosine_decay_schedule(
-        init_value=config.learning_rate * 0.1,
-        peak_value=config.learning_rate,
-        warmup_steps=warmup_updates,
-        decay_steps=total_updates,
-        end_value=config.learning_rate * 0.1,
-    )
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adamw(schedule, b1=0.9, b2=0.95, weight_decay=config.weight_decay),
-    )
+    optimizer = _build_optimizer(config)
     loss_fn = ebr_loss(
         delta=config.delta,
         kappa=config.kappa,
@@ -413,8 +451,15 @@ def coloring_program(
     )
 
     if mode == 'sxm':
+        replay_model = tail_reasoner(
+            components.embed,
+            step,
+            components.readout,
+            tail=config.tail,
+        )
         episode = sxm_episode(
-            model,
+            explore_model,
+            replay_model,
             sample_state,
             loss_fn=loss_fn,
             optimizer=optimizer,
@@ -422,17 +467,19 @@ def coloring_program(
             n_candidates=config.n_candidates,
             segments=config.segments,
             delta=config.delta,
+            ema_decay=config.ema_decay,
         )
         round_step = ExplorativeRound(episode, train_split, config)
     else:
         episode = ebr_episode(
-            model,
+            explore_model,
             sample_state,
             loss_fn=loss_fn,
             optimizer=optimizer,
             batch_size=config.batch_size,
             segments=config.segments,
             delta=config.delta,
+            ema_decay=config.ema_decay,
         )
         round_step = SingleTrajectoryRound(episode, train_split, config)
 
@@ -446,7 +493,7 @@ def train_coloring(
     mode: str = 'sxm',
     seed: int = 0,
 ) -> Struct:
-    """Runs `coloring_program` in one JIT-compiled call and returns the trained `param`, `components`, and loss history."""
+    """Runs `coloring_program` in one JIT-compiled call and returns EMA `param`, `raw_param`, `components`, and history."""
     components = coloring_components(config)
     program = coloring_program(components, train_split, config, mode=mode)
     parameter_key = jax.random.fold_in(jax.random.PRNGKey(0), seed)
@@ -456,13 +503,14 @@ def train_coloring(
     final_round, aux = split_aux(
         jax.jit(bound.apply)(jnp.arange(config.rounds), rng=training_key),
     )
-    trained_param = final_round.episode.layer.trainer.trained().sample.param
-    segment_losses = aux.trainer.loss if mode == 'sxm' else aux.loss
+    raw_param = final_round.episode.layer.trainer.trained().sample.param
+    ema_param = final_round.episode.layer.ema.state
     return Struct(
-        param=trained_param,
+        param=ema_param,
+        raw_param=raw_param,
         components=components,
         history=Struct(
-            loss=jnp.mean(segment_losses, axis=-1),
+            loss=jnp.mean(aux.trainer.loss, axis=-1),
             residual=aux.residual[:, -1],
             active_frac=aux.active_frac[:, -1],
         ),
@@ -572,17 +620,21 @@ def evaluate_coloring(
 
 
 def main() -> None:
-    """Trains and evaluates Graph k-Coloring at `cpu` or `gpu` scale."""
+    """Trains and evaluates Graph k-Coloring at `cpu`, `gpu`, or `gpu10` scale."""
     parser = argparse.ArgumentParser(description='Train an Energy-Based Reasoner on Graph k-Coloring.')
-    parser.add_argument('--scale', choices=('cpu', 'gpu'), default='cpu')
+    parser.add_argument('--scale', choices=('cpu', 'gpu', 'gpu10'), default='cpu')
     parser.add_argument('--mode', choices=('sxm', 'ebr', 'direct'), default='sxm')
+    parser.add_argument('--optimizer', choices=('muon', 'adamw'), default=None)
     parser.add_argument('--rounds', type=int, default=None)
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
 
-    config = CPU_CONFIG if args.scale == 'cpu' else GPU_CONFIG
+    configs = {'cpu': CPU_CONFIG, 'gpu': GPU_CONFIG, 'gpu10': GPU10_CONFIG}
+    config = configs[args.scale]
     if args.rounds is not None:
         config = config.replace(rounds=args.rounds)
+    if args.optimizer is not None:
+        config = config.replace(optimizer=args.optimizer)
 
     dataset = make_coloring_dataset(
         config.train_graphs + config.test_graphs,
@@ -608,7 +660,7 @@ def main() -> None:
         seed=args.seed + 101,
     )
     print(
-        f'[{args.scale}/{args.mode}] {config.rounds} rounds in {elapsed:.1f}s | '
+        f'[{args.scale}/{args.mode}/{config.optimizer}] {config.rounds} rounds in {elapsed:.1f}s | '
         f'loss {float(outcome.history.loss[0]):.3f} -> {float(outcome.history.loss[-1]):.3f}',
     )
     print(

@@ -1,4 +1,4 @@
-"""Verifies Energy-Based Reasoner composition, truncated BPTT, zero-mask halting, SXM, and Graph k-Coloring."""
+"""Verifies Energy-Based Reasoner composition, truncated BPTT, zero-mask halting, SXM, Graph Coloring, and Mazes."""
 
 from __future__ import annotations
 
@@ -25,12 +25,15 @@ from examples.ebr import (
     best_of_n,
     ebr_block,
     ebr_loss,
+    ebr_muon_optimizer,
     energy_model,
     eval_reasoner,
+    noisy_solution_latent,
     reasoner,
     rms_project,
     select_sxm,
     stablemax_xent,
+    tail_reasoner,
 )
 from examples.ebr.coloring import (
     CPU_CONFIG,
@@ -39,11 +42,24 @@ from examples.ebr.coloring import (
     split_dataset,
     train_coloring,
 )
+from examples.ebr.maze import (
+    MAZE_CPU_CONFIG,
+    evaluate_maze,
+    make_maze_dataset,
+    split_maze_dataset,
+    train_maze,
+)
 
 
 WIDTH, HEADS, RATIO, DEPTH = 8, 2, 2, 1
 TOKENS, FEATURE_DIM, CLASSES = 4, 8, 3
 WARMUP, TAIL = 2, 3
+
+
+@pytest.fixture(autouse=True)
+def _release_xla_cache():
+    yield
+    jax.clear_caches()
 
 
 def _tiny_components(activation=nn.identity) -> Struct:
@@ -88,7 +104,7 @@ def test_energy_model_activation_polymorphism() -> None:
 
 
 def test_descent_segment_ties_weights_and_truncates_bptt_exactly() -> None:
-    """Verifies single-copy parameter tying and bit-exact gradient isolation across the warmup/tail boundary."""
+    """Verifies single-copy parameter tying, `tail_reasoner` layout parity, and bit-exact BPTT truncation."""
     components = _tiny_components(activation=nn.softplus)
     step = Masked(EnergyStep(components.potential))
     model = reasoner(
@@ -98,9 +114,17 @@ def test_descent_segment_ties_weights_and_truncates_bptt_exactly() -> None:
         warmup=WARMUP,
         tail=TAIL,
     )
+    replay = tail_reasoner(
+        components.embed,
+        step,
+        components.readout,
+        tail=TAIL,
+    )
     state = _tiny_state(noise=0.0)
     bound = model.with_input(state).parameterize(rng=jax.random.PRNGKey(0))
+    replay_bound = replay.with_input(state).parameterize(rng=jax.random.PRNGKey(0))
     assert list(bound.param.segment.__keys__) == ['tail']
+    assert jax.tree.structure(bound.param) == jax.tree.structure(replay_bound.param)
 
     target = jnp.arange(TOKENS) % CLASSES
 
@@ -202,7 +226,6 @@ def test_eval_reasoner_binds_directly_halts_and_selects_lowest_energy() -> None:
     state = _tiny_state()
     bound = train_model.with_input(state).parameterize(rng=jax.random.PRNGKey(0))
 
-    # A very large `tau` halts trajectories immediately after the first segment.
     halting_solver = eval_reasoner(
         components.embed,
         components.potential,
@@ -246,12 +269,40 @@ def test_stablemax_xent_gradient_is_finite_at_one() -> None:
     assert jnp.all(jnp.isfinite(grad))
 
 
+def test_noisy_solution_latent_and_muon_optimizer() -> None:
+    """Verifies unit-RMS noisy solution projection and Muon/AdamW parameter routing on an EBR tree."""
+    components = _tiny_components()
+    model = reasoner(
+        components.embed,
+        Masked(EnergyStep(components.potential)),
+        components.readout,
+        warmup=1,
+        tail=2,
+    )
+    bound = model.with_input(_tiny_state()).parameterize(rng=jax.random.PRNGKey(0))
+    targets = jnp.zeros((2, 2, TOKENS), dtype=jnp.int32)
+    latents = noisy_solution_latent(
+        jax.random.PRNGKey(3),
+        bound.param.decode.w,
+        targets,
+        (2, 2, TOKENS, WIDTH),
+        pure_noise_prob=0.5,
+    )
+    assert latents.shape == (2, 2, TOKENS, WIDTH)
+    rms = jnp.sqrt(jnp.mean(jnp.square(latents), axis=-1))
+    assert jnp.allclose(rms, 1.0, atol=1e-3)
+
+    tx = ebr_muon_optimizer(1e-3, weight_decay=1e-2)
+    opt_state = tx.init(bound.param)
+    grads = jax.tree.map(lambda leaf: jnp.ones_like(leaf) * 1e-2, bound.param)
+    updates, _ = tx.update(grads, opt_state, bound.param)
+    assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves(updates))
+
+
 def test_select_sxm_defers_used_solutions_until_threshold() -> None:
     """Verifies that `select_sxm` masks invalid targets and avoids reusing solutions until 75% coverage."""
-    # One graph, 2 candidates, 4 targets (3 valid, 1 padded invalid).
     targets = jnp.array([[[0, 0], [1, 1], [2, 2], [0, 0]]], dtype=jnp.int32)
     valid_mask = jnp.array([[True, True, True, False]])
-    # Candidate 0 prefers target 0; candidate 1 prefers target 1.
     end_logits = jnp.array([[[
         [5.0, 0.0, 0.0],
         [5.0, 0.0, 0.0],
@@ -261,25 +312,26 @@ def test_select_sxm_defers_used_solutions_until_threshold() -> None:
     ]]], dtype=jnp.float32)
 
     used_none = jnp.zeros((1, 4), dtype=jnp.bool_)
-    cand_first, targ_first, used_one = select_sxm(end_logits, targets, valid_mask, used_none)
+    _, targ_first, used_one = select_sxm(end_logits, targets, valid_mask, used_none)
     assert int(targ_first[0]) in (0, 1)
     assert bool(used_one[0, int(targ_first[0])])
 
-    # With target 0 already used (1/3 < 0.75), target 0 is deferred in favor of target 1.
     used_zero = jnp.array([[True, False, False, False]])
     cand_second, targ_second, _ = select_sxm(end_logits, targets, valid_mask, used_zero)
     assert int(cand_second[0]) == 1
     assert int(targ_second[0]) == 1
 
-    # Once all 3 valid targets are used (3/3 >= 0.75), targets unlock while the invalid entry stays masked.
     used_all_valid = jnp.array([[True, True, True, False]])
     _, targ_reused, _ = select_sxm(end_logits, targets, valid_mask, used_all_valid)
     assert int(targ_reused[0]) in (0, 1, 2)
 
 
-@pytest.mark.parametrize('mode', ('sxm', 'ebr', 'direct'))
-def test_coloring_trains_and_evaluates_across_modes(mode: str) -> None:
-    """Verifies end-to-end Graph 3-Coloring training (`carried`) and evaluation across `sxm`, `ebr`, and `direct`."""
+@pytest.mark.parametrize(
+    ('mode', 'optimizer'),
+    (('sxm', 'muon'), ('ebr', 'adamw'), ('direct', 'adamw')),
+)
+def test_coloring_trains_and_evaluates_across_modes(mode: str, optimizer: str) -> None:
+    """Verifies end-to-end Graph 3-Coloring training (`carried` + `EMA`) and evaluation across `sxm`, `ebr`, and `direct`."""
     config = CPU_CONFIG.replace(
         train_graphs=8,
         test_graphs=4,
@@ -294,6 +346,7 @@ def test_coloring_trains_and_evaluates_across_modes(mode: str) -> None:
         batch_size=4,
         rounds=2,
         eval_samples=2,
+        optimizer=optimizer,
     )
     dataset = make_coloring_dataset(
         config.train_graphs + config.test_graphs,
@@ -323,3 +376,49 @@ def test_coloring_trains_and_evaluates_across_modes(mode: str) -> None:
     assert 0.0 <= float(metrics.coverage) <= 1.0
     if mode != 'direct':
         assert jnp.isfinite(metrics.valid_energy) or jnp.isfinite(metrics.invalid_energy)
+
+
+@pytest.mark.parametrize('mode', ('ebr', 'direct'))
+def test_maze_trains_and_evaluates_with_softplus_energy(mode: str) -> None:
+    """Verifies Shortest-Path Maze generation, `nn.softplus` energy training, and BFS path evaluation."""
+    config = MAZE_CPU_CONFIG.replace(
+        side=5,
+        min_distance=4,
+        train_mazes=8,
+        test_mazes=4,
+        width=8,
+        heads=2,
+        depth=1,
+        warmup=1,
+        tail=3,
+        segments=2,
+        eval_steps=2,
+        eval_segments=2,
+        batch_size=4,
+        rounds=2,
+        eval_samples=2,
+    )
+    dataset = make_maze_dataset(
+        config.train_mazes + config.test_mazes,
+        config.side,
+        loop_prob=config.loop_prob,
+        min_distance=config.min_distance,
+        seed=0,
+    )
+    train_split, test_split = split_maze_dataset(dataset, config.train_mazes)
+
+    outcome = train_maze(config, train_split, mode=mode, activation=nn.softplus, seed=0)
+    assert outcome.history.loss.shape == (config.rounds,)
+    assert jnp.all(jnp.isfinite(outcome.history.loss))
+
+    metrics = evaluate_maze(
+        outcome.param,
+        outcome.components,
+        test_split,
+        config,
+        mode=mode,
+        seed=101,
+    )
+    assert 0.0 <= float(metrics.pass_at_1) <= 1.0
+    assert 0.0 <= float(metrics.best_of_n) <= 1.0
+    assert 0.0 <= float(metrics.valid_path) <= 1.0
